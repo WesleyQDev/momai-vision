@@ -1,3 +1,26 @@
+---
+name: MomAI Vision
+description: Olhos para a MomAI: snapshots de câmeras, monitoramento e alertas 100% locais.
+author: WesleyQDev
+version: 1.0.0
+icon: 👁️
+tags:
+  - vision
+  - camera
+  - monitoring
+permissions:
+  - camera
+  - network
+intents:
+  - "o que você vê aí"
+  - "tirar snapshot"
+  - "me avise quando"
+  - "monitorar"
+  - "vigiar"
+  - "câmera"
+  - "movimento"
+---
+
 # MomAI Vision
 
 A MomAI Vision dá olhos à MomAI: snapshots de câmeras (webcam + IP/MJPEG),
