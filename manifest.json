@@ -1,0 +1,72 @@
+{
+  "id": "momai-vision",
+  "name": "MomAI Vision",
+  "version": "1.0.0",
+  "description": "Olhos para a MomAI: snapshots de câmeras, monitoramento e alertas 100% locais.",
+  "author": "MomAI",
+  "icon": "👁️",
+  "momai_compat": ">=1.7.0",
+  "sdkVersion": 1,
+  "background": true,
+  "backgroundScript": "runtime.js",
+  "permissions": ["camera", "network"],
+  "ui": {
+    "page": "dist/page.js",
+    "pageType": "dashboard",
+    "panel": "dist/panel.js",
+    "panelType": "extension-panel"
+  },
+  "eventTypes": [
+    "vision_alert",
+    "vision_status",
+    "vision_detections",
+    "open_overlay",
+    "close_overlay"
+  ],
+  "routes": [
+    { "method": "POST", "path": "/frame", "tool": "frame_pump" },
+    { "method": "POST", "path": "/configure", "tool": "configure" }
+  ],
+  "tools": [
+    {
+      "name": "list_cameras",
+      "description": "Lista as câmeras disponíveis (webcam e IP/MJPEG) com status online e monitors ativos."
+    },
+    {
+      "name": "capture_snapshot",
+      "description": "Captura um snapshot da câmera especificada (ou da padrão), salva na galeria e descreve a cena com o modelo de visão local. Use para responder 'o que você vê aí?'."
+    },
+    {
+      "name": "describe_snapshot",
+      "description": "Re-descreve um snapshot existente da galeria com o modelo de visão local."
+    },
+    {
+      "name": "start_monitoring",
+      "description": "Inicia monitoramento de uma câmera com triggers (motion, object, presence/absence, scene, periodic), schedule, cooldown e notificações. Use para 'me avise quando X'."
+    },
+    {
+      "name": "stop_monitoring",
+      "description": "Para um monitoramento ativo (monitorId ou all:true)."
+    },
+    {
+      "name": "get_status",
+      "description": "Status dos monitors ativos por câmera e conectividade das câmeras."
+    },
+    {
+      "name": "list_snapshots",
+      "description": "Lista os snapshots da galeria (mais recentes primeiro)."
+    }
+  ],
+  "toolPriority": "Use as ferramentas de visão/câmera quando o usuário falar de câmera, ver, enxergar, monitorar, vigiar, alguém chegou/apareceu/saiu, movimento, encomenda, gato/cachorro, porta aberta, luz acesa.",
+  "theme": {
+    "gradient": "from-emerald-500 to-green-600",
+    "accent": "emerald"
+  },
+  "storage": [
+    {
+      "description": "Snapshots (imagens JPEG) e regras de monitoramento, guardados localmente.",
+      "locations": ["snapshots/*.jpg", "monitors.json", "snapshots_index.json", "config.json", "cameras.json"]
+    }
+  ],
+  "persistOnQuit": true
+}
