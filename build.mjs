@@ -25,6 +25,11 @@ await build({
   logLevel: 'warning'
 })
 
+// Dev-mode convenience: the extension host worker always loads
+// `<skillPath>/runtime.js`, and the .dev junction points at the repo root —
+// mirror the bundle there so `pnpm dev` picks it up (gitignored).
+cpSync(path.join(outdir, 'runtime.js'), path.join(root, 'runtime.js'))
+
 await build({
   entryPoints: [path.join(root, 'src/engine.ts')],
   outfile: path.join(outdir, 'cv/engine.cjs'),
