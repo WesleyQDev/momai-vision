@@ -31,6 +31,26 @@ function formatTime(ts?: number): string {
   return new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
 }
 
+function VisionIcon({ className = 'w-5 h-5' }: { className?: string }): JSX.Element {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M2.5 12c2.1-4.3 5.6-6.5 9.5-6.5s7.4 2.2 9.5 6.5c-2.1 4.3-5.6 6.5-9.5 6.5S4.6 16.3 2.5 12Z" />
+      <circle cx="12" cy="12" r="3" />
+      <circle cx="12" cy="12" r="1" fill="currentColor" />
+      <path d="M17.6 4.9v3.2M16 6.5h3.2" />
+    </svg>
+  )
+}
+
 async function stopMonitor(monitorId: string | undefined, onClose?: () => void): Promise<void> {
   if (!monitorId) return
   await sdk.api.post(`/extensions/${EXT_ID}/command`, {
@@ -53,7 +73,9 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
     <div className="w-full max-w-md rounded-2xl border border-emerald-500/30 bg-zinc-900/95 text-gray-100 shadow-2xl overflow-hidden">
       <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-emerald-600 to-green-700">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-lg">👁️</span>
+          <span className="text-lg">
+            <VisionIcon className="w-5 h-5" />
+          </span>
           <div className="min-w-0">
             <p className="text-sm font-semibold truncate">{title}</p>
             <p className="text-xs text-emerald-100/90 truncate">{subtitle || formatTime(data?.ts)}</p>
@@ -142,7 +164,9 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
   return (
     <div className="w-full rounded-2xl border border-white/10 bg-zinc-900/95 text-gray-100 p-4">
       <div className="flex items-center gap-2 mb-3">
-        <span className="text-lg">👁️</span>
+        <span className="text-emerald-400">
+          <VisionIcon />
+        </span>
         <h3 className="text-sm font-semibold">MomAI Vision</h3>
       </div>
       <div className="grid grid-cols-2 gap-2 mb-3">

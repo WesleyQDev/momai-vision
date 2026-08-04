@@ -15,7 +15,7 @@ const outdir = path.join(root, 'dist')
 const external = ['react', 'react-dom', 'react/jsx-runtime', 'momai:sdk']
 
 await build({
-  entryPoints: [path.join(root, 'src/runtime.ts')],
+  entryPoints: [path.join(root, 'src/worker.ts')],
   outfile: path.join(outdir, 'runtime.js'),
   bundle: true,
   format: 'esm',

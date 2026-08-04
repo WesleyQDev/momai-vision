@@ -74,6 +74,26 @@ const CLASS_COLORS = [
   '#14b8a6', '#f97316', '#84cc16', '#06b6d4'
 ]
 
+export function VisionIcon({ className = 'w-6 h-6' }: { className?: string }): JSX.Element {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M2.5 12c2.1-4.3 5.6-6.5 9.5-6.5s7.4 2.2 9.5 6.5c-2.1 4.3-5.6 6.5-9.5 6.5S4.6 16.3 2.5 12Z" />
+      <circle cx="12" cy="12" r="3" />
+      <circle cx="12" cy="12" r="1" fill="currentColor" />
+      <path d="M17.6 4.9v3.2M16 6.5h3.2" />
+    </svg>
+  )
+}
+
 function classColor(className: string): string {
   let hash = 0
   for (const ch of className) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
@@ -416,7 +436,10 @@ export default function VisionPage(): JSX.Element {
       <header className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-xl font-bold flex items-center gap-2">
-            <span>👁️</span> MomAI Vision
+            <span className="text-emerald-400">
+              <VisionIcon />
+            </span>{' '}
+            MomAI Vision
           </h1>
           <p className="text-xs text-gray-400 mt-0.5">
             Visão e monitoramento 100% locais — nada sai da sua máquina.
@@ -471,8 +494,19 @@ export default function VisionPage(): JSX.Element {
               />
             ))}
             {cameras.length === 0 ? (
-              <div className="col-span-full rounded-2xl border border-dashed border-white/15 p-8 text-center text-sm text-gray-400">
-                Nenhuma câmera disponível. Adicione uma câmera IP em Configurações ou conecte uma webcam.
+              <div className="col-span-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/15 p-10 text-center">
+                <VisionIcon className="w-10 h-10 text-gray-500 mb-3" />
+                <p className="text-sm text-gray-300 font-medium">Nenhuma câmera configurada</p>
+                <p className="text-xs text-gray-500 mt-1 max-w-sm">
+                  Adicione uma câmera IP (URL MJPEG) ou conecte uma webcam para começar a ver e
+                  monitorar.
+                </p>
+                <button
+                  onClick={() => setActiveTab('settings')}
+                  className="mt-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-medium px-5 py-2.5 transition-colors"
+                >
+                  Adicionar câmeras
+                </button>
               </div>
             ) : null}
           </div>

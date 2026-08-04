@@ -26,7 +26,11 @@ import {
 const SKILL_ID = process.env.MOMAI_EXTENSION_ID || 'momai-vision'
 const API_URL = process.env.MOMAI_API_URL || 'http://127.0.0.1:8000'
 const SESSION_TOKEN = process.env.MOMAI_SESSION_TOKEN || ''
-const ENGINE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cv')
+// Engine lives in cv/ next to runtime.js (installed layout) or in dist/cv/
+// (repo layout mirrored by build for the .dev junction workflow).
+const workerDir = path.dirname(fileURLToPath(import.meta.url))
+const ENGINE_DIR = path.join(workerDir, 'cv', 'engine.cjs')
+const ENGINE_DIR_FALLBACK = path.join(workerDir, 'dist', 'cv', 'engine.cjs')
 
 interface MomaiBridge {
   log: (msg: string) => void
@@ -235,7 +239,8 @@ let engine: EngineProcess | null = null
 async function ensureEngine(): Promise<EngineProcess> {
   if (engine && engine.child.connected) return engine
   const { spawn } = await import('node:child_process')
-  const child = spawn(process.execPath, [path.join(ENGINE_DIR, 'engine.cjs')], {
+  const enginePath = await requireEnginePath()
+  const child = spawn(process.execPath, [enginePath], {
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     env: { ...process.env }
   })
@@ -295,11 +300,21 @@ async function engineDetect(jpegBase64: string): Promise<EngineResult> {
   })
 }
 
+async function requireEnginePath(): Promise<string> {
+  const fs = await import('node:fs')
+  try {
+    if (fs.existsSync(ENGINE_DIR)) return ENGINE_DIR
+  } catch {}
+  return ENGINE_DIR_FALLBACK
+}
+
 function stopEngine(): void {
   try {
     engine?.child.send({ type: 'shutdown' })
   } catch {}
 }
+
+export { stopEngine }
 
 // ---------------------------------------------------------------------------
 // Vision (local LLM)

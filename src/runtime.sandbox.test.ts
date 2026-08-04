@@ -1,8 +1,8 @@
 /**
- * Sandbox integration test: the built runtime.js runs inside the REAL
- * extension host worker sandbox (apps/momai extension-host-worker.js) and
- * survives tool calls (reset:false), restores monitors after restart and
- * runs the CV engine end-to-end via frame_pump.
+ * Sandbox integration test: the built runtime.js runs as a PERSISTENT
+ * worker (forked directly by the host, the real contract) and survives tool
+ * calls (reset:false), restores monitors after restart and runs the CV
+ * engine end-to-end via frame_pump.
  *
  * Requires: `pnpm build` first; the host repo present (MOMAI_HOST_DIR).
  */
@@ -17,11 +17,7 @@ import { encode } from 'jpeg-js'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const hostDir = process.env.MOMAI_HOST_DIR || 'C:/Users/wesle/dev/momai/apps/momai'
-const HOST_WORKER = path.join(hostDir, 'scripts/node-core/services/extension-host-worker.js')
 const SKILL_ID = 'momai-vision-test'
-
-const hasHost = existsSync(HOST_WORKER)
-const describeHost = hasHost ? describe : describe.skip
 
 function makeFixtureJpeg(): string {
   const width = 320
@@ -39,7 +35,7 @@ function makeFixtureJpeg(): string {
   return Buffer.from(encode({ data, width, height }, 85).data).toString('base64')
 }
 
-describeHost('runtime.js in the real host worker sandbox', () => {
+describe('runtime.js as a persistent worker (host contract)', () => {
   let skillDir: string
   let dataDir: string
   let child: ChildProcess
@@ -53,10 +49,10 @@ describeHost('runtime.js in the real host worker sandbox', () => {
     events.length = 0
     child = spawn(
       process.execPath,
-      [HOST_WORKER, SKILL_ID, skillDir],
+      [path.join(skillDir, 'runtime.js'), SKILL_ID, skillDir],
       {
         stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-        env: { ...process.env, MOMAI_DATA_DIR: dataDir, MOMAI_API_URL: apiUrl, MOMAI_SESSION_TOKEN: 'test-token' }
+        env: { ...process.env, MOMAI_DATA_DIR: dataDir, MOMAI_API_URL: apiUrl, MOMAI_SESSION_TOKEN: 'test-token', MOMAI_EXTENSION_ID: SKILL_ID, MOMAI_PERSISTENT: 'true' }
       }
     )
     child.on('message', (msg: unknown) => {
@@ -68,7 +64,7 @@ describeHost('runtime.js in the real host worker sandbox', () => {
       if (pendingId && pending.has(pendingId)) {
         const entry = pending.get(pendingId)!
         pending.delete(pendingId)
-        entry.resolve((msg as { result?: unknown }).result)
+        entry.resolve((msg as { result?: unknown }).result ?? msg)
       }
     })
     return new Promise<void>((resolve, reject) => {
@@ -111,7 +107,7 @@ describeHost('runtime.js in the real host worker sandbox', () => {
     cpSync(path.join(root, 'dist', 'cv', 'ort-wasm-simd-threaded.mjs'), path.join(skillDir, 'cv', 'ort-wasm-simd-threaded.mjs'))
     cpSync(path.join(root, 'dist', 'models', 'yolo11n.onnx'), path.join(skillDir, 'models', 'yolo11n.onnx'))
 
-    // Minimal host API mock: no cameras configured, vision reports unavailable.
+    // Minimal host API mock: one webcam, vision unavailable.
     mockApi = createServer((req, res) => {
       const url = req.url || ''
       if (url === '/media/camera/list' && req.method === 'GET') {
