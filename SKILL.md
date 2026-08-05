@@ -34,19 +34,25 @@ funcionando mesmo com a MomAI minimizada.
 | `list_cameras` | Lista câmeras (webcam/IP) com status e monitors ativos |
 | `capture_snapshot {cameraId?}` | Captura e descreve a cena ("o que você vê aí?") |
 | `describe_snapshot {snapshotId}` | Re-descreve um snapshot da galeria |
-| `start_monitoring {cameraId, triggers[], ...}` | Inicia monitoramento com alertas |
+| `start_monitoring {cameraId, triggers[], ...}` | Inicia monitoramento com alertas (**REQUER CÂMERA**) |
+| `update_monitoring {monitorId, cameraId?, triggers?, ...}` | Edita as configurações de um monitoramento ativo existente |
 | `stop_monitoring {monitorId?}` | Para monitoramento(s) |
 | `get_status` | Monitors ativos por câmera |
 | `list_snapshots {limit?}` | Galeria (mais recentes primeiro) |
 
-## Triggers (start_monitoring)
+## Regra Estrita de Câmera para Monitoramento
+
+- **REQUER CÂMERA EXPLÍCITA**: O LLM **NUNCA** deve chamar `start_monitoring` sem que o usuário tenha informado explicitamente qual câmera deseja monitorar (ex.: "garagem", "Yoosee", "webcam", "da porta").
+- Se o usuário pedir para iniciar monitoramento sem especificar a câmera (ex.: "inicie o monitoramento", "vigie a porta", "me avise se alguém aparecer" sem informar a câmera), o LLM **DEVE** primeiro perguntar ao usuário qual câmera ele quer usar (ou chamar `list_cameras` para mostrar as opções disponíveis antes de perguntar ao usuário).
+
+## Triggers (start_monitoring / update_monitoring)
 
 ```json
 {
   "cameraId": "webcam:<deviceId>",
   "triggers": [{ "type": "motion", "sensitivity": "med" }],
   "schedule": { "days": [0,1,2,3,4,5,6], "start": "22:00", "end": "06:00" },
-  "cooldownSec": 120,
+  "cooldownSec": 300,
   "notify": { "native": true, "chat": true },
   "label": "Garagem"
 }
@@ -57,20 +63,23 @@ funcionando mesmo com a MomAI minimizada.
 - `presence`/`absence` — `className` (default person), `event`: entered/left/still_present, `windowSec`.
 - `scene` — pergunta SIM/NÃO via visão local: `question`, `everySec` (15-300), `onAnswer`: yes/no/change, `confirmN`.
 - `periodic` — resumo periódico: `everySec`, `task`.
-- `schedule.days`: 0-6 (domingo=0). `confirm: true` retorna o plano para o usuário confirmar antes de iniciar.
+- `cooldownSec` — intervalo mínimo entre alertas do mesmo monitor (padrão 300 = 5min; aceita desde 10s). Quando o usuário falar em frequência ("avise a cada X", "não enche muito", "quero saber na hora"), passe o valor; se ficar em dúvida, pergunte ao usuário antes de iniciar.
+- `schedule.days`: 0-6 (domingo=0). O monitoramento começa imediatamente na chamada; o plano é anunciado na resposta.
+
+## Edição de Monitoramento (update_monitoring)
+
+Para alterar um monitoramento que já está rodando (ex.: "mude o tempo do alerta da garagem para 10 minutos" ou "altere os triggers da câmera da porta"), use `update_monitoring { monitorId: "mon-...", cooldownSec: 600 }`. Use `get_status` caso precise descobrir o `monitorId`.
 
 ## Como usar (gramática)
 
 - "o que você vê aí?" → `capture_snapshot`
-- "me avise quando alguém chegar em casa" → `start_monitoring` com `presence entered` (person)
-- "vigia a garagem de madrugada" → `motion` + `schedule` 22h-6h + cooldown
-- "avise se alguém ficar parado na porta por 2 minutos" → `presence still_present` windowSec 120
-- "me avise se o gato subir na mesa" → `motion` (gate) + `scene` "tem um gato na mesa?"
-- "avise se a porta da frente estiver aberta" → `scene` "a porta da frente está aberta?"
-- "avise quando deixarem uma encomenda na porta" → `motion` + `scene` "tem uma encomenda na porta?"
-- "avise quando eu voltar pra sala" → `presence entered`
+- "me avise quando alguém chegar em casa na câmera da garagem" → `start_monitoring` com `cameraId: "garagem"` e `presence entered` (person)
+- "mude o intervalo da câmera da garagem para 10 minutos" → `update_monitoring` com `cooldownSec: 600`
+- "vigia a garagem de madrugada" → `start_monitoring` com `cameraId: "garagem"` + `motion` + `schedule` 22h-6h + cooldown
+- "avise se alguém ficar parado na porta por 2 minutos na câmera da frente" → `start_monitoring` com `cameraId: "frente"` e `presence still_present` windowSec 120
+- "me avise se o gato subir na mesa na câmera da sala" → `start_monitoring` com `cameraId: "sala"`, `motion` (gate) + `scene` "tem um gato na mesa?"
 
-Quando o usuário nomear uma câmera específica ("da caza", "do j6", "da usb"), SEMPRE passe o `cameraId` exato retornado por `list_cameras` (ou o nome da câmera — ex.: `"caza"`) em `capture_snapshot`. Use a câmera padrão (config) apenas quando o usuário não especificar. Se houver mais de uma câmera e não houver padrão, pergunte qual.
+Quando o usuário nomear uma câmera específica ("da caza", "do j6", "da usb"), SEMPRE passe o `cameraId` exato retornado por `list_cameras` (ou o nome da câmera — ex.: `"caza"`). Se o usuário não disser qual câmera quer monitorar, PERGUNTE a ele.
 
 ## Honestidade (limites que a MomAI declara)
 
@@ -84,8 +93,8 @@ Quando o usuário nomear uma câmera específica ("da caza", "do j6", "da usb"),
 
 ## Fluxo de monitoramento
 
-1. Antes de iniciar, **anuncie o plano** ao usuário (câmera, triggers, horário, cooldown) e confirme.
-2. Chame `start_monitoring` (sem `confirm:true` na chamada final).
+1. Chame `start_monitoring` com `cameraId` e `triggers` — o monitoramento começa imediatamente.
+2. Anuncie na resposta o plano (câmera, triggers, horário, cooldown) e informe que está monitorando.
 3. Ao disparar um trigger: snapshot salvo na galeria + **overlay flutuante** com a imagem + cartão no chat (`vision_alert`) + entrada no feed de alertas da página.
 4. Para parar: `stop_monitoring {monitorId}` — ou o usuário para pela página/overlay.
 

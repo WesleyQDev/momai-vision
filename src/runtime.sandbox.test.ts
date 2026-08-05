@@ -189,6 +189,39 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   )
 
   it(
+    'rejects start_monitoring when cameraId is missing',
+    async () => {
+      const result = (await execute({
+        toolName: 'start_monitoring',
+        args: { triggers: [{ type: 'motion' }] }
+      })) as { ok: boolean; error?: string }
+      expect(result.ok).toBe(false)
+      expect(result.error).toMatch(/Nenhuma câmera foi informada/)
+    },
+    60000
+  )
+
+  it(
+    'updates an active monitor via update_monitoring',
+    async () => {
+      const status = (await execute({ toolName: 'get_status', args: {} })) as {
+        monitors: Array<{ id: string }>
+      }
+      expect(status.monitors.length).toBeGreaterThan(0)
+      const targetId = status.monitors[0].id
+
+      const updateRes = (await execute({
+        toolName: 'update_monitoring',
+        args: { monitorId: targetId, label: 'Entrada Principal', cooldownSec: 60 }
+      })) as { ok: boolean; config?: { label?: string; cooldownSec?: number } }
+      expect(updateRes.ok).toBe(true)
+      expect(updateRes.config?.label).toBe('Entrada Principal')
+      expect(updateRes.config?.cooldownSec).toBe(60)
+    },
+    60000
+  )
+
+  it(
     'rejects start_monitoring with invalid triggers',
     async () => {
       const result = (await execute({
@@ -230,7 +263,7 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       }
       expect(status.ok).toBe(true)
       expect(status.monitors).toHaveLength(1)
-      expect(status.monitors[0].label).toBe('Entrada')
+      expect(status.monitors[0].label).toBe('Entrada Principal')
     },
     120000
   )

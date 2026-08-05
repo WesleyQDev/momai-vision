@@ -61,6 +61,7 @@ export interface AlertInfo {
   className?: string
   description: string
   ts: number
+  boxes?: Detection[]
 }
 
 export interface TriggerContext {
@@ -110,22 +111,45 @@ export function inSchedule(schedule: Schedule | undefined, now: number): boolean
 }
 
 function inCooldown(state: MonitorState, monitor: MonitorConfig, now: number): boolean {
-  const cooldown = (monitor.cooldownSec ?? 120) * 1000
+  const cooldown = (monitor.cooldownSec ?? 300) * 1000
   return now - state.lastAlertTs < cooldown
 }
 
 function findDetections(detections: Detection[], className: string, minConfidence: number): Detection[] {
-  const wanted = className.toLowerCase()
-  return detections.filter(
-    (d) =>
-      d.className.toLowerCase() === wanted &&
-      (wanted === 'person' ? true : true) &&
-      d.confidence >= minConfidence
-  )
+  const wanted = normalizeClassName(className).toLowerCase()
+  return detections.filter((d) => d.className.toLowerCase() === wanted && d.confidence >= minConfidence)
 }
 
 function presenceKey(className: string): string {
   return className || 'person'
+}
+
+const COCO_SYNONYMS: Record<string, string> = {
+  pessoa: 'person', pessoas: 'person', gente: 'person', homem: 'person', mulher: 'person',
+  rapaz: 'person', crianca: 'person', criança: 'person', pessoa1: 'person',
+  gato: 'cat', gatos: 'cat', cachorro: 'dog', cachorros: 'dog', cao: 'dog', cão: 'dog',
+  caes: 'dog', cães: 'dog', cadelo: 'dog', dog: 'dog',
+  carro: 'car', carros: 'car', veiculo: 'car', veículo: 'car',
+  moto: 'motorcycle', motos: 'motorcycle', motocicleta: 'motorcycle',
+  bicicleta: 'bicycle', bike: 'bicycle',
+  onibus: 'bus', ônibus: 'bus', caminhao: 'truck', caminhão: 'truck',
+  celular: 'cell phone', celulares: 'cell phone', telefone: 'cell phone', smartphone: 'cell phone',
+  passaro: 'bird', pássaro: 'bird', passaros: 'bird', pássaros: 'bird', passarinho: 'bird',
+  livro: 'book', livros: 'book', mochila: 'backpack', cadeira: 'chair', sofa: 'couch', sofá: 'couch',
+  tv: 'tv', televisao: 'tv', televisão: 'tv', notebook: 'laptop', computador: 'laptop', pc: 'laptop',
+  garrafa: 'bottle', copo: 'cup', xicara: 'cup', xícara: 'cup', vaso: 'vase',
+  planta: 'potted plant', 'vaso de planta': 'potted plant', 'vaso de flores': 'potted plant'
+}
+
+/**
+ * Normalizes a class name (e.g. Portuguese synonyms) to the English COCO
+ * label the detector emits, so monitoring matches regardless of the language
+ * the model used to describe the target.
+ */
+export function normalizeClassName(name: string): string {
+  if (!name) return ''
+  const key = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase()
+  return COCO_SYNONYMS[key] || name.trim()
 }
 
 /**
@@ -141,7 +165,7 @@ export function evaluateMonitor(
 ): { alerts: AlertInfo[]; sceneDue: Array<{ triggerIndex: number; question: string }> } {
   const alerts: AlertInfo[] = []
   const sceneDue: Array<{ triggerIndex: number; question: string }> = []
-  const { now } = ctx
+  const now = ctx.now
 
   if (!inSchedule(monitor.schedule, now)) return { alerts, sceneDue }
   state.lastMotion = ctx.motionDetected
@@ -152,7 +176,8 @@ export function evaluateMonitor(
       monitorLabel: monitor.label,
       cameraId: monitor.cameraId,
       cameraName: monitor.cameraName,
-      ts: now
+      ts: now,
+      boxes: ctx.detections && ctx.detections.length > 0 ? ctx.detections : undefined
     }
 
     if (trigger.type === 'motion') {
@@ -164,20 +189,21 @@ export function evaluateMonitor(
     }
 
     if (trigger.type === 'object') {
+      const className = trigger.className || 'person'
       const minConf = trigger.minConfidence ?? 0.4
-      const found = findDetections(ctx.detections, trigger.className, minConf).length > 0
+      const found = findDetections(ctx.detections, className, minConf).length > 0
       const wantPresent = trigger.present !== false
       if (found === wantPresent && !inCooldown(state, monitor, now)) {
         state.lastAlertTs = now
-        const det = findDetections(ctx.detections, trigger.className, minConf)[0]
+        const det = findDetections(ctx.detections, className, minConf)[0]
         alerts.push({
           ...base,
-          triggeredBy: `object:${trigger.className}`,
+          triggeredBy: `object:${className}`,
           confidence: det?.confidence,
-          className: trigger.className,
+          className,
           description: wantPresent
-            ? `${capitalize(trigger.className)} detectado`
-            : `${capitalize(trigger.className)} ausente`
+            ? `${capitalize(className)} detectado`
+            : `${capitalize(className)} ausente`
         })
       }
       return

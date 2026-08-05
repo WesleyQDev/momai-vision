@@ -15,7 +15,7 @@
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import runtimeModule, { stopEngine } from './runtime'
+import runtimeModule, { stopEngine, init } from './runtime'
 
 const workerDir = path.dirname(fileURLToPath(import.meta.url))
 const [skillId, skillPath] = process.argv.slice(2)
@@ -103,6 +103,15 @@ const momai = {
 
 process.send?.({ type: 'log', message: `Host initialized (PID: ${process.pid})` })
 process.send?.({ type: 'ready' })
+
+// Restore monitors and webcam watches at startup so monitoring keeps running
+// even if the page is never opened / no chat tool call is ever dispatched.
+init(momai).catch((err: unknown) => {
+  process.send?.({
+    type: 'log',
+    message: `[vision] startup init failed: ${err instanceof Error ? err.message : String(err)}`
+  })
+})
 
 process.on('message', async (msg: unknown) => {
   if (!msg || typeof msg !== 'object') return

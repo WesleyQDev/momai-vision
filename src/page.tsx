@@ -9,6 +9,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
+import { ptLabel } from './vision/labels'
+import { AlertCanvasOverlay } from './panel'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
@@ -39,6 +41,7 @@ interface Alert {
   triggeredBy?: string
   className?: string
   confidence?: number
+  boxes?: Detection[]
   snapshotId?: string
   ts?: number
   description?: string
@@ -268,9 +271,7 @@ function CameraCard({
   onExpand?: (camera: CameraInfo) => void
   refreshKey?: number
 }): JSX.Element {
-  const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [flashing, setFlashing] = useState(false)
@@ -280,7 +281,6 @@ function CameraCard({
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:mode`) : null
     return saved || 'balanced'
   })
-  const pumpTimer = useRef<number | null>(null)
   const ipBase64Ref = useRef<string | null>(null)
 
   useEffect(() => {
@@ -308,7 +308,7 @@ function CameraCard({
       ctx.fillRect(box.x1 * w, Math.max(0, box.y1 * h - 18), Math.min(w, (box.x2 - box.x1) * w), 16)
       ctx.fillStyle = '#0a0a0a'
       ctx.font = '11px sans-serif'
-      ctx.fillText(`${box.className} ${Math.round(box.confidence * 100)}%`, box.x1 * w + 4, Math.max(0, box.y1 * h - 6))
+      ctx.fillText(`${ptLabel(box.className)} ${Math.round(box.confidence * 100)}%`, box.x1 * w + 4, Math.max(0, box.y1 * h - 6))
     }
   }, [camera.id, detections])
 
@@ -318,48 +318,16 @@ function CameraCard({
     setIpBase64(null)
   }, [refreshKey])
 
+  // Live frame polling via the worker. Webcam frames come from the host camera
+  // window (start-watch), IP frames from the MJPEG stream — a single stream
+  // owner so cameras keep running even after leaving this page.
   useEffect(() => {
-    if (!videoRef.current) return
-    let cancelled = false
-
-    if (camera.source === 'webcam' && camera.id.startsWith('webcam:')) {
-      const deviceId = camera.id.slice('webcam:'.length)
-      navigator.mediaDevices
-        .getUserMedia({
-          audio: false,
-          video: { deviceId: { exact: deviceId }, width: { ideal: 640 }, height: { ideal: 480 } }
-        })
-        .then((stream) => {
-          if (cancelled) {
-            stream.getTracks().forEach((t) => t.stop())
-            return
-          }
-          streamRef.current = stream
-          const video = videoRef.current!
-          video.srcObject = stream
-          setReady(true)
-          setError(null)
-        })
-        .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-    } else {
-      setReady(true)
-    }
-
-    return () => {
-      cancelled = true
-      streamRef.current?.getTracks().forEach((t) => t.stop())
-      streamRef.current = null
-    }
-  }, [camera.id, camera.source, refreshKey])
-
-  // IP Camera Stream Polling via Extension Worker — 30 FPS ultra-fluid framerate
-  useEffect(() => {
-    if (camera.source !== 'ip') return
     let cancelled = false
     let timer: number | null = null
 
-    const fetchIpFrame = async () => {
+    const fetchFrame = async () => {
       if (cancelled) return
+      let nextInterval = 42 // 24 FPS (1000ms / 24 = ~41.67ms)
       if (!document.hidden) {
         try {
           const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
@@ -369,58 +337,30 @@ function CameraCard({
             setError(null)
           } else {
             setReady(true)
+            nextInterval = 500 // initializing/no frame — back off
           }
         } catch {
-          // silently retry — keep showing "Iniciando câmera..." placeholder
+          nextInterval = 1000 // offline/transient error — back off
         }
       }
       if (!cancelled) {
-        timer = window.setTimeout(fetchIpFrame, 33) // ~33ms = 30 FPS
+        timer = window.setTimeout(fetchFrame, nextInterval)
       }
     }
 
-    void fetchIpFrame()
+    void fetchFrame()
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [camera.id, camera.source, refreshKey])
+  }, [camera.id, refreshKey])
 
   useEffect(() => {
     drawBoxes()
   }, [detections, drawBoxes])
 
-  // YOLO detection frame pump for Webcams
+  // YOLO detection frame pump — send the latest frame to the worker for boxes.
   useEffect(() => {
-    const video = videoRef.current
-    if (!video || camera.source !== 'webcam') return
-    const interval = PUMP_INTERVALS[mode] || 1000
-    const canvas = document.createElement('canvas')
-    const run = async () => {
-      if (document.hidden) return
-      if (!video.videoWidth) return
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
-      const ctx = canvas.getContext('2d')
-      if (!ctx) return
-      ctx.drawImage(video, 0, 0)
-      const jpegBase64 = canvas.toDataURL('image/jpeg', 0.7).split(',')[1]
-      try {
-        await command<{ detections?: Detection[] }>('frame_pump', { cameraId: camera.id, jpegBase64 })
-      } catch {
-        // transient — keep pumping
-      }
-    }
-    void run()
-    pumpTimer.current = window.setInterval(() => void run(), interval)
-    return () => {
-      if (pumpTimer.current) clearInterval(pumpTimer.current)
-    }
-  }, [camera.id, camera.source, mode])
-
-  // YOLO detection frame pump for IP Cameras
-  useEffect(() => {
-    if (camera.source !== 'ip') return
     const interval = PUMP_INTERVALS[mode] || 1000
     const run = async () => {
       if (document.hidden) return
@@ -437,7 +377,7 @@ function CameraCard({
     return () => {
       clearInterval(timer)
     }
-  }, [camera.id, camera.source, mode])
+  }, [camera.id, mode])
 
   const handleTakeSnapshot = async () => {
     setFlashing(true)
@@ -455,27 +395,17 @@ function CameraCard({
   return (
     <div className="flex flex-col h-full rounded-2xl bg-zinc-900/60 overflow-hidden shadow-lg transition-all">
       <div className="relative w-full aspect-video bg-black rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
-        {camera.source === 'ip' ? (
-          ready && ipBase64 ? (
-            <img
-              src={`data:image/jpeg;base64,${ipBase64}`}
-              alt={camera.name}
-              className="absolute inset-0 w-full h-full object-cover"
-            />
-          ) : (
-            <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-gray-400 bg-black p-4 text-center">
-              <VisionIcon className="w-6 h-6 text-gray-400 mb-2 animate-pulse" />
-              <span>Iniciando câmera...</span>
-            </div>
-          )
-        ) : (
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
+        {ready && ipBase64 ? (
+          <img
+            src={`data:image/jpeg;base64,${ipBase64}`}
+            alt={camera.name}
             className="absolute inset-0 w-full h-full object-cover"
           />
+        ) : (
+          <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-gray-400 bg-black p-4 text-center">
+            <VisionIcon className="w-6 h-6 text-gray-400 mb-2 animate-pulse" />
+            <span>Iniciando câmera...</span>
+          </div>
         )}
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
 
@@ -487,12 +417,6 @@ function CameraCard({
         {error ? (
           <div className="absolute inset-0 flex items-center justify-center text-xs text-red-400 bg-black/70 z-20 p-4 text-center">
             {error}
-          </div>
-        ) : null}
-        {!ready && camera.source === 'webcam' && !error ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-xs text-gray-400 bg-black z-20 p-4 text-center">
-            <VisionIcon className="w-6 h-6 text-gray-400 mb-2 animate-pulse" />
-            <span>Iniciando câmera...</span>
           </div>
         ) : null}
 
@@ -904,83 +828,69 @@ function ExpandedCameraModal({
   onClose: () => void
   onSnapshot: (cameraId: string) => Promise<void> | void
 }): JSX.Element | null {
-  const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
+  const imgRef = useRef<HTMLImageElement | null>(null)
+  const frameBoxRef = useRef<HTMLDivElement | null>(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [flashing, setFlashing] = useState(false)
   const [printStatus, setPrintStatus] = useState<'idle' | 'capturing' | 'success'>('idle')
   const [ipBase64, setIpBase64] = useState<string | null>(null)
 
+  // Boxes are normalized to the video frame. With object-contain the image is
+  // centered inside the box, so map each box to the displayed image rect.
   const drawBoxes = useCallback(() => {
     const canvas = canvasRef.current
-    if (!canvas || !camera) return
+    const boxEl = frameBoxRef.current
+    const imgEl = imgRef.current
+    if (!canvas || !boxEl || !camera) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    const w = canvas.clientWidth || canvas.offsetWidth
-    const h = canvas.clientHeight || canvas.offsetHeight
-    if (!w || !h) return
-    canvas.width = w
-    canvas.height = h
-    ctx.clearRect(0, 0, w, h)
+    const cw = boxEl.clientWidth || boxEl.offsetWidth
+    const ch = boxEl.clientHeight || boxEl.offsetHeight
+    if (!cw || !ch) return
+    canvas.width = cw
+    canvas.height = ch
+    ctx.clearRect(0, 0, cw, ch)
+    const iw = imgEl?.naturalWidth || 0
+    const ih = imgEl?.naturalHeight || 0
+    let ox = 0
+    let oy = 0
+    let dw = cw
+    let dh = ch
+    if (iw && ih) {
+      const scale = Math.min(cw / iw, ch / ih)
+      dw = iw * scale
+      dh = ih * scale
+      ox = (cw - dw) / 2
+      oy = (ch - dh) / 2
+    }
     const boxes = detections[camera.id] || []
     for (const box of boxes) {
+      const x1 = ox + box.x1 * dw
+      const y1 = oy + box.y1 * dh
+      const x2 = ox + box.x2 * dw
+      const y2 = oy + box.y2 * dh
       const color = classColor(box.className)
       ctx.strokeStyle = color
       ctx.lineWidth = 2
-      ctx.strokeRect(box.x1 * w, box.y1 * h, (box.x2 - box.x1) * w, (box.y2 - box.y1) * h)
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
       ctx.fillStyle = color
-      ctx.fillRect(box.x1 * w, Math.max(0, box.y1 * h - 20), Math.min(w, (box.x2 - box.x1) * w), 18)
+      ctx.fillRect(x1, Math.max(0, y1 - 20), Math.min(cw, x2 - x1), 18)
       ctx.fillStyle = '#0a0a0a'
       ctx.font = 'bold 12px sans-serif'
-      ctx.fillText(`${box.className} ${Math.round(box.confidence * 100)}%`, box.x1 * w + 4, Math.max(0, box.y1 * h - 6))
+      ctx.fillText(`${ptLabel(box.className)} ${Math.round(box.confidence * 100)}%`, x1 + 4, Math.max(0, y1 - 6))
     }
   }, [camera, detections])
 
   useEffect(() => {
-    if (!camera || !videoRef.current) return
-    let cancelled = false
-
-    if (camera.source === 'webcam' && camera.id.startsWith('webcam:')) {
-      const deviceId = camera.id.slice('webcam:'.length)
-      navigator.mediaDevices
-        .getUserMedia({
-          audio: false,
-          video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-        })
-        .then((stream) => {
-          if (cancelled) {
-            stream.getTracks().forEach((t) => t.stop())
-            return
-          }
-          streamRef.current = stream
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream
-          }
-          setReady(true)
-          setError(null)
-        })
-        .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-    } else {
-      setReady(true)
-    }
-
-    return () => {
-      cancelled = true
-      streamRef.current?.getTracks().forEach((t) => t.stop())
-      streamRef.current = null
-    }
-  }, [camera])
-
-  // IP Frame polling for Expanded Camera Modal — 30 FPS ultra-fluid video
-  useEffect(() => {
-    if (!camera || camera.source !== 'ip') return
+    if (!camera) return
     let cancelled = false
     let timer: number | null = null
 
-    const fetchIpFrame = async () => {
+    const fetchFrame = async () => {
       if (cancelled) return
+      let nextInterval = 42 // 24 FPS (1000ms / 24 = ~41.67ms)
       try {
         const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
         if (cancelled) return
@@ -988,16 +898,18 @@ function ExpandedCameraModal({
           setIpBase64(res.jpegBase64)
           setReady(true)
           setError(null)
+        } else {
+          nextInterval = 300
         }
       } catch {
-        // silently retry — keep showing "Iniciando câmera..." placeholder
+        nextInterval = 1000
       }
       if (!cancelled) {
-        timer = window.setTimeout(fetchIpFrame, 33) // ~33ms = 30 FPS
+        timer = window.setTimeout(fetchFrame, nextInterval)
       }
     }
 
-    void fetchIpFrame()
+    void fetchFrame()
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
@@ -1024,15 +936,15 @@ function ExpandedCameraModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
-      <div className="relative w-full max-w-4xl max-h-[85vh] rounded-2xl border border-white/15 bg-zinc-900 overflow-hidden shadow-2xl flex flex-col">
+    <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md animate-fadeIn">
+      <div className="h-full flex flex-col">
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 bg-black/40 shrink-0">
-          <div className="flex items-center gap-2">
-            <span className={`w-2.5 h-2.5 rounded-full ${camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
-            <h2 className="text-base font-bold text-white">{camera.name}</h2>
-            <span className="text-xs text-gray-400">({camera.source === 'webcam' ? 'Webcam' : 'IP MJPEG'})</span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
+            <h2 className="text-base font-bold text-white truncate">{camera.name}</h2>
+            <span className="text-xs text-gray-400 shrink-0">({camera.source === 'webcam' ? 'Webcam' : 'IP MJPEG'})</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               disabled={printStatus === 'capturing'}
               onClick={handleTakeSnapshot}
@@ -1081,28 +993,20 @@ function ExpandedCameraModal({
           </div>
         </div>
 
-        <div className="relative w-full aspect-video bg-black shrink-0 overflow-hidden" style={{ aspectRatio: '16 / 9' }}>
-          {camera.source === 'ip' ? (
-            ipBase64 ? (
-              <img
-                src={`data:image/jpeg;base64,${ipBase64}`}
-                alt={camera.name}
-                className="absolute inset-0 w-full h-full object-cover"
-              />
-            ) : (
-              <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-sm text-gray-400 bg-black p-4 text-center">
-                <VisionIcon className="w-8 h-8 text-emerald-500/70 mb-2 animate-pulse" />
-                <span>Iniciando câmera...</span>
-              </div>
-            )
-          ) : (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="absolute inset-0 w-full h-full object-cover"
+        <div ref={frameBoxRef} className="flex-1 min-h-0 relative bg-black overflow-hidden">
+          {ipBase64 ? (
+            <img
+              ref={imgRef}
+              src={`data:image/jpeg;base64,${ipBase64}`}
+              alt={camera.name}
+              className="absolute inset-0 w-full h-full object-contain"
+              onLoad={() => drawBoxes()}
             />
+          ) : (
+            <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-sm text-gray-400 bg-black p-4 text-center">
+              <VisionIcon className="w-8 h-8 text-emerald-500/70 mb-2 animate-pulse" />
+              <span>Iniciando câmera...</span>
+            </div>
           )}
           <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
 
@@ -1114,11 +1018,6 @@ function ExpandedCameraModal({
           {error ? (
             <div className="absolute inset-0 flex items-center justify-center text-sm text-red-400 bg-black/70 p-4 text-center">
               {error}
-            </div>
-          ) : null}
-          {!ready && camera.source === 'webcam' && !error ? (
-            <div className="absolute inset-0 flex items-center justify-center text-sm text-gray-400">
-              Iniciando câmera expandida...
             </div>
           ) : null}
         </div>
@@ -1151,8 +1050,8 @@ function ExpandedPrintModal({
     `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${snap.id}.jpg`
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
-      <div className="w-full max-w-4xl rounded-2xl border border-white/15 bg-zinc-900 overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+    <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md animate-fadeIn">
+      <div className="h-full flex flex-col">
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 bg-black/40 shrink-0">
           <div>
             <h2 className="text-sm font-bold text-white">Print da Câmera</h2>
@@ -1169,11 +1068,11 @@ function ExpandedPrintModal({
           </button>
         </div>
 
-        <div className="relative w-full aspect-video bg-black shrink-0 overflow-hidden" style={{ aspectRatio: '16 / 9' }}>
-          <img src={imgSrc} alt={snap.description || 'Print'} className="absolute inset-0 w-full h-full object-cover" />
+        <div className="flex-1 min-h-0 relative bg-black flex items-center justify-center p-4">
+          <img src={imgSrc} alt={snap.description || 'Print'} className="max-w-full max-h-full object-contain" />
         </div>
 
-        <div className="p-4 bg-zinc-900 border-t border-white/10 flex items-center justify-between gap-4 shrink-0">
+        <div className="px-4 py-3 bg-zinc-900 border-t border-white/10 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <p className="text-xs text-gray-300 max-w-xl">{snap.description || 'Sem descrição.'}</p>
           <div className="flex items-center gap-2 shrink-0">
             <button
@@ -1201,6 +1100,75 @@ function ExpandedPrintModal({
 }
 
 // ---------------------------------------------------------------------------
+// Expanded Alert Modal
+// ---------------------------------------------------------------------------
+
+function ExpandedAlertModal({
+  alert,
+  onClose
+}: {
+  alert: Alert | null
+  onClose: () => void
+}): JSX.Element | null {
+  if (!alert) return null
+
+  const imgSrc =
+    alert.imageDataUri ||
+    (alert.snapshotId
+      ? `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${alert.snapshotId}.jpg`
+      : '')
+
+  return (
+    <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md animate-fadeIn flex flex-col">
+      <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 bg-black/40 shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
+          <h2 className="text-sm font-bold text-white truncate">
+            {alert.cameraName || 'Câmera'}
+            {alert.className ? ` · ${ptLabel(alert.className)}` : ''}
+            {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
+          </h2>
+          <span className="text-xs text-gray-400 shrink-0">({formatTime(alert.ts)})</span>
+        </div>
+        <button
+          onClick={onClose}
+          className="text-gray-400 hover:text-white rounded-lg p-1.5 hover:bg-white/10 transition-colors"
+          title="Fechar"
+        >
+          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+
+      <div className="flex-1 min-h-0 relative bg-black flex items-center justify-center p-4">
+        {imgSrc ? (
+          <AlertCanvasOverlay
+            imageDataUri={imgSrc}
+            boxes={alert.boxes}
+            objectFit="object-contain"
+          />
+        ) : (
+          <p className="text-sm text-gray-400">Sem imagem de alerta disponível.</p>
+        )}
+      </div>
+
+      {alert.description ? (
+        <div className="px-5 py-3 bg-zinc-900 border-t border-white/10 shrink-0 flex items-center justify-between gap-4">
+          <p className="text-xs text-gray-300">{alert.description}</p>
+          {alert.triggeredBy ? (
+            <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 font-mono shrink-0">
+              {alert.triggeredBy}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main Dashboard Page
 // ---------------------------------------------------------------------------
 
@@ -1212,8 +1180,6 @@ export default function VisionPage(): JSX.Element {
   const [config, setConfig] = useState<VisionConfig>({})
   const [detections, setDetections] = useState<Record<string, Detection[]>>({})
   const [activeTab, setActiveTab] = useState<'cameras' | 'alerts' | 'gallery' | 'settings'>('cameras')
-  const [ipUrl, setIpUrl] = useState('')
-  const [ipName, setIpName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -1221,6 +1187,7 @@ export default function VisionPage(): JSX.Element {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [expandedCamera, setExpandedCamera] = useState<CameraInfo | null>(null)
   const [expandedPrint, setExpandedPrint] = useState<Snapshot | null>(null)
+  const [expandedAlert, setExpandedAlert] = useState<Alert | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; snap: Snapshot } | null>(null)
   const [copyToast, setCopyToast] = useState<string | null>(null)
 
@@ -1276,12 +1243,16 @@ export default function VisionPage(): JSX.Element {
   // Silent poll — only updates camera/monitor data, no card reset or animation
   const poll = useCallback(async () => {
     try {
-      const [camRes, statusRes] = await Promise.all([
+      const [camRes, statusRes, alertsRes] = await Promise.all([
         command<{ cameras: CameraInfo[]; selectedCameras?: string[] | null }>('list_cameras'),
-        command<{ monitors: MonitorInfo[] }>('get_status')
+        command<{ monitors: MonitorInfo[] }>('get_status'),
+        command<{ alerts: Alert[] }>('list_alerts').catch(() => ({ alerts: [] }))
       ])
       setCameras(camRes.cameras || [])
       setMonitors(statusRes.monitors || [])
+      if (alertsRes.alerts) {
+        setAlerts(alertsRes.alerts)
+      }
       if (camRes.selectedCameras !== undefined) {
         setConfig((prev) => ({ ...prev, selectedCameras: camRes.selectedCameras ?? [] }))
       }
@@ -1339,6 +1310,20 @@ export default function VisionPage(): JSX.Element {
     }
   }, [snapshots.length, refreshGallery])
 
+  const handleClearAlerts = useCallback(async () => {
+    if (alerts.length === 0) return
+    if (!window.confirm('Tem certeza que deseja limpar todo o histórico de alertas?')) return
+    setBusy(true)
+    try {
+      await command('clear_alerts', {})
+      setAlerts([])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [alerts.length])
+
   useEffect(() => {
     void poll()
     void refreshGallery()
@@ -1378,34 +1363,6 @@ export default function VisionPage(): JSX.Element {
     },
     [refreshGallery]
   )
-
-  const addIpCamera = useCallback(async () => {
-    if (!ipUrl) return
-    setBusy(true)
-    setError(null)
-    try {
-      const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string }> } }>(
-        'configure',
-        {}
-      )
-      const current = configRes.config || {}
-      const ipCameras = Array.isArray(current.ipCameras) ? current.ipCameras : []
-      const id = `ip:${ipUrl}`
-      if (ipCameras.some((c) => c.id === id)) {
-        setError('Esta câmera já foi adicionada.')
-        return
-      }
-      const updated = [...ipCameras, { id, name: ipName || 'Câmera IP', url: ipUrl }]
-      await command('configure', { ipCameras: updated })
-      setIpUrl('')
-      setIpName('')
-      await refresh()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }, [ipUrl, ipName, refresh])
 
   const saveSettings = useCallback(
     async (next: Partial<Record<string, unknown>>) => {
@@ -1511,7 +1468,7 @@ export default function VisionPage(): JSX.Element {
     }`
 
   return (
-    <div className="w-full h-full min-h-screen max-h-screen overflow-y-auto p-4 md:p-6 text-gray-100 space-y-5 custom-scrollbar">
+    <div className="relative w-full h-full min-h-screen max-h-screen overflow-y-auto p-4 md:p-6 text-gray-100 space-y-5 custom-scrollbar">
       <header className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-xl font-bold flex items-center gap-2">
@@ -1631,36 +1588,81 @@ export default function VisionPage(): JSX.Element {
       {/* Tab: Alerts Feed */}
       {activeTab === 'alerts' ? (
         <section className="space-y-3">
+          <div className="flex items-center justify-between mb-1">
+            <h3 className="text-sm font-semibold text-white">Histórico de Alertas</h3>
+            {alerts.length > 0 ? (
+              <button
+                onClick={() => void handleClearAlerts()}
+                className="text-xs text-red-400/80 hover:text-red-300 transition-colors flex items-center gap-1"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+                limpar alertas
+              </button>
+            ) : null}
+          </div>
           {alerts.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-white/15 p-8 text-center text-sm text-gray-400">
               Nenhum alerta ainda. Os alertas aparecem aqui, no chat e no overlay flutuante.
             </div>
           ) : (
-            alerts.map((alert: Alert, index: number) => (
-              <div
-                key={`${alert.ts}-${index}`}
-                className="flex gap-3 rounded-2xl border border-white/10 bg-zinc-900/60 p-3"
-              >
-                {alert.imageDataUri ? (
-                  <div className="w-28 h-20 relative rounded-lg bg-black shrink-0 overflow-hidden cursor-pointer" onClick={() => window.open(alert.imageDataUri!)}>
-                    <img
-                      src={alert.imageDataUri}
-                      alt=""
-                      className="absolute inset-0 w-full h-full object-cover"
-                    />
+            alerts.map((alert: Alert, index: number) => {
+              const imgSrc =
+                alert.imageDataUri ||
+                (alert.snapshotId
+                  ? `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${alert.snapshotId}.jpg`
+                  : '')
+              return (
+                <div
+                  key={`${alert.ts}-${index}`}
+                  className="flex gap-3.5 items-center justify-between rounded-2xl border border-white/10 bg-zinc-900/70 p-3.5 hover:border-white/20 transition-all shadow-md"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-sm font-semibold text-white truncate max-w-[70%]">
+                        {alert.cameraName || 'Câmera'}
+                        {alert.className ? ` · ${ptLabel(alert.className)}` : ''}
+                        {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
+                      </p>
+                      {alert.ts ? (
+                        <span className="text-[11px] text-gray-400 font-medium shrink-0 bg-white/5 px-2 py-0.5 rounded-md border border-white/5">
+                          {formatTime(alert.ts)}
+                        </span>
+                      ) : null}
+                    </div>
+                    {alert.description ? (
+                      <p className="text-xs text-gray-300 mt-1">{alert.description}</p>
+                    ) : null}
+                    {alert.triggeredBy ? (
+                      <span className="inline-block mt-1.5 text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 font-mono">
+                        {alert.triggeredBy}
+                      </span>
+                    ) : null}
                   </div>
-                ) : null}
-                <div className="min-w-0">
-                  <p className="text-sm font-medium">
-                    {alert.cameraName || 'Câmera'}
-                    {alert.className ? ` · ${alert.className}` : ''}
-                    {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
-                  </p>
-                  <p className="text-xs text-gray-400 mt-0.5">{alert.description}</p>
-                  <p className="text-[11px] text-gray-500 mt-1">{formatTime(alert.ts)}</p>
+                  {imgSrc ? (
+                    <div
+                      className="group relative w-32 h-20 rounded-xl bg-black shrink-0 overflow-hidden cursor-pointer border border-white/10 hover:border-emerald-500/60 transition-all shadow-sm"
+                      onClick={() => setExpandedAlert(alert)}
+                      title="Clique para ampliar em tela cheia"
+                    >
+                      <AlertCanvasOverlay
+                        imageDataUri={imgSrc}
+                        boxes={alert.boxes}
+                        objectFit="object-cover"
+                      />
+                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-20">
+                        <div className="w-8 h-8 rounded-full bg-black/70 text-white flex items-center justify-center backdrop-blur-sm shadow border border-white/20 group-hover:scale-110 transition-transform">
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                          </svg>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-            ))
+              )
+            })
           )}
         </section>
       ) : null}
@@ -1785,39 +1787,6 @@ export default function VisionPage(): JSX.Element {
             <div>
               <h3 className="text-sm font-semibold text-white flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                Adicionar Câmera IP / MJPEG
-              </h3>
-              <p className="text-xs text-gray-400 mt-0.5">
-                Conecte câmeras de segurança locais usando fluxo de vídeo MJPEG (HTTP).
-              </p>
-            </div>
-            <div className="space-y-3">
-              <input
-                value={ipName}
-                onChange={(e) => setIpName(e.target.value)}
-                placeholder="Nome da câmera (ex.: Garagem)"
-                className="w-full bg-white/5 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-emerald-500/50"
-              />
-              <input
-                value={ipUrl}
-                onChange={(e) => setIpUrl(e.target.value)}
-                placeholder="URL MJPEG (http://camera:port/video)"
-                className="w-full bg-white/5 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-emerald-500/50"
-              />
-              <button
-                disabled={busy || !ipUrl}
-                onClick={() => void addIpCamera()}
-                className="w-full rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-sm font-medium py-2.5 text-white transition-colors shadow-lg shadow-emerald-950/20"
-              >
-                Adicionar Câmera IP
-              </button>
-            </div>
-          </div>
-
-          <div className="rounded-2xl border border-white/10 bg-zinc-900/70 backdrop-blur-md p-6 shadow-xl space-y-4">
-            <div>
-              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-400" />
                 Retenção de Prints
               </h3>
               <p className="text-xs text-gray-400 mt-0.5">
@@ -1916,6 +1885,14 @@ export default function VisionPage(): JSX.Element {
             Excluir
           </button>
         </div>
+      ) : null}
+
+      {/* Expanded Alert Lightbox Modal */}
+      {expandedAlert ? (
+        <ExpandedAlertModal
+          alert={expandedAlert}
+          onClose={() => setExpandedAlert(null)}
+        />
       ) : null}
 
       {/* Copy Toast Notification */}

@@ -4,6 +4,7 @@ import {
   evaluateMonitor,
   applySceneAnswer,
   inSchedule,
+  normalizeClassName,
   type MonitorConfig,
   type Detection,
   type Trigger
@@ -106,6 +107,36 @@ describe('evaluateMonitor — object', () => {
     const state = createMonitorState()
     const { alerts } = evaluateMonitor(config, state, ctx({ detections: [person] }))
     expect(alerts).toHaveLength(0)
+  })
+
+  it('matches Portuguese synonyms to COCO classes', () => {
+    expect(normalizeClassName('Pessoa')).toBe('person')
+    expect(normalizeClassName('cão')).toBe('dog')
+    expect(normalizeClassName('GATO')).toBe('cat')
+    expect(normalizeClassName('veículo')).toBe('car')
+    expect(normalizeClassName('celular')).toBe('cell phone')
+
+    const config = monitor([{ type: 'object', className: 'pessoa', minConfidence: 0.4 }])
+    const state = createMonitorState()
+    const { alerts } = evaluateMonitor(config, state, ctx({ detections: [person] }))
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0].triggeredBy).toBe('object:pessoa')
+  })
+
+  it('leaves non-COCO names untouched', () => {
+    expect(normalizeClassName('porta')).toBe('porta')
+    expect(normalizeClassName('encomenda')).toBe('encomenda')
+  })
+
+  it('is safe with empty/undefined class names', () => {
+    expect(normalizeClassName('')).toBe('')
+    expect(normalizeClassName(undefined as unknown as string)).toBe('')
+
+    const config = monitor([{ type: 'object' } as Trigger])
+    const state = createMonitorState()
+    const { alerts } = evaluateMonitor(config, state, ctx({ detections: [person] }))
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0].triggeredBy).toBe('object:person')
   })
 })
 

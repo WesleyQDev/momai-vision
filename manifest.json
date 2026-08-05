@@ -1,7 +1,7 @@
 {
   "id": "momai-vision",
   "name": "MomAI Vision",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Olhos para a MomAI: prints de câmeras, monitoramento e alertas 100% locais.",
   "author": "MomAI",
   "icon": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M2.5 12c2.1-4.3 5.6-6.5 9.5-6.5s7.4 2.2 9.5 6.5c-2.1 4.3-5.6 6.5-9.5 6.5S4.6 16.3 2.5 12Z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/><circle cx=\"12\" cy=\"12\" r=\"1\" fill=\"currentColor\"/><path d=\"M17.6 4.9v3.2M16 6.5h3.2\"/></svg>",
@@ -61,31 +61,148 @@
     },
     {
       "name": "start_monitoring",
-      "description": "Inicia monitoramento de uma câmera com triggers (motion, object, presence/absence, scene, periodic), schedule, cooldown e notificações. Use para 'me avise quando X'.",
+      "description": "Inicia monitoramento de uma câmera com triggers (motion, object, presence/absence, scene, periodic), schedule, cooldown e notificações. ATENÇÃO: OBRIGATÓRIO informar qual câmera o usuário deseja monitorar no campo cameraId retornado por list_cameras. className usa nomes COCO em inglês (person, cat, dog, car…).",
       "parameters": {
         "type": "object",
         "properties": {
           "cameraId": {
             "type": "string",
-            "description": "ID exato ou nome da câmera."
+            "description": "ID exato ou nome da câmera a ser monitorada (ex: 'webcam:...', 'ip:...', ou 'USB2.0 PC CAMERA'). OBRIGATÓRIO."
           },
           "triggers": {
             "type": "array",
+            "description": "Lista de gatilhos de monitoramento.",
             "items": {
-              "type": "object"
-            },
-            "description": "Lista de triggers: {type: motion|object|presence|absence|scene|periodic, ...}."
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": ["motion", "object", "presence", "absence", "scene", "periodic"],
+                  "description": "Tipo do gatilho: 'presence' (chegou/saiu), 'motion' (movimento), 'object' (detecção), 'absence' (ausência)."
+                },
+                "className": {
+                  "type": "string",
+                  "description": "Classe do objeto COCO em inglês (ex: 'person', 'cat', 'dog', 'car')."
+                },
+                "event": {
+                  "type": "string",
+                  "enum": ["entered", "left", "present", "absent"],
+                  "description": "Evento de presença/ausência (ex: 'entered' para quando alguém chega)."
+                },
+                "sensitivity": {
+                  "type": "string",
+                  "enum": ["low", "med", "high"],
+                  "description": "Sensibilidade do movimento ('low', 'med', 'high')."
+                },
+                "everySec": {
+                  "type": "number",
+                  "description": "Intervalo em segundos para resumo periódico."
+                }
+              },
+              "required": ["type"]
+            }
           },
           "schedule": {
             "type": "object",
-            "description": "Horário: {days: [0-6], start: '22:00', end: '06:00'}."
+            "description": "Horário de agendamento (opcional).",
+            "properties": {
+              "days": {
+                "type": "array",
+                "items": { "type": "number" },
+                "description": "Dias da semana (0=Domingo, 1=Segunda... 6=Sábado)."
+              },
+              "start": { "type": "string", "description": "Horário de início em 24h (ex: '22:00')." },
+              "end": { "type": "string", "description": "Horário de término em 24h (ex: '06:00')." }
+            }
           },
-          "cooldownSec": { "type": "number" },
-          "notify": { "type": "object", "description": "{native: bool, chat: bool}." },
-          "label": { "type": "string" },
-          "confirm": { "type": "boolean" }
+          "cooldownSec": {
+            "type": "number",
+            "description": "Intervalo mínimo entre alertas do mesmo monitor em segundos (10-3600; padrão: 300)."
+          },
+          "notify": {
+            "type": "object",
+            "description": "Configurações de notificação.",
+            "properties": {
+              "native": { "type": "boolean", "description": "Notificação nativa do sistema." },
+              "chat": { "type": "boolean", "description": "Notificação no chat." }
+            }
+          },
+          "label": { "type": "string", "description": "Rótulo amigável para o monitoramento." }
         },
         "required": ["cameraId", "triggers"]
+      }
+    },
+    {
+      "name": "update_monitoring",
+      "description": "Edita as configurações de um monitoramento ativo existente (como alterar triggers, schedule, cooldownSec, câmera ou rótulo). Use get_status ou list_cameras para obter o monitorId.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "monitorId": {
+            "type": "string",
+            "description": "ID exato do monitoramento ativo a alterar (ex.: 'mon-1722880000000')."
+          },
+          "cameraId": {
+            "type": "string",
+            "description": "ID exato ou nome da nova câmera (opcional)."
+          },
+          "triggers": {
+            "type": "array",
+            "description": "Nova lista de gatilhos de monitoramento.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": ["motion", "object", "presence", "absence", "scene", "periodic"],
+                  "description": "Tipo do gatilho."
+                },
+                "className": {
+                  "type": "string",
+                  "description": "Classe do objeto COCO em inglês (ex: 'person', 'cat', 'dog', 'car')."
+                },
+                "event": {
+                  "type": "string",
+                  "enum": ["entered", "left", "present", "absent"],
+                  "description": "Evento de presença/ausência."
+                },
+                "sensitivity": {
+                  "type": "string",
+                  "enum": ["low", "med", "high"],
+                  "description": "Sensibilidade de movimento."
+                }
+              },
+              "required": ["type"]
+            }
+          },
+          "schedule": {
+            "type": "object",
+            "description": "Novo horário de agendamento (opcional).",
+            "properties": {
+              "days": {
+                "type": "array",
+                "items": { "type": "number" },
+                "description": "Dias da semana (0-6)."
+              },
+              "start": { "type": "string", "description": "Horário de início (ex: '22:00')." },
+              "end": { "type": "string", "description": "Horário de término (ex: '06:00')." }
+            }
+          },
+          "cooldownSec": {
+            "type": "number",
+            "description": "Novo cooldown em segundos (10 a 3600) (opcional)."
+          },
+          "notify": {
+            "type": "object",
+            "description": "Novas configurações de notificação.",
+            "properties": {
+              "native": { "type": "boolean" },
+              "chat": { "type": "boolean" }
+            }
+          },
+          "label": { "type": "string", "description": "Novo rótulo/nome do monitoramento (opcional)." }
+        },
+        "required": ["monitorId"]
       }
     },
     {
