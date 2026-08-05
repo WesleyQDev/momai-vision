@@ -70,8 +70,7 @@ funcionando mesmo com a MomAI minimizada.
 - "avise quando deixarem uma encomenda na porta" → `motion` + `scene` "tem uma encomenda na porta?"
 - "avise quando eu voltar pra sala" → `presence entered`
 
-Quando o usuário não especificar a câmera, use a câmera padrão (config). Se houver
-mais de uma câmera e não houver padrão, pergunte qual.
+Quando o usuário nomear uma câmera específica ("da caza", "do j6", "da usb"), SEMPRE passe o `cameraId` exato retornado por `list_cameras` (ou o nome da câmera — ex.: `"caza"`) em `capture_snapshot`. Use a câmera padrão (config) apenas quando o usuário não especificar. Se houver mais de uma câmera e não houver padrão, pergunte qual.
 
 ## Honestidade (limites que a MomAI declara)
 

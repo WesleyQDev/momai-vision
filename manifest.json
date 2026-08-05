@@ -2,7 +2,7 @@
   "id": "momai-vision",
   "name": "MomAI Vision",
   "version": "1.0.0",
-  "description": "Olhos para a MomAI: snapshots de câmeras, monitoramento e alertas 100% locais.",
+  "description": "Olhos para a MomAI: prints de câmeras, monitoramento e alertas 100% locais.",
   "author": "MomAI",
   "icon": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M2.5 12c2.1-4.3 5.6-6.5 9.5-6.5s7.4 2.2 9.5 6.5c-2.1 4.3-5.6 6.5-9.5 6.5S4.6 16.3 2.5 12Z\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/><circle cx=\"12\" cy=\"12\" r=\"1\" fill=\"currentColor\"/><path d=\"M17.6 4.9v3.2M16 6.5h3.2\"/></svg>",
   "momai_compat": ">=1.7.0",
@@ -34,19 +34,70 @@
     },
     {
       "name": "capture_snapshot",
-      "description": "Captura um snapshot da câmera especificada (ou da padrão), salva na galeria e descreve a cena com o modelo de visão local. Use para responder 'o que você vê aí?'."
+      "description": "Captura um print da câmera especificada, salva na galeria e mostra a imagem no chat. Quando o usuário nomear uma câmera, SEMPRE passe o cameraId exato retornado por list_cameras (ou o nome dela, ex.: 'caza'). Se o usuário não especificar, pode omitir o argumento para usar a câmera padrão.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cameraId": {
+            "type": "string",
+            "description": "ID exato (ex.: 'ip:http://192.168.0.5:8080/video') ou nome (ex.: 'caza', 'J6', 'USB2.0') da câmera a capturar."
+          }
+        }
+      }
     },
     {
       "name": "describe_snapshot",
-      "description": "Re-descreve um snapshot existente da galeria com o modelo de visão local."
+      "description": "Re-descreve um print existente da galeria com o modelo de visão local.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "snapshotId": {
+            "type": "string",
+            "description": "ID do snapshot da galeria."
+          }
+        },
+        "required": ["snapshotId"]
+      }
     },
     {
       "name": "start_monitoring",
-      "description": "Inicia monitoramento de uma câmera com triggers (motion, object, presence/absence, scene, periodic), schedule, cooldown e notificações. Use para 'me avise quando X'."
+      "description": "Inicia monitoramento de uma câmera com triggers (motion, object, presence/absence, scene, periodic), schedule, cooldown e notificações. Use para 'me avise quando X'.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cameraId": {
+            "type": "string",
+            "description": "ID exato ou nome da câmera."
+          },
+          "triggers": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Lista de triggers: {type: motion|object|presence|absence|scene|periodic, ...}."
+          },
+          "schedule": {
+            "type": "object",
+            "description": "Horário: {days: [0-6], start: '22:00', end: '06:00'}."
+          },
+          "cooldownSec": { "type": "number" },
+          "notify": { "type": "object", "description": "{native: bool, chat: bool}." },
+          "label": { "type": "string" },
+          "confirm": { "type": "boolean" }
+        },
+        "required": ["cameraId", "triggers"]
+      }
     },
     {
       "name": "stop_monitoring",
-      "description": "Para um monitoramento ativo (monitorId ou all:true)."
+      "description": "Para um monitoramento ativo (monitorId ou all:true).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "monitorId": { "type": "string" },
+          "all": { "type": "boolean" }
+        }
+      }
     },
     {
       "name": "get_status",
@@ -54,7 +105,13 @@
     },
     {
       "name": "list_snapshots",
-      "description": "Lista os snapshots da galeria (mais recentes primeiro)."
+      "description": "Lista os prints da galeria (mais recentes primeiro).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "number" }
+        }
+      }
     }
   ],
   "toolPriority": "Use as ferramentas de visão/câmera quando o usuário falar de câmera, ver, enxergar, monitorar, vigiar, alguém chegou/apareceu/saiu, movimento, encomenda, gato/cachorro, porta aberta, luz acesa.",
@@ -64,7 +121,7 @@
   },
   "storage": [
     {
-      "description": "Snapshots (imagens JPEG) e regras de monitoramento, guardados localmente.",
+      "description": "Prints (imagens JPEG) e regras de monitoramento, guardados localmente.",
       "locations": ["snapshots/*.jpg", "monitors.json", "snapshots_index.json", "config.json", "cameras.json"]
     }
   ],

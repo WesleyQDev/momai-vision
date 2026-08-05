@@ -2,4 +2,6 @@ node_modules/
 dist/
 release/
 runtime.js
+snapshots/
 *.log
+*_test_frame.jpg

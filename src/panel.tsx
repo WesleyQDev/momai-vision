@@ -62,6 +62,21 @@ async function stopMonitor(monitorId: string | undefined, onClose?: () => void):
 
 function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
   const [stopping, setStopping] = useState(false)
+
+  if (data?.triggeredBy === 'snapshot') {
+    return (
+      <div className="w-full max-w-md rounded-2xl border border-emerald-500/30 bg-zinc-900/95 text-gray-100 shadow-2xl overflow-hidden">
+        <div className="relative w-full aspect-video bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
+          <img
+            src={data.imageDataUri}
+            alt="Snapshot"
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+        </div>
+      </div>
+    )
+  }
+
   const title = data?.cameraName || 'MomAI Vision'
   const subtitle = data?.className
     ? `${data.cameraName || 'Câmera'} · ${data.className}${data.confidence ? ` ${Math.round(data.confidence * 100)}%` : ''}`
@@ -93,11 +108,16 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
       </div>
 
       {data?.imageDataUri ? (
-        <img src={data.imageDataUri} alt="Snapshot" className="w-full max-h-56 object-cover bg-black" />
+        <div className="relative w-full aspect-video bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
+          <img src={data.imageDataUri} alt="Snapshot" className="absolute inset-0 w-full h-full object-cover" />
+        </div>
       ) : null}
 
       <div className="px-4 py-3">
-        <p className="text-sm text-gray-200">{data?.description || 'Alerta da câmera'}</p>
+        <p className="text-sm text-gray-200">
+          {data?.description ||
+            (data?.triggeredBy === 'snapshot' ? 'Snapshot capturado' : 'Alerta da câmera')}
+        </p>
         {data?.triggeredBy && data?.triggeredBy !== 'snapshot' ? (
           <p className="mt-1 text-xs text-gray-400">{formatTime(data.ts)} · trigger: {data.triggeredBy}</p>
         ) : null}

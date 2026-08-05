@@ -91,6 +91,7 @@ interface StoredConfig {
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
   ipCameras?: Array<{ id: string; name: string; url: string }>
+  selectedCameras?: string[]
 }
 
 async function loadConfig(): Promise<StoredConfig> {
@@ -131,13 +132,58 @@ function listCameras(): CameraEntry[] {
 }
 
 function findCamera(id: string): CameraEntry | undefined {
-  return listCameras().find((c) => c.id === id)
+  if (!id) return undefined
+  const cameras = listCameras()
+  const direct = cameras.find((c) => c.id === id)
+  if (direct) return direct
+  const norm = id.trim().toLowerCase()
+  return (
+    cameras.find((c) => c.name.trim().toLowerCase() === norm) ||
+    cameras.find((c) => c.name.trim().toLowerCase().includes(norm))
+  )
 }
 
 // MJPEG stream client — keeps the latest frame in memory, nothing on disk.
 const mjpegStreams = new Map<string, { controller: AbortController; latest: string | null; latestTs: number }>()
+function parseCameraUrl(rawUrl: string): { urlsToTry: string[]; headers: Record<string, string> } {
+  const headers: Record<string, string> = {}
+  let urlStr = rawUrl.trim()
+  const urlsToTry: string[] = []
+
+  if (urlStr.startsWith('rtsp://')) {
+    try {
+      const match = urlStr.match(/^rtsp:\/\/(?:([^:@]+):([^@]+)@)?([^:/]+)(?::(\d+))?(.*)$/)
+      if (match) {
+        const [, user, pass, host, port, path] = match
+        const creds = user && pass ? `${user}:${pass}` : ''
+        const authPrefix = creds ? `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@` : ''
+        const baseHost = host
+        urlsToTry.push(`http://${authPrefix}${baseHost}:5000/onvif/snapshot`)
+        urlsToTry.push(`http://${authPrefix}${baseHost}:8080/video`)
+        urlsToTry.push(`http://${authPrefix}${baseHost}:8080/snapshot.jpg`)
+        urlsToTry.push(`http://${authPrefix}${baseHost}/snapshot.jpg`)
+        urlsToTry.push(`http://${authPrefix}${baseHost}:${port || 554}${path || '/onvif1'}`)
+      }
+    } catch {}
+    if (urlsToTry.length === 0) {
+      urlsToTry.push(urlStr.replace(/^rtsp:\/\//, 'http://'))
+    }
+  } else {
+    urlsToTry.push(urlStr)
+  }
+
+  return { urlsToTry, headers }
+}
+
 async function startMjpeg(camera: CameraEntry): Promise<void> {
   if (mjpegStreams.has(camera.id)) return
+  if (rtspSessions.has(camera.id)) return
+
+  if (camera.url && camera.url.startsWith('rtsp://')) {
+    await startRtspStream(camera)
+    return
+  }
+
   const controller = new AbortController()
   const entry: { controller: AbortController; latest: string | null; latestTs: number } = {
     controller,
@@ -145,49 +191,102 @@ async function startMjpeg(camera: CameraEntry): Promise<void> {
     latestTs: 0
   }
   mjpegStreams.set(camera.id, entry)
+
   void (async () => {
     try {
-      const res = await fetch(camera.url!, { signal: controller.signal })
-      if (!res.ok || !res.body) throw new Error(`MJPEG ${res.status}`)
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let boundary = ''
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        if (!boundary) {
-          const match = buffer.match(/^--[a-zA-Z0-9-]+/)
-          if (match) boundary = match[0]
-          if (!boundary) {
-            const marker = buffer.indexOf('\r\n')
-            if (marker === -1) continue
-            const line = buffer.slice(0, marker)
-            buffer = buffer.slice(marker + 2)
-            if (line.startsWith('--')) boundary = line
-          }
-        }
-        if (!boundary) continue
-        const parts = buffer.split(boundary)
-        buffer = parts.pop() || ''
-        for (const part of parts) {
-          const headerEnd = part.indexOf('\r\n\r\n')
-          if (headerEnd === -1) continue
-          const header = part.slice(0, headerEnd)
-          const body = part.slice(headerEnd + 4)
-          if (header.toLowerCase().includes('content-type: image/jpeg') && body.length > 100) {
-            entry.latest = Buffer.from(body, 'binary').toString('base64')
+      const { urlsToTry } = parseCameraUrl(camera.url!)
+      let activeUrl = urlsToTry[0]
+
+      for (const targetUrl of urlsToTry) {
+        if (controller.signal.aborted) break
+        try {
+          let reqUrl = targetUrl
+          const reqHeaders: Record<string, string> = {}
+          try {
+            const parsed = new URL(targetUrl)
+            if (parsed.username || parsed.password) {
+              const creds = `${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`
+              reqHeaders['Authorization'] = `Basic ${Buffer.from(creds).toString('base64')}`
+              parsed.username = ''
+              parsed.password = ''
+              reqUrl = parsed.toString()
+            }
+          } catch {}
+
+          const res = await fetch(reqUrl, { headers: reqHeaders, signal: controller.signal })
+          if (!res.ok || !res.body) continue
+
+          const contentType = res.headers.get('content-type') || ''
+          
+          // Single JPEG snapshot endpoint
+          if (contentType.toLowerCase().includes('image/jpeg')) {
+            const arrayBuffer = await res.arrayBuffer()
+            entry.latest = Buffer.from(arrayBuffer).toString('base64')
             entry.latestTs = Date.now()
+            activeUrl = targetUrl
+
+            // Periodically poll snapshot
+            while (!controller.signal.aborted) {
+              await new Promise((resolve) => setTimeout(resolve, 1000))
+              if (controller.signal.aborted) break
+              try {
+                const snapRes = await fetch(reqUrl, { headers: reqHeaders, signal: controller.signal })
+                if (snapRes.ok) {
+                  const buf = await snapRes.arrayBuffer()
+                  entry.latest = Buffer.from(buf).toString('base64')
+                  entry.latestTs = Date.now()
+                }
+              } catch {}
+            }
+            return
           }
+
+          // MJPEG Stream binary reader — scans raw Uint8Array chunks for JPEG SOI (0xFFD8) and EOI (0xFFD9)
+          // without string decoding (which corrupts non-ASCII binary bytes).
+          const reader = res.body.getReader()
+          let streamBuf = Buffer.alloc(0)
+          while (!controller.signal.aborted) {
+            const { done, value } = await reader.read()
+            if (done) break
+            if (value) {
+              streamBuf = Buffer.concat([streamBuf, Buffer.from(value)])
+              while (true) {
+                const soi = streamBuf.indexOf(Buffer.from([0xff, 0xd8]))
+                if (soi === -1) break
+                const eoi = streamBuf.indexOf(Buffer.from([0xff, 0xd9]), soi + 2)
+                if (eoi === -1) break
+                const frame = streamBuf.subarray(soi, eoi + 2)
+                streamBuf = streamBuf.subarray(eoi + 2)
+                entry.latest = frame.toString('base64')
+                entry.latestTs = Date.now()
+              }
+              if (streamBuf.length > 5 * 1024 * 1024) {
+                streamBuf = Buffer.alloc(0)
+              }
+            }
+          }
+          return
+        } catch {
+          // try next URL candidate
         }
+      }
+      // All HTTP fallback URLs failed — if the original URL was rtsp://,
+      // try the raw RTSP client with Digest auth + H.265 depacketization.
+      if (camera.url && camera.url.startsWith('rtsp://')) {
+        mjpegStreams.delete(camera.id) // release slot for startRtspStream
+        bridge?.log(`[vision] HTTP fallbacks failed for ${camera.name}, trying raw RTSP…`)
+        await startRtspStream(camera)
+        return
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
-        bridge?.log(`[vision] MJPEG ${camera.name} stopped: ${err instanceof Error ? err.message : String(err)}`)
+        bridge?.log(`[vision] Camera stream ${camera.name} stopped: ${err instanceof Error ? err.message : String(err)}`)
       }
     } finally {
-      mjpegStreams.delete(camera.id)
+      // Only delete if no RTSP session took over
+      if (!rtspSessions.has(camera.id)) {
+        mjpegStreams.delete(camera.id)
+      }
     }
   })()
 }
@@ -198,6 +297,351 @@ function stopMjpeg(cameraId: string): void {
     entry.controller.abort()
     mjpegStreams.delete(cameraId)
   }
+  stopRtsp(cameraId)
+}
+
+// ---------------------------------------------------------------------------
+// RTSP client — raw TCP with Digest auth, TCP interleaved RTP, H.265→JPEG
+// via FFmpeg. For cameras (e.g. Yoosee/HiChip) that don't expose HTTP
+// snapshot endpoints and whose RTSP implementation is too non-standard for
+// FFmpeg's own RTSP demuxer.
+// ---------------------------------------------------------------------------
+
+interface RtspSession {
+  socket: import('node:net').Socket
+  ffmpeg: import('node:child_process').ChildProcess | null
+  alive: boolean
+}
+
+const rtspSessions = new Map<string, RtspSession>()
+
+function stopRtsp(cameraId: string): void {
+  const session = rtspSessions.get(cameraId)
+  if (!session) return
+  session.alive = false
+  try { session.socket.destroy() } catch {}
+  try { session.ffmpeg?.kill() } catch {}
+  rtspSessions.delete(cameraId)
+}
+
+let _cryptoMod: typeof import('node:crypto') | null = null
+async function getCrypto(): Promise<typeof import('node:crypto')> {
+  if (!_cryptoMod) _cryptoMod = await import('node:crypto')
+  return _cryptoMod
+}
+
+function rtspMd5(cryptoMod: typeof import('node:crypto'), str: string): string {
+  return cryptoMod.createHash('md5').update(str).digest('hex')
+}
+
+function buildDigestAuthHeader(
+  cryptoMod: typeof import('node:crypto'),
+  username: string, password: string,
+  realm: string, nonce: string,
+  method: string, uri: string
+): string {
+  const ha1 = rtspMd5(cryptoMod, `${username}:${realm}:${password}`)
+  const ha2 = rtspMd5(cryptoMod, `${method}:${uri}`)
+  const response = rtspMd5(cryptoMod, `${ha1}:${nonce}:${ha2}`)
+  return `Digest username="${username}", realm="${realm}", nonce="${nonce}", uri="${uri}", response="${response}"`
+}
+
+async function startRtspStream(camera: CameraEntry): Promise<void> {
+  if (rtspSessions.has(camera.id)) return
+  if (mjpegStreams.has(camera.id)) return
+
+  const url = camera.url!
+  const match = url.match(/^rtsp:\/\/(?:([^:@]+):([^@]+)@)?([^:/]+)(?::(\d+))?(\/.*)?$/)
+  if (!match) {
+    bridge?.log(`[vision] RTSP: invalid URL for ${camera.name}: ${url}`)
+    return
+  }
+
+  const [, user, pass, host, portStr, urlPath] = match
+  const port = parseInt(portStr || '554', 10)
+  const streamPath = urlPath || '/onvif1'
+  const username = user || 'admin'
+  const password = pass || ''
+
+  const entry: { controller: AbortController; latest: string | null; latestTs: number } = {
+    controller: new AbortController(),
+    latest: null,
+    latestTs: 0
+  }
+  mjpegStreams.set(camera.id, entry)
+
+  const net = await import('node:net')
+  const { spawn } = await import('node:child_process')
+  const cryptoMod = await getCrypto()
+
+  const socket = net.createConnection({ host, port }, () => {
+    bridge?.log(`[vision] RTSP: connected to ${camera.name} (${host}:${port})`)
+  })
+
+  const session: RtspSession = { socket, ffmpeg: null, alive: true }
+  rtspSessions.set(camera.id, session)
+
+  // Spawn FFmpeg to decode H.265 NAL units piped via stdin → MJPEG frames on stdout
+  const ffmpeg = spawn('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error',
+    '-f', 'hevc',
+    '-i', 'pipe:0',
+    '-vf', 'fps=30',
+    '-f', 'image2pipe',
+    '-vcodec', 'mjpeg',
+    '-q:v', '5',
+    'pipe:1'
+  ], { stdio: ['pipe', 'pipe', 'pipe'] })
+  session.ffmpeg = ffmpeg
+
+  // Parse MJPEG output from FFmpeg stdout
+  let jpegBuf = Buffer.alloc(0)
+  ffmpeg.stdout!.on('data', (chunk: Buffer) => {
+    jpegBuf = Buffer.concat([jpegBuf, chunk])
+    // Scan for complete JPEG frames (SOI 0xFFD8 ... EOI 0xFFD9)
+    while (true) {
+      const soi = jpegBuf.indexOf(Buffer.from([0xff, 0xd8]))
+      if (soi === -1) break
+      const eoi = jpegBuf.indexOf(Buffer.from([0xff, 0xd9]), soi + 2)
+      if (eoi === -1) break
+      const frame = jpegBuf.subarray(soi, eoi + 2)
+      jpegBuf = jpegBuf.subarray(eoi + 2)
+      entry.latest = frame.toString('base64')
+      entry.latestTs = Date.now()
+    }
+  })
+
+  ffmpeg.on('exit', () => {
+    if (session.alive) {
+      bridge?.log(`[vision] RTSP: FFmpeg exited for ${camera.name}, restarting...`)
+      // Will be restarted on next get_frame call
+    }
+  })
+
+  // RTSP state machine
+  const baseUri = `rtsp://${host}:${port}${streamPath}`
+  let cseq = 0
+  let realm = ''
+  let nonce = ''
+  let rtspSessionId = ''
+  let rtpBuffer = Buffer.alloc(0)
+  let phase: 'describe_unauth' | 'describe_auth' | 'setup' | 'play' | 'streaming' = 'describe_unauth'
+  const startCode = Buffer.from([0x00, 0x00, 0x00, 0x01])
+
+  function sendRtsp(method: string, uri: string, extraHeaders: string = ''): void {
+    cseq++
+    let authLine = ''
+    if (realm && nonce) {
+      authLine = `Authorization: ${buildDigestAuthHeader(cryptoMod, username, password, realm, nonce, method, uri)}\r\n`
+    }
+    const req = `${method} ${uri} RTSP/1.0\r\nCSeq: ${cseq}\r\n${authLine}User-Agent: MomAI-Vision\r\n${extraHeaders}\r\n`
+    socket.write(req)
+  }
+
+  // Start DESCRIBE without auth to get the Digest challenge
+  socket.on('connect', () => {
+    sendRtsp('DESCRIBE', baseUri, 'Accept: application/sdp\r\n')
+  })
+
+  socket.on('data', (chunk: Buffer) => {
+    if (!session.alive) return
+    rtpBuffer = Buffer.concat([rtpBuffer, chunk])
+
+    // Before streaming, parse text RTSP responses
+    if (phase !== 'streaming') {
+      const text = rtpBuffer.toString('utf-8')
+
+      if (phase === 'describe_unauth') {
+        if (text.includes('401 Unauthorized')) {
+          const realmMatch = text.match(/realm="([^"]+)"/)
+          const nonceMatch = text.match(/nonce="([^"]+)"/)
+          if (realmMatch && nonceMatch) {
+            realm = realmMatch[1]
+            nonce = nonceMatch[1]
+            phase = 'describe_auth'
+            rtpBuffer = Buffer.alloc(0)
+            sendRtsp('DESCRIBE', baseUri, 'Accept: application/sdp\r\n')
+          } else {
+            bridge?.log(`[vision] RTSP 401 missing realm/nonce for ${camera.name}`)
+            stopRtsp(camera.id)
+          }
+          return
+        } else if (text.includes('RTSP/1.0 200 OK') && text.includes('v=0')) {
+          phase = 'setup'
+          rtpBuffer = Buffer.alloc(0)
+          const setupUri = `${baseUri}/track1`
+          sendRtsp('SETUP', setupUri, 'Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n')
+          return
+        } else if (text.includes('\r\n\r\n')) {
+          bridge?.log(`[vision] RTSP DESCRIBE failed for ${camera.name}: ${text.slice(0, 120)}`)
+          stopRtsp(camera.id)
+          return
+        }
+        return
+      }
+
+      if (phase === 'describe_auth') {
+        if (text.includes('RTSP/1.0 200 OK') && text.includes('v=0')) {
+          phase = 'setup'
+          rtpBuffer = Buffer.alloc(0)
+          const setupUri = `${baseUri}/track1`
+          sendRtsp('SETUP', setupUri, 'Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n')
+          return
+        } else if (text.includes('401 Unauthorized')) {
+          bridge?.log(`[vision] RTSP Auth FAILED (401) for ${camera.name} — check username/password`)
+          stopRtsp(camera.id)
+          return
+        } else if (text.includes('\r\n\r\n')) {
+          bridge?.log(`[vision] RTSP DESCRIBE auth failed for ${camera.name}: ${text.slice(0, 120)}`)
+          stopRtsp(camera.id)
+          return
+        }
+        return
+      }
+
+      if (phase === 'setup') {
+        if (text.includes('Session:')) {
+          const sessionMatch = text.match(/Session:\s*([^\r\n;]+)/i)
+          if (sessionMatch) {
+            rtspSessionId = sessionMatch[1].trim()
+            phase = 'play'
+            rtpBuffer = Buffer.alloc(0)
+            sendRtsp('PLAY', baseUri, `Session: ${rtspSessionId}\r\n`)
+            bridge?.log(`[vision] RTSP: streaming ${camera.name} (H.265 → JPEG)`)
+            return
+          }
+        } else if (text.includes('\r\n\r\n')) {
+          bridge?.log(`[vision] RTSP SETUP failed for ${camera.name}: ${text.slice(0, 120)}`)
+          stopRtsp(camera.id)
+          return
+        }
+        return
+      }
+
+      if (phase === 'play') {
+        if (text.includes('RTSP/1.0 200 OK')) {
+          phase = 'streaming'
+          const headerEnd = rtpBuffer.indexOf(Buffer.from([0x0d, 0x0a, 0x0d, 0x0a]))
+          if (headerEnd !== -1) {
+            rtpBuffer = rtpBuffer.subarray(headerEnd + 4)
+          } else {
+            rtpBuffer = Buffer.alloc(0)
+          }
+        } else {
+          return
+        }
+      }
+    }
+
+    // Parse interleaved RTP packets ($<channel><length_u16><rtp_data>)
+    while (rtpBuffer.length >= 4) {
+      if (rtpBuffer[0] === 0x24) { // '$' magic byte
+        const channel = rtpBuffer[1]
+        const length = rtpBuffer.readUInt16BE(2)
+        if (rtpBuffer.length < 4 + length) break // need more data
+
+        const rtpPacket = rtpBuffer.subarray(4, 4 + length)
+        rtpBuffer = rtpBuffer.subarray(4 + length)
+
+        // Only process video channel (0)
+        if (channel !== 0 || rtpPacket.length <= 12) continue
+
+        // Strip 12-byte RTP header → NAL payload
+        const payload = rtpPacket.subarray(12)
+        if (payload.length < 2) continue
+
+        // H.265 NAL unit header is 2 bytes: (type >> 1) & 0x3F
+        const nalType = (payload[0] >> 1) & 0x3f
+
+        if (nalType === 49) {
+          // FU (Fragmentation Unit) — RFC 7798 §4.4.3
+          // Byte 0-1: NAL header of the FU indicator
+          // Byte 2: FU header (S|E|type)
+          if (payload.length < 3) continue
+          const fuHeader = payload[2]
+          const isStart = !!(fuHeader & 0x80)
+          const isEnd = !!(fuHeader & 0x40)
+          const fuNalType = fuHeader & 0x3f
+
+          if (isStart) {
+            // Reconstruct NAL header: copy the FU indicator header but replace the type
+            const nalHeader = Buffer.alloc(2)
+            nalHeader[0] = (payload[0] & 0x81) | (fuNalType << 1)
+            nalHeader[1] = payload[1]
+            try {
+              ffmpeg.stdin!.write(startCode)
+              ffmpeg.stdin!.write(nalHeader)
+              ffmpeg.stdin!.write(payload.subarray(3))
+            } catch {}
+          } else {
+            // Continuation or end fragment — just append the payload (skip FU header bytes)
+            try {
+              ffmpeg.stdin!.write(payload.subarray(3))
+            } catch {}
+          }
+        } else if (nalType >= 0 && nalType <= 40) {
+          // Single NAL unit packet — pass through with start code
+          try {
+            ffmpeg.stdin!.write(startCode)
+            ffmpeg.stdin!.write(payload)
+          } catch {}
+        } else if (nalType === 48) {
+          // AP (Aggregation Packet) — RFC 7798 §4.4.2
+          let offset = 2 // skip NAL header
+          while (offset + 2 <= payload.length) {
+            const nalSize = payload.readUInt16BE(offset)
+            offset += 2
+            if (offset + nalSize > payload.length) break
+            try {
+              ffmpeg.stdin!.write(startCode)
+              ffmpeg.stdin!.write(payload.subarray(offset, offset + nalSize))
+            } catch {}
+            offset += nalSize
+          }
+        }
+      } else {
+        // Not a '$' byte — skip to next '$'
+        const idx = rtpBuffer.indexOf(0x24, 1)
+        if (idx !== -1) {
+          rtpBuffer = rtpBuffer.subarray(idx)
+        } else {
+          rtpBuffer = Buffer.alloc(0)
+          break
+        }
+      }
+    }
+  })
+
+  socket.on('error', (err: Error) => {
+    bridge?.log(`[vision] RTSP: socket error for ${camera.name}: ${err.message}`)
+  })
+
+  socket.on('close', () => {
+    if (session.alive) {
+      bridge?.log(`[vision] RTSP: connection closed for ${camera.name}`)
+      session.alive = false
+      try { ffmpeg.kill() } catch {}
+      rtspSessions.delete(camera.id)
+      mjpegStreams.delete(camera.id)
+    }
+  })
+
+  // Keepalive: send GET_PARAMETER every 30s to keep session alive
+  const keepaliveInterval = setInterval(() => {
+    if (!session.alive) { clearInterval(keepaliveInterval); return }
+    try {
+      sendRtsp('GET_PARAMETER', baseUri, rtspSessionId ? `Session: ${rtspSessionId}\r\n` : '')
+    } catch { clearInterval(keepaliveInterval) }
+  }, 30000)
+
+  // Cleanup on abort
+  entry.controller.signal.addEventListener('abort', () => {
+    session.alive = false
+    clearInterval(keepaliveInterval)
+    try { socket.destroy() } catch {}
+    try { ffmpeg.kill() } catch {}
+    rtspSessions.delete(camera.id)
+  })
 }
 
 async function getCameraFrame(camera: CameraEntry): Promise<{ jpegBase64: string; width?: number; height?: number } | null> {
@@ -657,6 +1101,10 @@ async function ensureWebcamWatch(cameraId: string): Promise<void> {
 
 async function toolListCameras(): Promise<unknown> {
   await refreshWebcams()
+  await syncIpCameras().catch(() => {})
+  for (const cam of ipCameras) {
+    await startMjpeg(cam).catch(() => {})
+  }
   const cameras = listCameras()
   const status = await getStatusData()
   const config = await loadConfig()
@@ -669,13 +1117,14 @@ async function toolListCameras(): Promise<unknown> {
       online: status[c.id]?.online ?? false,
       monitors: status[c.id]?.monitors ?? 0
     })),
-    defaultCamera: config.defaultCamera || null
+    defaultCamera: config.defaultCamera || null,
+    selectedCameras: config.selectedCameras || []
   }
 }
 
-async function toolCaptureSnapshot(args: { cameraId?: string }): Promise<unknown> {
+async function toolCaptureSnapshot(args: { cameraId?: string; camera?: string; name?: string }): Promise<unknown> {
   const config = await loadConfig()
-  const cameraId = args.cameraId || config.defaultCamera || undefined
+  const cameraId = args.cameraId || args.camera || args.name || config.defaultCamera || undefined
   if (!cameraId) {
     return { ok: false, error: 'no camera specified' }
   }
@@ -700,11 +1149,8 @@ async function toolCaptureSnapshot(args: { cameraId?: string }): Promise<unknown
   }
   if (!frame) return { ok: false, error: 'no frame available' }
   const snapshot = await saveSnapshot(frame.jpegBase64, { cameraId })
-  const description = await describeImage(
-    frame.jpegBase64,
-    'Descreva a cena nesta imagem em 1-2 frases, em portugues.'
-  ).catch(() => '')
-  bridge?.sendStructuredResponse({
+  const description = ''
+  const structuredResponse = {
     type: 'vision_alert',
     data: {
       cameraId,
@@ -716,8 +1162,17 @@ async function toolCaptureSnapshot(args: { cameraId?: string }): Promise<unknown
       description,
       imageDataUri: `data:image/jpeg;base64,${frame.jpegBase64}`
     }
-  })
-  return { ok: true, snapshotId: snapshot.id, description, cameraId, cameraName: camera.name }
+  }
+  bridge?.sendStructuredResponse(structuredResponse)
+  return {
+    ok: true,
+    snapshotId: snapshot.id,
+    description,
+    cameraId,
+    cameraName: camera.name,
+    directResponse: `Print capturado (${camera.name}).`,
+    structuredResponse
+  }
 }
 
 async function toolDescribeSnapshot(args: { snapshotId: string }): Promise<unknown> {
@@ -846,28 +1301,72 @@ async function toolGetStatus(): Promise<unknown> {
 async function toolListSnapshots(args: { limit?: number }): Promise<unknown> {
   const index = await loadIndex()
   const limit = Math.min(Math.max(Number(args.limit) || 50, 1), 200)
+  const items = await Promise.all(
+    index.slice(0, limit).map(async (s) => {
+      const base64 = await readSnapshotBase64(s.id)
+      return {
+        id: s.id,
+        cameraId: s.cameraId,
+        ts: s.ts,
+        trigger: s.trigger,
+        description: s.description,
+        imageDataUri: base64 ? `data:image/jpeg;base64,${base64}` : null
+      }
+    })
+  )
   return {
     ok: true,
-    snapshots: index.slice(0, limit).map((s) => ({
-      id: s.id,
-      cameraId: s.cameraId,
-      ts: s.ts,
-      trigger: s.trigger,
-      description: s.description
-    }))
+    snapshots: items
   }
 }
 
-// POST /extensions/momai-vision/frame — the dashboard page pumps webcam
-// frames (getUserMedia in the renderer) for live bounding boxes.
-async function toolFramePump(args: { jpegBase64?: string }): Promise<unknown> {
+async function toolDeleteSnapshot(args: { snapshotId?: string; id?: string }): Promise<unknown> {
+  const id = args.snapshotId || args.id
+  if (!id) return { ok: false, error: 'snapshotId required' }
+  const index = await loadIndex()
+  const updated = index.filter((s) => s.id !== id)
+  await saveIndex(updated)
+  await deleteSnapshotFiles([id])
+  return { ok: true, snapshotId: id }
+}
+
+async function toolClearSnapshots(): Promise<unknown> {
+  const index = await loadIndex()
+  const allIds = index.map((s) => s.id)
+  await saveIndex([])
+  if (allIds.length > 0) {
+    await deleteSnapshotFiles(allIds)
+  }
+  return { ok: true, deletedCount: allIds.length }
+}
+
+// GET /extensions/momai-vision/command get_frame — fetch latest decoded frame
+// from an IP camera or camera source (avoids renderer CSP img-src violations).
+async function toolGetFrame(args: { cameraId?: string }): Promise<unknown> {
+  if (!args.cameraId) return { ok: false, error: 'cameraId required' }
+  const camera = findCamera(args.cameraId)
+  if (!camera) return { ok: false, error: `unknown camera: ${args.cameraId}` }
+  if (camera.source === 'ip') {
+    await startMjpeg(camera)
+    const frame = await getCameraFrame(camera)
+    if (frame?.jpegBase64) {
+      return { ok: true, jpegBase64: frame.jpegBase64 }
+    }
+  }
+  return { ok: false, error: 'no frame available' }
+}
+
+// POST /extensions/momai-vision/frame — the dashboard page pumps webcam & IP camera
+// frames for live bounding boxes.
+async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): Promise<unknown> {
   if (!args.jpegBase64) return { ok: false, error: 'jpegBase64 required' }
+  const cameraId = args.cameraId || 'page'
   try {
     const result = await engineDetect(args.jpegBase64)
     if (result.error) return { ok: false, error: result.error }
     const detections = result.boxes || []
     bridge?.sendEvent('vision_detections', {
-      cameraId: 'page',
+      cameraId,
       ts: Date.now(),
       detections: detections.map((d) => ({
         className: d.className,
@@ -891,6 +1390,7 @@ async function toolConfigure(args: {
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
   ipCameras?: Array<{ id: string; name: string; url: string }>
+  selectedCameras?: string[]
 }): Promise<unknown> {
   const current = ((await bridge!.storage.get('config')) || {}) as Record<string, unknown>
   const config = {
@@ -899,7 +1399,8 @@ async function toolConfigure(args: {
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
     ...(args.maxSnapshots !== undefined ? { maxSnapshots: args.maxSnapshots } : {}),
     ...(args.trackingMode !== undefined ? { trackingMode: args.trackingMode } : {}),
-    ...(args.ipCameras !== undefined ? { ipCameras: args.ipCameras } : {})
+    ...(args.ipCameras !== undefined ? { ipCameras: args.ipCameras } : {}),
+    ...(args.selectedCameras !== undefined ? { selectedCameras: args.selectedCameras } : {})
   }
   await bridge!.storage.set('config', config)
   if (args.ipCameras !== undefined) {
@@ -964,10 +1465,13 @@ const tools: Record<string, (args: any) => Promise<unknown>> = {
   list_cameras: toolListCameras,
   capture_snapshot: toolCaptureSnapshot,
   describe_snapshot: toolDescribeSnapshot,
+  delete_snapshot: toolDeleteSnapshot,
+  clear_snapshots: toolClearSnapshots,
   start_monitoring: toolStartMonitoring,
   stop_monitoring: toolStopMonitoring,
   get_status: toolGetStatus,
   list_snapshots: toolListSnapshots,
+  get_frame: toolGetFrame,
   frame_pump: toolFramePump,
   configure: toolConfigure
 }

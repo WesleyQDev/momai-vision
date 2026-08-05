@@ -50,6 +50,24 @@ describe('VisionPanel', () => {
 })
 
 describe('VisionAlertCard', () => {
+  it('renders only the image for snapshots (no buttons or header)', () => {
+    render(
+      <VisionAlertCard
+        data={{
+          cameraName: 'Webcam',
+          monitorId: 'snapshot',
+          triggeredBy: 'snapshot',
+          imageDataUri: 'data:image/jpeg;base64,abc'
+        }}
+      />
+    )
+    const img = screen.getByRole('img') as HTMLImageElement
+    expect(img.src).toContain('data:image/jpeg;base64,abc')
+    expect(screen.queryByText('Abrir MomAI')).toBeNull()
+    expect(screen.queryByText('Parar monitoramento')).toBeNull()
+    expect(screen.queryByText('Webcam')).toBeNull()
+  })
+
   it('renders the alert title, description and snapshot', () => {
     render(
       <VisionAlertCard
