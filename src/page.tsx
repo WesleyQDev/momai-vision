@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
-import { ptLabel } from './vision/labels'
+import { ptLabel, PT_CLASS } from './vision/labels'
 import { AlertCanvasOverlay } from './panel'
 
 const sdk = getSDK()
@@ -246,12 +246,6 @@ function CustomSelect<T extends string = string>({
   )
 }
 
-const MODE_OPTIONS: CustomSelectOption[] = [
-  { value: 'fluid', label: 'Fluido' },
-  { value: 'balanced', label: 'Equilibrado' },
-  { value: 'economy', label: 'Economia' }
-]
-
 // ---------------------------------------------------------------------------
 // Camera Card with Live Preview & Top Header Bar (Name, Expand & Close)
 // ---------------------------------------------------------------------------
@@ -262,7 +256,8 @@ function CameraCard({
   onSnapshot,
   onRemove,
   onExpand,
-  refreshKey = 0
+  refreshKey = 0,
+  isActive = true
 }: {
   camera: CameraInfo
   detections: Record<string, Detection[]>
@@ -270,17 +265,16 @@ function CameraCard({
   onRemove?: (cameraId: string) => void
   onExpand?: (camera: CameraInfo) => void
   refreshKey?: number
+  isActive?: boolean
 }): JSX.Element {
+  const cardRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [flashing, setFlashing] = useState(false)
   const [printStatus, setPrintStatus] = useState<'idle' | 'capturing' | 'success'>('idle')
   const [ipBase64, setIpBase64] = useState<string | null>(null)
-  const [mode, setMode] = useState<string>(() => {
-    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:mode`) : null
-    return saved || 'balanced'
-  })
+  const mode = 'fluid'
   const ipBase64Ref = useRef<string | null>(null)
 
   useEffect(() => {
@@ -312,10 +306,21 @@ function CameraCard({
     }
   }, [camera.id, detections])
 
+  const fetchingRef = useRef(false)
+  const pumpingRef = useRef(false)
+
+  const isCardVisible = useCallback(() => {
+    if (!isActive) return false
+    const el = cardRef.current
+    if (!el) return true
+    if (typeof el.checkVisibility === 'function') {
+      return el.checkVisibility()
+    }
+    return el.offsetParent !== null
+  }, [isActive])
+
   useEffect(() => {
-    setReady(false)
     setError(null)
-    setIpBase64(null)
   }, [refreshKey])
 
   // Live frame polling via the worker. Webcam frames come from the host camera
@@ -327,21 +332,31 @@ function CameraCard({
 
     const fetchFrame = async () => {
       if (cancelled) return
-      let nextInterval = 42 // 24 FPS (1000ms / 24 = ~41.67ms)
-      if (!document.hidden) {
-        try {
-          const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
-          if (!cancelled && res.jpegBase64) {
-            setIpBase64(res.jpegBase64)
-            setReady(true)
-            setError(null)
-          } else {
-            setReady(true)
-            nextInterval = 500 // initializing/no frame — back off
+      let nextInterval = 33 // Up to 30 FPS max fluid capability
+      if (!document.hidden && isCardVisible()) {
+        if (!fetchingRef.current) {
+          fetchingRef.current = true
+          const startTs = Date.now()
+          try {
+            const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
+            if (!cancelled && res.jpegBase64) {
+              setIpBase64(res.jpegBase64)
+              setReady(true)
+              setError(null)
+            } else {
+              setReady(true)
+              nextInterval = 300
+            }
+          } catch {
+            nextInterval = 500
+          } finally {
+            fetchingRef.current = false
+            const elapsed = Date.now() - startTs
+            nextInterval = Math.max(0, 33 - elapsed)
           }
-        } catch {
-          nextInterval = 1000 // offline/transient error — back off
         }
+      } else {
+        nextInterval = 400
       }
       if (!cancelled) {
         timer = window.setTimeout(fetchFrame, nextInterval)
@@ -353,7 +368,7 @@ function CameraCard({
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [camera.id, refreshKey])
+  }, [camera.id, refreshKey, isCardVisible])
 
   useEffect(() => {
     drawBoxes()
@@ -363,13 +378,16 @@ function CameraCard({
   useEffect(() => {
     const interval = PUMP_INTERVALS[mode] || 1000
     const run = async () => {
-      if (document.hidden) return
+      if (document.hidden || !isCardVisible() || pumpingRef.current) return
       const jpegBase64 = ipBase64Ref.current
       if (!jpegBase64) return
+      pumpingRef.current = true
       try {
         await command<{ detections?: Detection[] }>('frame_pump', { cameraId: camera.id, jpegBase64 })
       } catch {
         // transient — keep pumping
+      } finally {
+        pumpingRef.current = false
       }
     }
     void run()
@@ -377,7 +395,7 @@ function CameraCard({
     return () => {
       clearInterval(timer)
     }
-  }, [camera.id, mode])
+  }, [camera.id, mode, isCardVisible])
 
   const handleTakeSnapshot = async () => {
     setFlashing(true)
@@ -393,7 +411,7 @@ function CameraCard({
   }
 
   return (
-    <div className="flex flex-col h-full rounded-2xl bg-zinc-900/60 overflow-hidden shadow-lg transition-all">
+    <div ref={cardRef} className="flex flex-col h-full rounded-2xl bg-zinc-900/80 border border-white/10 hover:border-white/20 overflow-hidden shadow-xl transition-all">
       <div className="relative w-full aspect-video bg-black rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
         {ready && ipBase64 ? (
           <img
@@ -464,23 +482,10 @@ function CameraCard({
       </div>
 
       <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/80 shrink-0 border-t border-white/5">
-        {camera.source === 'webcam' ? (
-          <CustomSelect
-            value={mode}
-            onChange={(val) => {
-              setMode(val)
-              localStorage.setItem(`${EXT_ID}:mode`, val)
-            }}
-            options={MODE_OPTIONS}
-            size="sm"
-            direction="up"
-            className="min-w-[130px]"
-          />
-        ) : (
-          <span className="text-[11px] text-gray-500 flex items-center gap-1.5 font-medium px-1">
-            MJPEG/IP
-          </span>
-        )}
+        <span className="text-[11px] text-gray-400 font-medium px-1 flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+          {camera.source === 'webcam' ? 'Webcam' : 'MJPEG / IP'}
+        </span>
 
         {/* Interactive Print Button with Depth & State Feedback */}
         <button
@@ -1168,16 +1173,526 @@ function ExpandedAlertModal({
   )
 }
 
+const TRIGGER_TYPES = [
+  { value: 'motion', label: 'Movimento (Detecção de Mudança na Câmera)' },
+  { value: 'object', label: 'Detecção de Objetos' },
+  { value: 'person', label: 'Pessoas' },
+  { value: 'animal', label: 'Animais' },
+  { value: 'presence', label: 'Presença Cumulativa / Permanência' },
+  { value: 'absence', label: 'Ausência / Desaparecimento da Cena' }
+]
+
+const SENSITIVITY_OPTIONS = [
+  { value: 'med', label: 'Média (Recomendado)' },
+  { value: 'low', label: 'Baixa (Apenas movimentos grandes)' },
+  { value: 'high', label: 'Alta (Qualquer movimento)' }
+]
+
+const ANIMAL_KEYS = ['dog', 'cat', 'bird', 'horse', 'sheep', 'cow', 'bear', 'elephant', 'zebra', 'giraffe']
+
+const ANIMAL_OBJECT_OPTIONS = ANIMAL_KEYS.map((key) => ({
+  value: key,
+  label: `${PT_CLASS[key] ? PT_CLASS[key].charAt(0).toUpperCase() + PT_CLASS[key].slice(1) : key} (${key})`
+}))
+
+const INANIMATE_OBJECT_OPTIONS = Object.entries(PT_CLASS)
+  .filter(([key]) => key !== 'person' && !ANIMAL_KEYS.includes(key))
+  .map(([key, label]) => ({
+    value: key,
+    label: `${label.charAt(0).toUpperCase() + label.slice(1)} (${key})`
+  }))
+
+const ALL_OBJECT_OPTIONS = Object.entries(PT_CLASS).map(([key, label]) => ({
+  value: key,
+  label: `${label.charAt(0).toUpperCase() + label.slice(1)} (${key})`
+}))
+
+const COOLDOWN_OPTIONS = [
+  { value: '30', label: '30 segundos' },
+  { value: '60', label: '1 minuto' },
+  { value: '300', label: '5 minutos (Padrão)' },
+  { value: '600', label: '10 minutos' },
+  { value: '1800', label: '30 minutos' },
+  { value: 'custom', label: 'Outro' }
+]
+
+function formatTriggerPortuguese(t: Trigger): string {
+  switch (t.type) {
+    case 'motion':
+      return `Movimento (${t.sensitivity === 'high' ? 'Alta sensibilidade' : t.sensitivity === 'low' ? 'Baixa sensibilidade' : 'Sensibilidade média'})`
+    case 'object':
+      if (t.className === 'person') {
+        return `Pessoas (${t.present === false ? 'Ausente' : 'Detectar presença'})`
+      }
+      if (ANIMAL_KEYS.includes(t.className || '')) {
+        return `Animal: ${ptLabel(t.className)} (${t.present === false ? 'Ausente' : 'Presente'})`
+      }
+      return `Objeto: ${ptLabel(t.className || 'objeto')} (${t.present === false ? 'Ausente' : 'Presente'})`
+    case 'presence':
+      return `Presença: ${ptLabel(t.className || 'pessoa')} (${t.event === 'entered' ? 'Entrou' : t.event === 'left' ? 'Saiu' : 'Permaneceu'}${t.windowSec ? `, ${t.windowSec}s` : ''})`
+    case 'absence':
+      return `Ausência: ${ptLabel(t.className || 'pessoa')}${t.windowSec ? ` (${t.windowSec}s)` : ''}`
+    case 'scene':
+      return `Pergunta IA: "${t.question}"`
+    case 'periodic':
+      return `Resumo a cada ${t.everySec || 300}s`
+    default:
+      return (t as { type: string }).type
+  }
+}
+
+interface AddEditMonitorModalProps {
+  isOpen: boolean
+  onClose: () => void
+  cameras: CameraInfo[]
+  initialMonitor?: MonitorInfo | null
+  onSave: () => Promise<void> | void
+}
+
+function AddEditMonitorModal({
+  isOpen,
+  onClose,
+  cameras,
+  initialMonitor,
+  onSave
+}: AddEditMonitorModalProps): JSX.Element | null {
+  if (!isOpen) return null
+
+  const initCooldown = initialMonitor?.cooldownSec || 300
+  const isPreset = ['30', '60', '300', '600', '1800'].includes(String(initCooldown))
+
+  const [cameraId, setCameraId] = useState<string>(
+    initialMonitor?.cameraId || cameras[0]?.id || ''
+  )
+  const [label, setLabel] = useState<string>(initialMonitor?.label || '')
+  const [cooldownPreset, setCooldownPreset] = useState<string>(isPreset ? String(initCooldown) : 'custom')
+  const [customCooldownValue, setCustomCooldownValue] = useState<number>(
+    initCooldown % 60 === 0 ? initCooldown / 60 : initCooldown
+  )
+  const [customCooldownUnit, setCustomCooldownUnit] = useState<'sec' | 'min'>(
+    initCooldown % 60 === 0 && initCooldown >= 60 ? 'min' : 'sec'
+  )
+
+  const firstTrigger = initialMonitor?.triggers?.[0]
+
+  const getInitialTriggerType = (): string => {
+    if (!firstTrigger) return 'motion'
+    if (firstTrigger.type === 'object') {
+      if (firstTrigger.className === 'person') return 'person'
+      if (ANIMAL_KEYS.includes(firstTrigger.className || '')) return 'animal'
+      return 'object'
+    }
+    return firstTrigger.type || 'motion'
+  }
+
+  const [triggerType, setTriggerType] = useState<string>(getInitialTriggerType())
+
+  const [sensitivity, setSensitivity] = useState<string>(firstTrigger?.sensitivity || 'med')
+  const [objectClass, setObjectClass] = useState<string>(
+    firstTrigger?.className && !ANIMAL_KEYS.includes(firstTrigger.className) && firstTrigger.className !== 'person'
+      ? firstTrigger.className
+      : 'car'
+  )
+  const [animalClass, setAnimalClass] = useState<string>(
+    firstTrigger?.className && ANIMAL_KEYS.includes(firstTrigger.className) ? firstTrigger.className : 'dog'
+  )
+  const [presenceTargetClass, setPresenceTargetClass] = useState<string>(firstTrigger?.className || 'person')
+  const [objectPresent, setObjectPresent] = useState<boolean>(firstTrigger?.present !== false)
+  const [presenceEvent, setPresenceEvent] = useState<string>(firstTrigger?.event || 'entered')
+  const [windowSec, setWindowSec] = useState<number>(firstTrigger?.windowSec || 10)
+
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!cameraId) {
+      setError('Selecione uma câmera.')
+      return
+    }
+
+    let finalCooldown = 300
+    if (cooldownPreset === 'custom') {
+      const val = Math.max(1, Number(customCooldownValue) || 1)
+      finalCooldown = customCooldownUnit === 'min' ? val * 60 : val
+    } else {
+      finalCooldown = Number(cooldownPreset) || 300
+    }
+
+    let trigger: any = {}
+
+    if (triggerType === 'motion') {
+      trigger = { type: 'motion', sensitivity }
+    } else if (triggerType === 'object') {
+      trigger = { type: 'object', className: objectClass, present: objectPresent }
+    } else if (triggerType === 'person') {
+      trigger = { type: 'object', className: 'person', present: objectPresent }
+    } else if (triggerType === 'animal') {
+      trigger = { type: 'object', className: animalClass, present: objectPresent }
+    } else if (triggerType === 'presence') {
+      trigger = { type: 'presence', className: presenceTargetClass, event: presenceEvent, windowSec: Number(windowSec) || 10 }
+    } else if (triggerType === 'absence') {
+      trigger = { type: 'absence', className: presenceTargetClass, event: presenceEvent, windowSec: Number(windowSec) || 10 }
+    }
+
+    setSubmitting(true)
+    setError(null)
+    try {
+      if (initialMonitor?.id) {
+        await command('update_monitoring', {
+          monitorId: initialMonitor.id,
+          cameraId,
+          triggers: [trigger],
+          cooldownSec: finalCooldown,
+          label: label.trim() || undefined
+        })
+      } else {
+        await command('start_monitoring', {
+          cameraId,
+          triggers: [trigger],
+          cooldownSec: finalCooldown,
+          label: label.trim() || undefined
+        })
+      }
+      await onSave()
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
+      <div className="w-full max-w-lg bg-zinc-900 border border-white/15 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 bg-zinc-950/60 shrink-0">
+          <h2 className="text-base font-bold text-white flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+            {initialMonitor ? 'Editar Monitoramento' : 'Novo Monitoramento'}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-gray-400 hover:text-white rounded-lg p-1.5 hover:bg-white/10 transition-colors"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 space-y-4 overflow-y-auto custom-scrollbar flex-1">
+          {error ? (
+            <div className="p-3 text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-xl">
+              {error}
+            </div>
+          ) : null}
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+              Câmera
+            </label>
+            <select
+              value={cameraId}
+              onChange={(e) => setCameraId(e.target.value)}
+              className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500 font-medium"
+            >
+              {cameras.map((cam) => (
+                <option key={cam.id} value={cam.id}>
+                  {cam.name} ({cam.source === 'webcam' ? 'Webcam' : 'IP'})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+              Nome (Opcional)
+            </label>
+            <input
+              type="text"
+              placeholder="ex: Portão da Garagem"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+              Gatilho de Alerta (Trigger)
+            </label>
+            <select
+              value={triggerType}
+              onChange={(e) => setTriggerType(e.target.value)}
+              className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500 font-medium"
+            >
+              {TRIGGER_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {triggerType === 'motion' && (
+            <div>
+              <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                Sensibilidade de Movimento
+              </label>
+              <select
+                value={sensitivity}
+                onChange={(e) => setSensitivity(e.target.value)}
+                className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+              >
+                {SENSITIVITY_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {triggerType === 'object' && (
+            <div className="space-y-4 bg-white/5 p-3.5 rounded-xl border border-white/5">
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                  Objeto Inanimado a Detectar
+                </label>
+                <select
+                  value={objectClass}
+                  onChange={(e) => setObjectClass(e.target.value)}
+                  className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500 font-medium"
+                >
+                  {INANIMATE_OBJECT_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                  Condição
+                </label>
+                <select
+                  value={objectPresent ? 'true' : 'false'}
+                  onChange={(e) => setObjectPresent(e.target.value === 'true')}
+                  className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="true font-medium">Detectar quando estiver Presente</option>
+                  <option value="false">Detectar quando estiver Ausente</option>
+                </select>
+              </div>
+            </div>
+          )}
+
+          {triggerType === 'person' && (
+            <div className="space-y-4 bg-white/5 p-3.5 rounded-xl border border-white/5">
+              <div className="text-xs text-gray-300 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                <span>Detecta a presença de pessoas na cena via Inteligência Artificial.</span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                  Condição
+                </label>
+                <select
+                  value={objectPresent ? 'true' : 'false'}
+                  onChange={(e) => setObjectPresent(e.target.value === 'true')}
+                  className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="true">Detectar quando Pessoa estiver Presente</option>
+                  <option value="false">Detectar quando Pessoa estiver Ausente</option>
+                </select>
+              </div>
+            </div>
+          )}
+
+          {triggerType === 'animal' && (
+            <div className="space-y-4 bg-white/5 p-3.5 rounded-xl border border-white/5">
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                  Animal a Detectar
+                </label>
+                <select
+                  value={animalClass}
+                  onChange={(e) => setAnimalClass(e.target.value)}
+                  className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500 font-medium"
+                >
+                  {ANIMAL_OBJECT_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                  Condição
+                </label>
+                <select
+                  value={objectPresent ? 'true' : 'false'}
+                  onChange={(e) => setObjectPresent(e.target.value === 'true')}
+                  className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="true">Detectar quando Animal estiver Presente</option>
+                  <option value="false">Detectar quando Animal estiver Ausente</option>
+                </select>
+              </div>
+            </div>
+          )}
+
+          {(triggerType === 'presence' || triggerType === 'absence') && (
+            <div className="space-y-4 bg-white/5 p-3.5 rounded-xl border border-white/5">
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                  Alvo (Ser Vivo ou Objeto)
+                </label>
+                <select
+                  value={presenceTargetClass}
+                  onChange={(e) => setPresenceTargetClass(e.target.value)}
+                  className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500 font-medium"
+                >
+                  {ALL_OBJECT_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                  Evento
+                </label>
+                <select
+                  value={presenceEvent}
+                  onChange={(e) => setPresenceEvent(e.target.value)}
+                  className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="entered">Entrou / Apareceu na cena</option>
+                  <option value="stayed">Permaneceu na cena</option>
+                  <option value="left font-medium">Saiu / Desapareceu da cena</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+                  Janela de Tempo (Segundos)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={3600}
+                  value={windowSec}
+                  onChange={(e) => setWindowSec(Number(e.target.value) || 10)}
+                  className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-semibold text-gray-300 mb-1.5">
+              Intervalo mínimo entre Alertas (Cooldown)
+            </label>
+            <select
+              value={cooldownPreset}
+              onChange={(e) => setCooldownPreset(e.target.value)}
+              className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500 font-medium"
+            >
+              {COOLDOWN_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+
+            {cooldownPreset === 'custom' && (
+              <div className="flex items-center gap-2 mt-2 bg-white/5 p-3 rounded-xl border border-white/5 animate-fadeIn">
+                <input
+                  type="number"
+                  min={1}
+                  max={86400}
+                  value={customCooldownValue}
+                  onChange={(e) => setCustomCooldownValue(Number(e.target.value) || 1)}
+                  className="flex-1 bg-zinc-800 border border-white/10 rounded-xl px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-emerald-500 font-medium text-center"
+                />
+                <select
+                  value={customCooldownUnit}
+                  onChange={(e) => setCustomCooldownUnit(e.target.value as 'sec' | 'min')}
+                  className="w-32 bg-zinc-800 border border-white/10 rounded-xl px-3 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-emerald-500 font-medium"
+                >
+                  <option value="sec">Segundos</option>
+                  <option value="min">Minutos</option>
+                </select>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-3 pt-3 border-t border-white/10 shrink-0">
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-xs font-medium text-gray-300 hover:text-white bg-white/5 hover:bg-white/10 px-4 py-2 rounded-xl transition-all"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded-xl transition-all shadow-md active:scale-95 disabled:opacity-60 flex items-center gap-2"
+            >
+              {submitting ? (
+                <>
+                  <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                    <path d="M12 2a10 10 0 0 1 10 10" />
+                  </svg>
+                  Salvando...
+                </>
+              ) : (
+                'Salvar Monitoramento'
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Main Dashboard Page
 // ---------------------------------------------------------------------------
 
-export default function VisionPage(): JSX.Element {
-  const [cameras, setCameras] = useState<CameraInfo[]>([])
+export default function VisionPage({ isActive = true }: { isActive?: boolean }): JSX.Element {
+  const [cameras, setCameras] = useState<CameraInfo[]>(() => {
+    try {
+      const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:cameras`) : null
+      return saved ? JSON.parse(saved) : []
+    } catch {
+      return []
+    }
+  })
   const [monitors, setMonitors] = useState<MonitorInfo[]>([])
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
-  const [config, setConfig] = useState<VisionConfig>({})
+  const [config, setConfig] = useState<VisionConfig>(() => {
+    try {
+      const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:config`) : null
+      return saved ? JSON.parse(saved) : {}
+    } catch {
+      return {}
+    }
+  })
   const [detections, setDetections] = useState<Record<string, Detection[]>>({})
   const [activeTab, setActiveTab] = useState<'cameras' | 'alerts' | 'gallery' | 'settings'>('cameras')
   const [busy, setBusy] = useState(false)
@@ -1185,6 +1700,8 @@ export default function VisionPage(): JSX.Element {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isMonitorModalOpen, setIsMonitorModalOpen] = useState(false)
+  const [editingMonitor, setEditingMonitor] = useState<MonitorInfo | null>(null)
   const [expandedCamera, setExpandedCamera] = useState<CameraInfo | null>(null)
   const [expandedPrint, setExpandedPrint] = useState<Snapshot | null>(null)
   const [expandedAlert, setExpandedAlert] = useState<Alert | null>(null)
@@ -1248,13 +1765,24 @@ export default function VisionPage(): JSX.Element {
         command<{ monitors: MonitorInfo[] }>('get_status'),
         command<{ alerts: Alert[] }>('list_alerts').catch(() => ({ alerts: [] }))
       ])
-      setCameras(camRes.cameras || [])
+      const fetchedCams = camRes.cameras || []
+      setCameras(fetchedCams)
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(`${EXT_ID}:cameras`, JSON.stringify(fetchedCams))
+      }
       setMonitors(statusRes.monitors || [])
       if (alertsRes.alerts) {
         setAlerts(alertsRes.alerts)
       }
       if (camRes.selectedCameras !== undefined) {
-        setConfig((prev) => ({ ...prev, selectedCameras: camRes.selectedCameras ?? [] }))
+        const sel = camRes.selectedCameras ?? []
+        setConfig((prev) => {
+          const next = { ...prev, selectedCameras: sel }
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+          }
+          return next
+        })
       }
       setError(null)
     } catch (err) {
@@ -1325,11 +1853,12 @@ export default function VisionPage(): JSX.Element {
   }, [alerts.length])
 
   useEffect(() => {
+    if (!isActive) return
     void poll()
     void refreshGallery()
     const timer = setInterval(() => void poll(), 5000)
     return () => clearInterval(timer)
-  }, [poll, refreshGallery])
+  }, [poll, refreshGallery, isActive])
 
   useEffect(() => {
     const unsubAlert = sdk.events.subscribe<Alert>('vision_alert', (alert: Alert) => {
@@ -1379,15 +1908,27 @@ export default function VisionPage(): JSX.Element {
 
   const toggleCameraSelection = useCallback(
     async (cameraId: string) => {
-      const currentSelected = config.selectedCameras ?? []
+      const allIds = cameras.map((c) => c.id)
+      const currentSelected =
+        config.selectedCameras && config.selectedCameras.length > 0
+          ? config.selectedCameras
+          : allIds
 
       const nextSelected = currentSelected.includes(cameraId)
         ? currentSelected.filter((id) => id !== cameraId)
         : [...currentSelected, cameraId]
 
+      // Optimistic state update — card closes instantly in UI (0ms)
+      setConfig((prev) => {
+        const next = { ...prev, selectedCameras: nextSelected }
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+        }
+        return next
+      })
+
       try {
         await command('configure', { selectedCameras: nextSelected })
-        setConfig((prev) => ({ ...prev, selectedCameras: nextSelected }))
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       }
@@ -1408,8 +1949,12 @@ export default function VisionPage(): JSX.Element {
         throw new Error('Esta câmera já foi adicionada.')
       }
       const updatedIp = [...ipCamerasList, { id, name: name || 'Câmera IP', url }]
-      const currentSelected = config.selectedCameras ?? []
-      const nextSelected = [...currentSelected, id]
+      const allIds = cameras.map((c) => c.id)
+      const currentSelected =
+        config.selectedCameras && config.selectedCameras.length > 0
+          ? config.selectedCameras
+          : allIds
+      const nextSelected = currentSelected.includes(id) ? currentSelected : [...currentSelected, id]
       await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
       setConfig((prev) => ({ ...prev, selectedCameras: nextSelected }))
       await refresh()
@@ -1426,7 +1971,11 @@ export default function VisionPage(): JSX.Element {
       const current = configRes.config || {}
       const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
       const updatedIp = ipCamerasList.filter((c) => c.id !== cameraId)
-      const currentSelected = config.selectedCameras ?? []
+      const allIds = cameras.map((c) => c.id)
+      const currentSelected =
+        config.selectedCameras && config.selectedCameras.length > 0
+          ? config.selectedCameras
+          : allIds
       const nextSelected = currentSelected.filter((id) => id !== cameraId)
       await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
       setConfig((prev) => ({ ...prev, selectedCameras: nextSelected }))
@@ -1454,7 +2003,10 @@ export default function VisionPage(): JSX.Element {
     [expandedPrint, refreshGallery]
   )
 
-  const activeSelectedIds = config.selectedCameras ?? []
+  const activeSelectedIds =
+    config.selectedCameras && config.selectedCameras.length > 0
+      ? config.selectedCameras
+      : cameras.map((c) => c.id)
 
   const displayedCameras = cameras.filter((c) => activeSelectedIds.includes(c.id))
 
@@ -1535,7 +2087,7 @@ export default function VisionPage(): JSX.Element {
       {/* Tab: Cameras Grid */}
       {activeTab === 'cameras' ? (
         <section>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5 items-stretch">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5 md:gap-6 items-stretch">
             {displayedCameras.map((camera) => (
               <CameraCard
                 key={camera.id}
@@ -1545,38 +2097,74 @@ export default function VisionPage(): JSX.Element {
                 onRemove={(id) => void toggleCameraSelection(id)}
                 onExpand={(cam) => setExpandedCamera(cam)}
                 refreshKey={refreshKey}
+                isActive={isActive}
               />
             ))}
             <AddCameraCard onClick={() => setIsModalOpen(true)} />
           </div>
 
           <div className="mt-6 rounded-2xl border border-white/10 bg-zinc-900/60 p-4 shadow-lg">
-            <h3 className="text-sm font-semibold mb-3">Monitoramento ativo</h3>
+            <div className="flex items-center justify-between mb-3.5">
+              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                Monitoramento Ativo
+              </h3>
+              <button
+                onClick={() => {
+                  setEditingMonitor(null)
+                  setIsMonitorModalOpen(true)
+                }}
+                className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg px-3 py-1.5 transition-all shadow-md flex items-center gap-1.5 active:scale-95 cursor-pointer"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                <span>Adicionar Monitoramento</span>
+              </button>
+            </div>
             {activeCameras.length === 0 ? (
               <p className="text-xs text-gray-400">
-                Nenhum monitor ativo. Peça à MomAI no chat: “me avise quando alguém chegar em casa”.
+                Nenhum monitor ativo. Clique no botão verde acima para criar um monitoramento ou peça à MomAI no chat.
               </p>
             ) : (
-              <ul className="space-y-2">
+              <ul className="space-y-2.5">
                 {[...activeCameras, ...orphanMonitors].map((m) => (
-                  <li key={m.id} className="flex items-center justify-between rounded-lg bg-white/5 px-3 py-2">
+                  <li key={m.id} className="flex items-center justify-between rounded-xl bg-white/5 p-3 border border-white/5 hover:border-white/10 transition-all">
                     <div>
-                      <p className="text-sm font-medium">{m.cameraName || m.cameraId}</p>
-                      <p className="text-xs text-gray-400">
-                        {m.triggers.map((t) => t.type).join(' · ')}
-                        {m.schedule?.start ? ` · ${m.schedule.start}-${m.schedule.end}` : ''}
-                        {m.label ? ` · ${m.label}` : ''}
+                      <p className="text-sm font-semibold text-white flex items-center gap-2">
+                        <span>{m.label || m.cameraName || m.cameraId}</span>
+                        {m.cameraName && m.label ? (
+                          <span className="text-[10px] text-gray-400 font-normal bg-white/5 px-2 py-0.5 rounded-full border border-white/5">
+                            {m.cameraName}
+                          </span>
+                        ) : null}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        {m.triggers.map(formatTriggerPortuguese).join(' · ')}
+                        {m.cooldownSec ? ` · Cooldown: ${m.cooldownSec}s` : ''}
                       </p>
                     </div>
-                    <button
-                      onClick={async () => {
-                        await command('stop_monitoring', { monitorId: m.id })
-                        void refresh()
-                      }}
-                      className="text-xs rounded-lg border border-white/15 hover:bg-white/10 px-2.5 py-1 transition-colors"
-                    >
-                      Parar
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setEditingMonitor(m)
+                          setIsMonitorModalOpen(true)
+                        }}
+                        className="text-xs rounded-lg border border-white/15 hover:bg-white/10 px-2.5 py-1 text-gray-300 transition-colors"
+                      >
+                        Editar
+                      </button>
+                      <button
+                        onClick={async () => {
+                          await command('stop_monitoring', { monitorId: m.id })
+                          void refresh()
+                        }}
+                        className="text-xs rounded-lg border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 text-red-300 px-2.5 py-1 transition-colors"
+                      >
+                        Parar
+                      </button>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -1825,6 +2413,18 @@ export default function VisionPage(): JSX.Element {
       ) : null}
 
       {/* Modals */}
+      <AddEditMonitorModal
+        key={isMonitorModalOpen ? (editingMonitor?.id || 'new') : 'closed'}
+        isOpen={isMonitorModalOpen}
+        onClose={() => {
+          setIsMonitorModalOpen(false)
+          setEditingMonitor(null)
+        }}
+        cameras={cameras}
+        initialMonitor={editingMonitor}
+        onSave={() => void poll()}
+      />
+
       <AddCameraModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}

@@ -18,7 +18,9 @@ intents:
   - "monitorar"
   - "vigiar"
   - "câmera"
+  - "câmeras"
   - "movimento"
+  - "ver as câmeras"
 ---
 
 # MomAI Vision
@@ -73,6 +75,7 @@ Para alterar um monitoramento que já está rodando (ex.: "mude o tempo do alert
 ## Como usar (gramática)
 
 - "o que você vê aí?" → `capture_snapshot`
+- "ver as câmeras" → chame `list_cameras` e liste as câmeras disponíveis
 - "me avise quando alguém chegar em casa na câmera da garagem" → `start_monitoring` com `cameraId: "garagem"` e `presence entered` (person)
 - "mude o intervalo da câmera da garagem para 10 minutos" → `update_monitoring` com `cooldownSec: 600`
 - "vigia a garagem de madrugada" → `start_monitoring` com `cameraId: "garagem"` + `motion` + `schedule` 22h-6h + cooldown
