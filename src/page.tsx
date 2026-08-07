@@ -446,7 +446,7 @@ function CameraCard({
       }`}
     >
       <div className="relative w-full aspect-video bg-black rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
-        {ready && ipBase64 ? (
+        {camera.online && ready && ipBase64 ? (
           <img
             src={`data:image/jpeg;base64,${ipBase64}`}
             alt={camera.name}
@@ -455,7 +455,7 @@ function CameraCard({
         ) : (
           <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-gray-400 bg-black p-4 text-center">
             <VisionIcon className="w-6 h-6 text-gray-400 mb-2 animate-pulse" />
-            <span>Iniciando câmera...</span>
+            <span>{camera.online ? 'Iniciando câmera...' : 'Sem sinal'}</span>
           </div>
         )}
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
@@ -529,7 +529,7 @@ function CameraCard({
 
       <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/80 shrink-0 border-t border-white/5">
         <span className="text-[11px] text-gray-400 font-medium px-1 flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+          <span className={`w-1.5 h-1.5 rounded-full ${camera.online ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
           {camera.source === 'webcam' ? 'Webcam' : 'MJPEG / IP'}
         </span>
 
@@ -2042,12 +2042,32 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
 
   const activeSelectedIds = config.selectedCameras ?? []
 
+  // Keep the last known info per camera so a selected camera that temporarily
+  // drops out of the enumerated list still renders its card (with its real
+  // name) in an offline/reconnecting state instead of disappearing.
+  const knownCamerasRef = useRef<Record<string, CameraInfo>>({})
+  useEffect(() => {
+    for (const c of cameras) {
+      knownCamerasRef.current[c.id] = c
+    }
+  }, [cameras])
+
   const displayedCameras = useMemo(() => {
     const selectedSet = new Set(activeSelectedIds)
-    const ordered = activeSelectedIds
-      .map((id) => cameras.find((c) => c.id === id))
-      .filter((c): c is CameraInfo => c !== undefined)
-
+    const ordered: CameraInfo[] = []
+    for (const id of activeSelectedIds) {
+      const found = cameras.find((c) => c.id === id)
+      if (found) {
+        ordered.push(found)
+      } else {
+        const known = knownCamerasRef.current[id]
+        ordered.push(
+          known
+            ? { ...known, online: false }
+            : { id, name: 'Câmera', source: 'webcam', online: false, monitors: 0 }
+        )
+      }
+    }
     for (const c of cameras) {
       if (selectedSet.has(c.id) && !ordered.some((item) => item.id === c.id)) {
         ordered.push(c)

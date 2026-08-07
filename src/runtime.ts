@@ -653,7 +653,7 @@ async function getCameraFrame(camera: CameraEntry): Promise<{ jpegBase64: string
   }
   if (!camera.deviceId) return null
   try {
-    const data = await hostJson<{ jpegBase64: string; width?: number; height?: number }>(
+    const data = await hostJson<{ jpegBase64: string; width?: number; height?: number; ts?: number }>(
       `/media/camera/frame/${encodeURIComponent(camera.deviceId)}`
     )
     return data
@@ -1152,10 +1152,58 @@ async function fireAlert(config: MonitorConfig, alert: import('./vision/triggers
 
 const webcamWatches = new Set<string>()
 
-async function ensureWebcamWatch(cameraId: string, fps = 10): Promise<void> {
+// Freshness bookkeeping. A webcam is "online" only while it is actually
+// delivering frames — not merely enumerated. `webcamLastReconnectTs`
+// rate-limits re-acquisition attempts so a marginal/unplugged camera does not
+// loop.
+const WEB_FRAME_STALE_MS = 5000
+const WEB_RECONNECT_MIN_MS = 20000
+const webcamLastReconnectTs = new Map<string, number>() // deviceId -> ts
+
+async function stopWebcamWatch(camera: CameraEntry): Promise<void> {
+  if (!camera || camera.source !== 'webcam' || !camera.deviceId) return
+  webcamWatches.delete(camera.id)
+  await hostFetch('/media/camera/stop-watch', {
+    method: 'POST',
+    body: JSON.stringify({ deviceId: camera.deviceId })
+  }).catch(() => {})
+}
+
+async function isWebcamOnline(camera: CameraEntry): Promise<boolean> {
+  if (!camera || camera.source !== 'webcam' || !camera.deviceId) return false
+  try {
+    const data = await hostJson<{ ts?: number }>(
+      `/media/camera/frame/${encodeURIComponent(camera.deviceId)}`
+    )
+    return !!data?.ts && Date.now() - data.ts < WEB_FRAME_STALE_MS
+  } catch {
+    return false
+  }
+}
+
+// Re-acquire a selected webcam's host stream when it stopped delivering
+// frames (e.g. after an unplug/replug), but at most once per
+// WEB_RECONNECT_MIN_MS. A healthy camera that IS producing frames is never
+// touched — this is what keeps it from blinking/toggling.
+async function reconnectWebcamIfStale(camera: CameraEntry): Promise<void> {
+  if (!camera || camera.source !== 'webcam' || !camera.deviceId) return
+  if (await isWebcamOnline(camera)) return
+  const lastTry = webcamLastReconnectTs.get(camera.deviceId) || 0
+  if (Date.now() - lastTry < WEB_RECONNECT_MIN_MS) return
+  webcamLastReconnectTs.set(camera.deviceId, Date.now())
+  await stopWebcamWatch(camera)
+  await ensureWebcamWatch(camera.id, 10, true)
+}
+
+async function ensureWebcamWatch(cameraId: string, fps = 10, force = false): Promise<void> {
   const camera = findCamera(cameraId)
   if (!camera || camera.source !== 'webcam' || !camera.deviceId) return
-  if (webcamWatches.has(cameraId)) return
+  // `force` lets syncWebcamWatches re-issue start-watch even when we already
+  // asked the host before. The host start-watch is idempotent for a live
+  // stream (just resets the pump timer) and re-acquires if the stream died
+  // (e.g. device unplugged/replugged). Without this, a dead watch is never
+  // restarted because the `webcamWatches` set still lists the camera.
+  if (webcamWatches.has(cameraId) && !force) return
   try {
     await hostFetch('/media/camera/start-watch', {
       method: 'POST',
@@ -1167,17 +1215,44 @@ async function ensureWebcamWatch(cameraId: string, fps = 10): Promise<void> {
   }
 }
 
+// A USB webcam replug can change its deviceId while keeping the same label.
+// Remap a selected/monitored `webcam:<oldId>` to the new `webcam:<newId>` when
+// exactly one selected webcam went missing and exactly one unselected webcam
+// appeared — the "replugged the same camera" case. Ambiguous cases are skipped.
+function remapRepluggedWebcamIds(config: StoredConfig): void {
+  const selected = (config.selectedCameras || []).filter((id) => id.startsWith('webcam:'))
+  const missing = selected.filter((id) => !webcamCache.some((c) => c.id === id))
+  const unselectedNew = webcamCache.filter((c) => c.source === 'webcam' && !selected.includes(c.id))
+  if (missing.length !== 1 || unselectedNew.length !== 1) return
+  const newId = unselectedNew[0].id
+  if (!missing[0] || newId === missing[0]) return
+  const remap = new Map<string, string>([[missing[0], newId]])
+  config.selectedCameras = (config.selectedCameras || []).map((id) => remap.get(id) || id)
+  for (const m of monitors.values()) {
+    if (remap.has(m.config.cameraId)) m.config.cameraId = remap.get(m.config.cameraId)!
+  }
+  void saveMonitors()
+  void bridge!.storage.set('config', config)
+}
+
 // Keep host watches alive for webcams that are selected in the dashboard or
 // being monitored, so cameras stay on even after the Vision page closes.
 async function syncWebcamWatches(): Promise<void> {
   const config = await loadConfig()
+  // If the user replugged a USB webcam (deviceId changed, label stable), remap
+  // the persisted selection so the card reconnects to the new device.
+  remapRepluggedWebcamIds(config)
+  // `wanted` is derived from the PERSISTED selection/monitors (stable), not the
+  // transient webcamCache. If we built it from webcamCache, a camera that
+  // momentarily drops out of the enumerateDevices list would leave `wanted`,
+  // its watch would be stopped here and restarted on the next sync — a
+  // stop/start churn that makes the webcam LED physically toggle on Windows.
   const wanted = new Set<string>()
-  for (const cam of webcamCache) {
-    if (config.selectedCameras && config.selectedCameras.includes(cam.id)) wanted.add(cam.id)
+  for (const id of config.selectedCameras || []) {
+    if (id.startsWith('webcam:')) wanted.add(id)
   }
   for (const m of monitors.values()) {
-    const cam = findCamera(m.config.cameraId)
-    if (cam && cam.source === 'webcam') wanted.add(cam.id)
+    if (m.config.cameraId.startsWith('webcam:')) wanted.add(m.config.cameraId)
   }
   // Only stop watches when we have a valid device list — otherwise a
   // transient refresh failure would kill cameras that are still present.
@@ -1185,18 +1260,16 @@ async function syncWebcamWatches(): Promise<void> {
     for (const id of [...webcamWatches]) {
       if (!wanted.has(id)) {
         const cam = findCamera(id)
-        if (cam && cam.source === 'webcam' && cam.deviceId) {
-          await hostFetch('/media/camera/stop-watch', {
-            method: 'POST',
-            body: JSON.stringify({ deviceId: cam.deviceId })
-          }).catch(() => {})
-        }
-        webcamWatches.delete(id)
+        if (cam && cam.source === 'webcam') await stopWebcamWatch(cam)
       }
     }
   }
   for (const id of wanted) {
-    await ensureWebcamWatch(id)
+    // Re-acquire only if the stream stopped delivering frames (replug/device
+    // change). A healthy camera is left untouched — no start/stop churn, so it
+    // does not blink.
+    const cam = findCamera(id)
+    if (cam && cam.source === 'webcam') await reconnectWebcamIfStale(cam)
   }
 }
 
@@ -1587,18 +1660,18 @@ async function getStatusData(): Promise<Record<string, { online: boolean; monito
     list.push(m)
     byCamera.set(m.config.cameraId, list)
   }
-  for (const camera of listCameras()) {
-    const active = byCamera.get(camera.id) || []
-    const online =
-      camera.source === 'webcam'
-        ? active.length > 0 || true
-        : mjpegStreams.has(camera.id)
-    status[camera.id] = {
-      online,
-      monitors: active.length,
-      since: active[0]?.config.createdAt
-    }
-  }
+  await Promise.all(
+    listCameras().map(async (camera) => {
+      const active = byCamera.get(camera.id) || []
+      const online =
+        camera.source === 'webcam' ? await isWebcamOnline(camera) : mjpegStreams.has(camera.id)
+      status[camera.id] = {
+        online,
+        monitors: active.length,
+        since: active[0]?.config.createdAt
+      }
+    })
+  )
   return status
 }
 
@@ -1692,6 +1765,10 @@ async function toolGetFrame(args: { cameraId?: string }): Promise<unknown> {
     await startMjpeg(camera)
   } else if (camera.source === 'webcam') {
     await ensureWebcamWatch(camera.id)
+    // A visible card polls get_frame frequently — reconnect fast (but
+    // rate-limited) when the stream stopped, so replug recovery is near
+    // immediate without a steady re-acquire loop.
+    await reconnectWebcamIfStale(camera)
   }
   const frame = await getCameraFrame(camera)
   if (frame?.jpegBase64) {
