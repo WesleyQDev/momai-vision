@@ -151,7 +151,10 @@ export function AlertCanvasOverlay({
 
 function formatTime(ts?: number): string {
   if (!ts) return ''
-  return new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  const d = new Date(ts)
+  const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+  const timeStr = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  return `${dateStr} ${timeStr}`
 }
 
 function VisionIcon({ className = 'w-5 h-5' }: { className?: string }): JSX.Element {
@@ -297,6 +300,7 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
   return (
     <div
       className={`w-full ${expanded && isOverlay ? '' : 'max-w-md'} rounded-xl border border-white/10 bg-zinc-900/95 text-gray-100 shadow-lg overflow-hidden`}
+      style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
     >
       {/* Header doubles as the drag handle in the floating overlay window. */}
       <div
@@ -354,9 +358,9 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
           style={
             expanded
               ? isOverlay
-                ? { aspectRatio: '16 / 9', width: '100%', maxHeight: 'calc(100vh - 170px)' }
+                ? { aspectRatio: '16 / 9', width: '100%', maxHeight: 'calc(100vh - 170px)', ...(isOverlay ? { WebkitAppRegion: 'no-drag' } : {}) }
                 : { height: '58vh' }
-              : { aspectRatio: '16 / 9' }
+              : { aspectRatio: '16 / 9', ...(isOverlay ? { WebkitAppRegion: 'no-drag' } : {}) }
           }
           onClick={toggleExpand}
           title={expanded ? 'Reduzir print' : 'Ampliar print'}
@@ -369,20 +373,32 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         </div>
       ) : null}
 
-      <div className="px-4 py-3">
+      <div
+        className="px-4 py-3"
+        style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
+      >
         <p className="text-sm text-gray-300">
           {data?.description || (isSnapshot ? 'Snapshot capturado' : 'Alerta da câmera')}
         </p>
         {data?.triggeredBy && !isSnapshot ? (
           <p className="mt-1 text-xs text-gray-500">{formatTime(data.ts)} · {data.triggeredBy}</p>
         ) : null}
-        <div className="mt-3 flex gap-2">
+        <div
+          className="mt-3 flex gap-2"
+          style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
+        >
           <button
             onClick={() => {
-              window.api?.send?.('window-focus')
+              const api = (window as any).api || (window as any).momaiAPI
+              if (typeof api?.focus === 'function') {
+                api.focus()
+              } else if (typeof api?.send === 'function') {
+                api.send('window-focus')
+              }
               data?.onClose?.()
             }}
-            className="flex-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-medium py-2 transition-colors"
+            className="flex-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-medium py-2 transition-colors cursor-pointer"
+            style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
           >
             Abrir MomAI
           </button>
@@ -393,7 +409,8 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
                 setStopping(true)
                 void stopMonitor(data.monitorId, data.onClose).catch(() => setStopping(false))
               }}
-              className="flex-1 rounded-lg border border-red-500/40 text-red-300 hover:bg-red-500/10 hover:border-red-400 text-xs font-medium py-2 transition-colors disabled:opacity-50"
+              className="flex-1 rounded-lg border border-red-500/40 text-red-300 hover:bg-red-500/10 hover:border-red-400 text-xs font-medium py-2 transition-colors disabled:opacity-50 cursor-pointer"
+              style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
             >
               {stopping ? 'Parando...' : 'Parar monitoramento'}
             </button>

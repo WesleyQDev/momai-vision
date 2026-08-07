@@ -152,6 +152,20 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   it(
     'starts and stops monitoring via tool calls, surviving tool calls',
     async () => {
+      // First verify unselected camera is rejected
+      const unselectedResult = (await execute({
+        toolName: 'start_monitoring',
+        args: { cameraId: 'webcam:test-cam', triggers: [{ type: 'motion' }] }
+      })) as { ok: boolean; error?: string }
+      expect(unselectedResult.ok).toBe(false)
+      expect(unselectedResult.error).toContain('não está selecionada')
+
+      // Select camera for monitoring
+      await execute({
+        toolName: 'configure',
+        args: { selectedCameras: ['webcam:test-cam'] }
+      })
+
       const start1 = (await execute({
         toolName: 'start_monitoring',
         args: { cameraId: 'webcam:test-cam', triggers: [{ type: 'motion', sensitivity: 'med' }], label: 'Garagem' }
@@ -189,14 +203,14 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   )
 
   it(
-    'rejects start_monitoring when cameraId is missing',
+    'rejects start_monitoring when cameraId is missing or unselected',
     async () => {
       const result = (await execute({
         toolName: 'start_monitoring',
         args: { triggers: [{ type: 'motion' }] }
       })) as { ok: boolean; error?: string }
       expect(result.ok).toBe(false)
-      expect(result.error).toMatch(/Nenhuma câmera foi informada/)
+      expect(result.error).toMatch(/Nenhuma câmera/i)
     },
     60000
   )

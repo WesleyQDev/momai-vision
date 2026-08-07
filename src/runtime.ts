@@ -88,7 +88,6 @@ const ipCameras: CameraEntry[] = []
 let webcamCache: CameraEntry[] = []
 
 interface StoredConfig {
-  defaultCamera?: string | null
   retentionDays?: number
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
@@ -1211,6 +1210,7 @@ async function toolListCameras(): Promise<unknown> {
   const cameras = listCameras()
   const status = await getStatusData()
   const config = await loadConfig()
+  const selectedSet = new Set(config.selectedCameras || [])
   return {
     ok: true,
     cameras: cameras.map((c) => ({
@@ -1218,22 +1218,45 @@ async function toolListCameras(): Promise<unknown> {
       name: c.name,
       source: c.source,
       online: status[c.id]?.online ?? false,
-      monitors: status[c.id]?.monitors ?? 0
+      monitors: status[c.id]?.monitors ?? 0,
+      selected: selectedSet.has(c.id)
     })),
-    defaultCamera: config.defaultCamera || null,
     selectedCameras: config.selectedCameras || []
   }
 }
 
 async function toolCaptureSnapshot(args: { cameraId?: string; camera?: string; name?: string }): Promise<unknown> {
   const config = await loadConfig()
-  const cameraId = args.cameraId || args.camera || args.name || config.defaultCamera || undefined
+  const selectedList = config.selectedCameras || []
+
+  let cameraId = args.cameraId || args.camera || args.name
   if (!cameraId) {
+    if (selectedList.length === 1) {
+      cameraId = selectedList[0]
+    }
+  }
+
+  if (!cameraId) {
+    if (selectedList.length === 0) {
+      return {
+        ok: false,
+        error: 'Nenhuma câmera está selecionada/ativa no painel da MomAI Vision. Peça ao usuário para abrir o painel da visão e ativar a câmera desejada (botão +).'
+      }
+    }
     return { ok: false, error: 'no camera specified' }
   }
+
   await refreshWebcams()
   const camera = findCamera(cameraId)
   if (!camera) return { ok: false, error: `unknown camera: ${cameraId}` }
+
+  if (!selectedList.includes(camera.id)) {
+    return {
+      ok: false,
+      error: `A câmera "${camera.name}" (id: ${camera.id}) não foi selecionada pelo usuário no painel da MomAI Vision. Peça ao usuário para ativá-la no painel (botão +) antes de tirar um print.`
+    }
+  }
+
   if (camera.source === 'webcam' && camera.deviceId) {
     await ensureWebcamWatch(camera.id)
   }
@@ -1310,32 +1333,49 @@ async function toolStartMonitoring(
   args: StartMonitoringArgs & { camera?: string; name?: string; content?: string; query?: string; input?: string; prompt?: string }
 ): Promise<unknown> {
   const config = await loadConfig()
+  const selectedList = config.selectedCameras || []
+
   await refreshWebcams()
   const allCameras = listCameras()
   const rawText = (args.content || args.query || args.input || args.prompt || '').trim()
   const rawArgs = args as unknown as Record<string, unknown>
 
-  let targetId =
-    args.cameraId?.trim() ||
-    args.camera?.trim() ||
-    args.name?.trim() ||
-    config.defaultCamera ||
-    undefined
+  let targetId = args.cameraId?.trim() || args.camera?.trim() || args.name?.trim()
 
   if (!targetId && rawText) {
     for (const cam of allCameras) {
-      if (
-        rawText.includes(cam.id) ||
-        rawText.toLowerCase().includes(cam.name.toLowerCase()) ||
-        (cam.source === 'webcam' && /usb2?\.?0?/i.test(rawText) && /usb2?\.?0?/i.test(cam.name))
-      ) {
-        targetId = cam.id
-        break
+      if (selectedList.includes(cam.id)) {
+        if (
+          rawText.includes(cam.id) ||
+          rawText.toLowerCase().includes(cam.name.toLowerCase()) ||
+          (cam.source === 'webcam' && /usb2?\.?0?/i.test(rawText) && /usb2?\.?0?/i.test(cam.name))
+        ) {
+          targetId = cam.id
+          break
+        }
+      }
+    }
+    if (!targetId) {
+      for (const cam of allCameras) {
+        if (
+          rawText.includes(cam.id) ||
+          rawText.toLowerCase().includes(cam.name.toLowerCase()) ||
+          (cam.source === 'webcam' && /usb2?\.?0?/i.test(rawText) && /usb2?\.?0?/i.test(cam.name))
+        ) {
+          targetId = cam.id
+          break
+        }
       }
     }
   }
 
   if (!targetId) {
+    if (selectedList.length === 0) {
+      return {
+        ok: false,
+        error: 'Nenhuma câmera está selecionada no painel da MomAI Vision. Peça ao usuário para abrir a página da visão e selecionar a câmera desejada (botão +).'
+      }
+    }
     bridge?.log(
       `[vision] start_monitoring failed: no camera provided (args: ${JSON.stringify(args).slice(0, 300)})`
     )
@@ -1347,6 +1387,13 @@ async function toolStartMonitoring(
     bridge?.log(`[vision] start_monitoring failed: unknown camera "${targetId}"`)
     const available = allCameras.map((c) => `"${c.name}" (id: ${c.id})`).join(', ')
     return { ok: false, error: `Câmera não encontrada: "${targetId}". Câmeras disponíveis: ${available}` }
+  }
+
+  if (!selectedList.includes(camera.id)) {
+    return {
+      ok: false,
+      error: `A câmera "${camera.name}" (id: ${camera.id}) não está selecionada pelo usuário no painel da MomAI Vision. Peça ao usuário para ativá-la no painel (botão +) antes de iniciar o monitoramento.`
+    }
   }
 
   let triggers = args.triggers
@@ -1452,6 +1499,14 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
     const newCamera = findCamera(args.cameraId.trim())
     if (!newCamera) {
       return { ok: false, error: `unknown camera: ${args.cameraId}` }
+    }
+    const config = await loadConfig()
+    const selectedList = config.selectedCameras || []
+    if (!selectedList.includes(newCamera.id)) {
+      return {
+        ok: false,
+        error: `A câmera "${newCamera.name}" não foi selecionada pelo usuário no painel da MomAI Vision.`
+      }
     }
     camera = newCamera
     entry.config.cameraId = newCamera.id
@@ -1628,6 +1683,11 @@ async function toolGetFrame(args: { cameraId?: string }): Promise<unknown> {
   if (!args.cameraId) return { ok: false, error: 'cameraId required' }
   const camera = findCamera(args.cameraId)
   if (!camera) return { ok: false, error: `unknown camera: ${args.cameraId}` }
+  const config = await loadConfig()
+  const selectedList = config.selectedCameras || []
+  if (!selectedList.includes(camera.id)) {
+    return { ok: false, error: `A câmera "${camera.name}" não está selecionada no painel.` }
+  }
   if (camera.source === 'ip') {
     await startMjpeg(camera)
   } else if (camera.source === 'webcam') {
@@ -1669,7 +1729,6 @@ async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): 
 
 // POST /extensions/momai-vision/configure — settings from the dashboard page.
 async function toolConfigure(args: {
-  defaultCamera?: string
   retentionDays?: number
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
@@ -1679,7 +1738,6 @@ async function toolConfigure(args: {
   const current = ((await bridge!.storage.get('config')) || {}) as Record<string, unknown>
   const config = {
     ...current,
-    ...(args.defaultCamera !== undefined ? { defaultCamera: args.defaultCamera } : {}),
     ...(args.retentionDays !== undefined ? { retentionDays: args.retentionDays } : {}),
     ...(args.maxSnapshots !== undefined ? { maxSnapshots: args.maxSnapshots } : {}),
     ...(args.trackingMode !== undefined ? { trackingMode: args.trackingMode } : {}),

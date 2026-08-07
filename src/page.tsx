@@ -7,7 +7,7 @@
  * extension command routes and SSE events.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
 import { ptLabel, PT_CLASS } from './vision/labels'
 import { AlertCanvasOverlay } from './panel'
@@ -67,7 +67,6 @@ interface Snapshot {
 }
 
 interface VisionConfig {
-  defaultCamera?: string | null
   retentionDays?: number
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
@@ -107,7 +106,10 @@ function classColor(className: string): string {
 
 function formatTime(ts?: number): string {
   if (!ts) return ''
-  return new Date(ts).toLocaleString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  const d = new Date(ts)
+  const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
+  const timeStr = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  return `${dateStr} ${timeStr}`
 }
 
 async function command<T = unknown>(toolName: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -257,7 +259,15 @@ function CameraCard({
   onRemove,
   onExpand,
   refreshKey = 0,
-  isActive = true
+  isActive = true,
+  index,
+  isDragging = false,
+  isDragOver = false,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onDragEnd
 }: {
   camera: CameraInfo
   detections: Record<string, Detection[]>
@@ -266,6 +276,14 @@ function CameraCard({
   onExpand?: (camera: CameraInfo) => void
   refreshKey?: number
   isActive?: boolean
+  index: number
+  isDragging?: boolean
+  isDragOver?: boolean
+  onDragStart?: (e: React.DragEvent, index: number) => void
+  onDragOver?: (e: React.DragEvent, index: number) => void
+  onDragLeave?: (e: React.DragEvent) => void
+  onDrop?: (e: React.DragEvent, index: number) => void
+  onDragEnd?: (e: React.DragEvent) => void
 }): JSX.Element {
   const cardRef = useRef<HTMLDivElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -411,7 +429,22 @@ function CameraCard({
   }
 
   return (
-    <div ref={cardRef} className="flex flex-col h-full rounded-2xl bg-zinc-900/80 border border-white/10 hover:border-white/20 overflow-hidden shadow-xl transition-all">
+    <div
+      ref={cardRef}
+      draggable
+      onDragStart={(e) => onDragStart?.(e, index)}
+      onDragOver={(e) => onDragOver?.(e, index)}
+      onDragLeave={(e) => onDragLeave?.(e)}
+      onDrop={(e) => onDrop?.(e, index)}
+      onDragEnd={(e) => onDragEnd?.(e)}
+      className={`flex flex-col h-full rounded-2xl bg-zinc-900/80 border overflow-hidden shadow-xl transition-all ${
+        isDragging
+          ? 'opacity-40 scale-95 border-emerald-500/50'
+          : isDragOver
+          ? 'border-2 border-emerald-400 bg-emerald-500/10 shadow-emerald-500/20 scale-[1.02]'
+          : 'border-white/10 hover:border-white/20'
+      }`}
+    >
       <div className="relative w-full aspect-video bg-black rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
         {ready && ipBase64 ? (
           <img
@@ -438,10 +471,23 @@ function CameraCard({
           </div>
         ) : null}
 
-        {/* Top Header Bar Inside Card: Name & Controls */}
+        {/* Top Header Bar Inside Card: Drag Handle, Name & Controls */}
         <div className="absolute top-0 inset-x-0 p-2.5 z-20 flex items-center justify-between bg-gradient-to-b from-black/80 via-black/40 to-transparent backdrop-blur-[2px]">
-          {/* Left: Camera Name + Monitors count */}
+          {/* Left: Drag Grip Handle + Camera Name + Monitors count */}
           <div className="flex items-center gap-2 max-w-[65%] truncate">
+            <span
+              className="text-gray-400 hover:text-white cursor-grab active:cursor-grabbing p-0.5 rounded transition-colors shrink-0"
+              title="Clique e arraste para reordenar esta câmera"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="9" cy="5" r="1.5" />
+                <circle cx="15" cy="5" r="1.5" />
+                <circle cx="9" cy="12" r="1.5" />
+                <circle cx="15" cy="12" r="1.5" />
+                <circle cx="9" cy="19" r="1.5" />
+                <circle cx="15" cy="19" r="1.5" />
+              </svg>
+            </span>
             <span className="text-xs font-semibold text-white drop-shadow truncate">
               {camera.name}
             </span>
@@ -1908,11 +1954,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
 
   const toggleCameraSelection = useCallback(
     async (cameraId: string) => {
-      const allIds = cameras.map((c) => c.id)
-      const currentSelected =
-        config.selectedCameras && config.selectedCameras.length > 0
-          ? config.selectedCameras
-          : allIds
+      const currentSelected = config.selectedCameras ?? []
 
       const nextSelected = currentSelected.includes(cameraId)
         ? currentSelected.filter((id) => id !== cameraId)
@@ -1933,7 +1975,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         setError(err instanceof Error ? err.message : String(err))
       }
     },
-    [cameras, config.selectedCameras]
+    [config.selectedCameras]
   )
 
   const handleAddIpFromModal = useCallback(
@@ -1949,17 +1991,13 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         throw new Error('Esta câmera já foi adicionada.')
       }
       const updatedIp = [...ipCamerasList, { id, name: name || 'Câmera IP', url }]
-      const allIds = cameras.map((c) => c.id)
-      const currentSelected =
-        config.selectedCameras && config.selectedCameras.length > 0
-          ? config.selectedCameras
-          : allIds
+      const currentSelected = config.selectedCameras ?? []
       const nextSelected = currentSelected.includes(id) ? currentSelected : [...currentSelected, id]
       await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
       setConfig((prev) => ({ ...prev, selectedCameras: nextSelected }))
       await refresh()
     },
-    [cameras, config.selectedCameras, refresh]
+    [config.selectedCameras, refresh]
   )
 
   const removeIpCamera = useCallback(
@@ -1971,17 +2009,13 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       const current = configRes.config || {}
       const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
       const updatedIp = ipCamerasList.filter((c) => c.id !== cameraId)
-      const allIds = cameras.map((c) => c.id)
-      const currentSelected =
-        config.selectedCameras && config.selectedCameras.length > 0
-          ? config.selectedCameras
-          : allIds
+      const currentSelected = config.selectedCameras ?? []
       const nextSelected = currentSelected.filter((id) => id !== cameraId)
       await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
       setConfig((prev) => ({ ...prev, selectedCameras: nextSelected }))
       await refresh()
     },
-    [cameras, config.selectedCameras, refresh]
+    [config.selectedCameras, refresh]
   )
 
   const describePrint = useCallback(
@@ -2003,12 +2037,74 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     [expandedPrint, refreshGallery]
   )
 
-  const activeSelectedIds =
-    config.selectedCameras && config.selectedCameras.length > 0
-      ? config.selectedCameras
-      : cameras.map((c) => c.id)
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
 
-  const displayedCameras = cameras.filter((c) => activeSelectedIds.includes(c.id))
+  const activeSelectedIds = config.selectedCameras ?? []
+
+  const displayedCameras = useMemo(() => {
+    const selectedSet = new Set(activeSelectedIds)
+    const ordered = activeSelectedIds
+      .map((id) => cameras.find((c) => c.id === id))
+      .filter((c): c is CameraInfo => c !== undefined)
+
+    for (const c of cameras) {
+      if (selectedSet.has(c.id) && !ordered.some((item) => item.id === c.id)) {
+        ordered.push(c)
+      }
+    }
+    return ordered
+  }, [cameras, activeSelectedIds])
+
+  const handleDragStart = useCallback((e: React.DragEvent, index: number) => {
+    setDraggedIndex(index)
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', String(index))
+  }, [])
+
+  const handleDragOver = useCallback((e: React.DragEvent, index: number) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    setDragOverIndex((prev) => (prev !== index ? index : prev))
+  }, [])
+
+  const handleDragLeave = useCallback(() => {}, [])
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent, dropIndex: number) => {
+      e.preventDefault()
+      if (draggedIndex === null || draggedIndex === dropIndex) {
+        setDraggedIndex(null)
+        setDragOverIndex(null)
+        return
+      }
+
+      const nextDisplayed = [...displayedCameras]
+      const [removed] = nextDisplayed.splice(draggedIndex, 1)
+      nextDisplayed.splice(dropIndex, 0, removed)
+
+      const nextSelectedIds = nextDisplayed.map((c) => c.id)
+
+      setConfig((prev) => {
+        const next = { ...prev, selectedCameras: nextSelectedIds }
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+        }
+        return next
+      })
+
+      void command('configure', { selectedCameras: nextSelectedIds })
+
+      setDraggedIndex(null)
+      setDragOverIndex(null)
+    },
+    [draggedIndex, displayedCameras]
+  )
+
+  const handleDragEnd = useCallback(() => {
+    setDraggedIndex(null)
+    setDragOverIndex(null)
+  }, [])
 
   const activeCameras = monitors.filter((m) => m.cameraId)
   const cameraIds = new Set(cameras.map((c) => c.id))
@@ -2088,7 +2184,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       {activeTab === 'cameras' ? (
         <section>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5 md:gap-6 items-stretch">
-            {displayedCameras.map((camera) => (
+            {displayedCameras.map((camera, idx) => (
               <CameraCard
                 key={camera.id}
                 camera={camera}
@@ -2098,6 +2194,14 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 onExpand={(cam) => setExpandedCamera(cam)}
                 refreshKey={refreshKey}
                 isActive={isActive}
+                index={idx}
+                isDragging={draggedIndex === idx}
+                isDragOver={dragOverIndex === idx}
+                onDragStart={handleDragStart}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                onDragEnd={handleDragEnd}
               />
             ))}
             <AddCameraCard onClick={() => setIsModalOpen(true)} />
@@ -2347,29 +2451,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
             </p>
           </div>
 
-          <div className="relative z-20 rounded-2xl border border-white/10 bg-zinc-900/70 backdrop-blur-md p-6 shadow-xl space-y-3">
-            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              Câmera padrão
-            </h3>
-            <p className="text-xs text-gray-400">
-              Câmera selecionada por padrão para prints e visão rápida quando não especificada.
-            </p>
-            <CustomSelect
-              value={config.defaultCamera || ''}
-              onChange={(val) => void saveSettings({ defaultCamera: val || null })}
-              options={[
-                { value: '', label: '— perguntar sempre —' },
-                ...cameras.map((c) => ({
-                  value: c.id,
-                  label: `${c.name} (${c.source === 'webcam' ? 'Webcam' : 'IP'})`
-                }))
-              ]}
-              size="md"
-              direction="down"
-              className="w-full"
-            />
-          </div>
+
 
           <div className="rounded-2xl border border-white/10 bg-zinc-900/70 backdrop-blur-md p-6 shadow-xl space-y-4">
             <div>

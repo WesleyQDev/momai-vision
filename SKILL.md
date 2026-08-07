@@ -42,10 +42,12 @@ funcionando mesmo com a MomAI minimizada.
 | `get_status` | Monitors ativos por câmera |
 | `list_snapshots {limit?}` | Galeria (mais recentes primeiro) |
 
-## Regra Estrita de Câmera para Monitoramento
+## Regra Estrita de Câmera para Monitoramento e Snapshots
 
+- **APENAS CÂMERAS SELECIONADAS NO PAINEL**: As ferramentas (`start_monitoring`, `capture_snapshot`, `get_frame`, etc.) funcionam **apenas** nas câmeras que o usuário ativou/selecionou no painel da página MomAI Vision (`selected: true` em `list_cameras`).
+- Se o usuário pedir para monitorar ou tirar snapshot de uma câmera que não está selecionada/ativa no painel, informe ao usuário para abrir o painel da MomAI Vision e clicar no botão `+` para selecionar/ativar a câmera desejada.
 - **REQUER CÂMERA EXPLÍCITA**: O LLM **NUNCA** deve chamar `start_monitoring` sem que o usuário tenha informado explicitamente qual câmera deseja monitorar (ex.: "garagem", "Yoosee", "webcam", "da porta").
-- Se o usuário pedir para iniciar monitoramento sem especificar a câmera (ex.: "inicie o monitoramento", "vigie a porta", "me avise se alguém aparecer" sem informar a câmera), o LLM **DEVE** primeiro perguntar ao usuário qual câmera ele quer usar (ou chamar `list_cameras` para mostrar as opções disponíveis antes de perguntar ao usuário).
+- Se o usuário pedir para iniciar monitoramento sem especificar a câmera, o LLM **DEVE** primeiro perguntar ao usuário qual câmera ele quer usar (ou chamar `list_cameras` para mostrar as opções disponíveis antes de perguntar ao usuário).
 
 ## Triggers (start_monitoring / update_monitoring)
 
