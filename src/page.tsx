@@ -606,93 +606,131 @@ function AddCameraModal({
   onClose,
   allCameras,
   selectedCameraIds,
-  onToggleCamera,
-  onAddIpCamera,
-  onRemoveIpCamera,
-  busy
+  onConfirm
 }: {
   isOpen: boolean
   onClose: () => void
   allCameras: CameraInfo[]
   selectedCameraIds: string[]
-  onToggleCamera: (cameraId: string) => void
-  onAddIpCamera: (url: string, name: string) => Promise<void>
-  onRemoveIpCamera: (cameraId: string) => Promise<void>
-  busy: boolean
+  onConfirm: (webcamIds: string[], ipDrafts: Array<{ name: string; url: string }>) => Promise<void>
 }): JSX.Element | null {
   const [activeTab, setActiveTab] = useState<'webcam' | 'ip'>('webcam')
   const [selectedWebcamId, setSelectedWebcamId] = useState<string>('')
+  const [pendingWebcamIds, setPendingWebcamIds] = useState<string[]>([])
+  const [pendingIpDrafts, setPendingIpDrafts] = useState<Array<{ name: string; url: string }>>([])
   const [ipUrl, setIpUrl] = useState('')
   const [ipName, setIpName] = useState('')
-  const [ipError, setIpError] = useState<string | null>(null)
-  const [webcamFeedback, setWebcamFeedback] = useState<string | null>(null)
+  const [modalError, setModalError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [confirmUnsaved, setConfirmUnsaved] = useState(false)
 
   const webcamCameras = allCameras.filter((c) => c.source === 'webcam')
   const ipCameras = allCameras.filter((c) => c.source === 'ip')
 
+  // Reset the pending selection every time the modal (re)opens, so a
+  // cancelled session never leaks cameras into the next one.
   useEffect(() => {
     if (!isOpen) return
-    const unselected = webcamCameras.find((cam) => !selectedCameraIds.includes(cam.id))
-    if (unselected) {
-      setSelectedWebcamId(unselected.id)
-    } else if (webcamCameras.length > 0) {
-      setSelectedWebcamId(webcamCameras[0].id)
-    } else {
-      setSelectedWebcamId('')
-    }
-  }, [isOpen, allCameras, selectedCameraIds])
+    setSelectedWebcamId('')
+    setPendingWebcamIds([])
+    setPendingIpDrafts([])
+    setIpUrl('')
+    setIpName('')
+    setModalError(null)
+    setSubmitting(false)
+    setConfirmUnsaved(false)
+  }, [isOpen])
 
   if (!isOpen) return null
 
+  const removePendingWebcam = (id: string) => {
+    setPendingWebcamIds((prev) => prev.filter((x) => x !== id))
+  }
+
+  const removePendingIp = (index: number) => {
+    setPendingIpDrafts((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  // Selecting a webcam only stages it — nothing is persisted until confirm.
   const handleSelectWebcam = (val: string) => {
-    setSelectedWebcamId(val)
-    if (val && !selectedCameraIds.includes(val)) {
-      onToggleCamera(val)
-      const addedCam = webcamCameras.find((c) => c.id === val)
-      setWebcamFeedback(`Câmera "${addedCam?.name || 'Webcam'}" adicionada!`)
-      setTimeout(() => setWebcamFeedback(null), 2500)
-    }
+    if (!val) return
+    setPendingWebcamIds((prev) => (prev.includes(val) ? prev : [...prev, val]))
+    setSelectedWebcamId('')
   }
 
-  const handleAddIp = async () => {
-    if (!ipUrl) return
-    setIpError(null)
+  const handleStageIp = () => {
+    const url = ipUrl.trim()
+    if (!url) return
+    const id = `ip:${url}`
+    if (ipCameras.some((c) => c.id === id)) {
+      setModalError('Esta câmera IP já está cadastrada.')
+      return
+    }
+    if (pendingIpDrafts.some((d) => `ip:${d.url}` === id)) {
+      setModalError('Esta câmera IP já está na lista de seleção.')
+      return
+    }
+    setPendingIpDrafts((prev) => [...prev, { name: ipName.trim(), url }])
+    setIpUrl('')
+    setIpName('')
+    setModalError(null)
+  }
+
+  const pendingCount = pendingWebcamIds.length + pendingIpDrafts.length
+  const hasUnsavedIpInput = ipUrl.trim() !== '' || ipName.trim() !== ''
+
+  const doConfirm = async () => {
+    if (pendingCount === 0) return
+    setConfirmUnsaved(false)
+    setSubmitting(true)
+    setModalError(null)
     try {
-      await onAddIpCamera(ipUrl, ipName)
-      setIpUrl('')
-      setIpName('')
+      await onConfirm(pendingWebcamIds, pendingIpDrafts)
     } catch (err) {
-      setIpError(err instanceof Error ? err.message : String(err))
+      setModalError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSubmitting(false)
     }
   }
 
-  const webcamOptions: CustomSelectOption[] = webcamCameras.map((cam) => {
-    const isAlreadyAdded = selectedCameraIds.includes(cam.id)
-    return {
-      value: cam.id,
-      label: cam.name,
-      disabled: isAlreadyAdded,
-      badge: isAlreadyAdded ? 'Já adicionada' : 'Disponível'
+  const handleConfirm = async () => {
+    if (pendingCount === 0) return
+    // Warn when the user typed IP fields but never staged that camera, so the
+    // confirm action never silently discards what is on the screen.
+    if (hasUnsavedIpInput) {
+      setConfirmUnsaved(true)
+      return
     }
-  })
+    await doConfirm()
+  }
+
+  const webcamOptions: CustomSelectOption[] = webcamCameras
+    .filter((cam) => !selectedCameraIds.includes(cam.id) && !pendingWebcamIds.includes(cam.id))
+    .map((cam) => ({ value: cam.id, label: cam.name, badge: 'Disponível' }))
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn">
-      <div className="w-full max-w-lg rounded-2xl bg-zinc-900 p-6 shadow-2xl space-y-5 relative overflow-visible">
+    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/80 backdrop-blur-md animate-fadeIn">
+      <div className="min-h-full flex items-start sm:items-center [@media(max-height:720px)]:items-start justify-center p-4">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="vision-camera-dialog-title"
+          className="w-full max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl border border-white/10 bg-zinc-900 shadow-2xl relative"
+        >
         {/* Modal Header */}
-        <div className="flex items-center justify-between pb-3">
+        <div className="sticky top-0 z-20 flex items-start justify-between gap-4 px-6 pt-6 pb-5 bg-zinc-900/95 backdrop-blur-sm">
           <div>
-            <h2 className="text-base font-bold text-white flex items-center gap-2">
-              <VisionIcon className="w-5 h-5 text-gray-300" />
-              Gerenciar Câmeras
-            </h2>
-            <p className="text-xs text-gray-400 mt-0.5">
-              Escolha uma webcam ou gerencie suas câmeras IP.
-            </p>
+            <div className="flex items-center gap-2.5">
+              <VisionIcon className="w-5 h-5 text-emerald-400" />
+              <h2 id="vision-camera-dialog-title" className="text-base font-bold text-white">
+                Adicionar Câmeras
+              </h2>
+            </div>
           </div>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-white rounded-lg p-1.5 hover:bg-white/10 transition-colors"
+            aria-label="Fechar"
+            className="text-gray-500 hover:text-white rounded-lg p-1.5 -mr-1 hover:bg-white/5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M18 6L6 18M6 6l12 12" />
@@ -701,13 +739,15 @@ function AddCameraModal({
         </div>
 
         {/* Segmented Control / Tab Switcher */}
-        <div className="grid grid-cols-2 gap-1.5 p-1 bg-white/5 rounded-xl text-xs font-medium">
+        <div role="tablist" className="mx-6 grid grid-cols-2 gap-1 p-1 rounded-lg border border-white/10 bg-black/20 text-xs font-medium">
           <button
             type="button"
+            role="tab"
             onClick={() => setActiveTab('webcam')}
-            className={`py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition-all ${
+            aria-selected={activeTab === 'webcam'}
+            className={`py-2.5 px-3 rounded-md flex items-center justify-center gap-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 ${
               activeTab === 'webcam'
-                ? 'bg-zinc-800 text-white shadow-sm'
+                ? 'bg-zinc-800 text-white'
                 : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
             }`}
           >
@@ -719,10 +759,12 @@ function AddCameraModal({
           </button>
           <button
             type="button"
+            role="tab"
             onClick={() => setActiveTab('ip')}
-            className={`py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition-all ${
+            aria-selected={activeTab === 'ip'}
+            className={`py-2.5 px-3 rounded-md flex items-center justify-center gap-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 ${
               activeTab === 'ip'
-                ? 'bg-zinc-800 text-white shadow-sm'
+                ? 'bg-zinc-800 text-white'
                 : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
             }`}
           >
@@ -735,131 +777,215 @@ function AddCameraModal({
           </button>
         </div>
 
-        <div className={`space-y-4 ${activeTab === 'ip' ? 'max-h-[60vh] overflow-y-auto pr-1' : 'overflow-visible'}`}>
+        <div className={`grid grid-cols-1 gap-5 px-6 pt-5 ${pendingCount > 0 ? 'md:grid-cols-[minmax(0,1fr)_15rem]' : ''}`}>
+          <div className="min-w-0">
+            <div className="min-w-0">
           {/* Tab 1: Webcams USB */}
           {activeTab === 'webcam' && (
-            <div className="space-y-4 animate-fadeIn overflow-visible">
-              <div className="rounded-xl bg-white/5 p-4 space-y-3 relative overflow-visible z-20">
-                <label className="text-xs font-medium text-gray-300 block">
-                  Selecione a webcam que deseja adicionar:
-                </label>
+            <div className="animate-fadeIn overflow-visible">
+              <label className="text-[11px] font-medium text-gray-300 block mb-2">
+                Webcam disponível
+              </label>
 
-                {webcamCameras.length === 0 ? (
-                  <div className="text-xs text-gray-400 bg-black/30 rounded-lg p-3 text-center">
-                    Nenhuma webcam USB detectada no sistema.
-                  </div>
-                ) : (
-                  <div className="space-y-3 relative overflow-visible z-30">
-                    <CustomSelect
-                      value={selectedWebcamId}
-                      onChange={handleSelectWebcam}
-                      options={webcamOptions}
-                      placeholder="Selecione uma webcam..."
-                      size="md"
-                      direction="down"
-                      className="w-full"
-                    />
-                  </div>
-                )}
-
-                {webcamFeedback && (
-                  <p className="text-xs text-emerald-400 bg-emerald-500/10 rounded-lg px-3 py-2 text-center animate-fadeIn">
-                    ✓ {webcamFeedback}
-                  </p>
-                )}
-              </div>
+              {webcamCameras.length === 0 ? (
+                <div className="text-xs text-gray-400 border border-dashed border-white/10 rounded-lg px-3 py-4 text-center">
+                  Nenhuma webcam USB detectada no sistema.
+                </div>
+              ) : webcamOptions.length === 0 ? (
+                <div className="text-xs text-gray-400 border border-dashed border-white/10 rounded-lg px-3 py-4 text-center">
+                  Todas as webcams já estão selecionadas ou na lista de seleção.
+                </div>
+              ) : (
+                <div className="space-y-3 relative overflow-visible z-30">
+                  <CustomSelect
+                    value={selectedWebcamId}
+                    onChange={handleSelectWebcam}
+                    options={webcamOptions}
+                    placeholder="Selecione uma webcam..."
+                    size="md"
+                    direction="down"
+                    className="w-full"
+                  />
+                </div>
+              )}
             </div>
           )}
 
-          {/* Tab 2: Câmeras IP (Minimalista, intocado) */}
+          {/* Tab 2: Câmeras IP */}
           {activeTab === 'ip' && (
-            <div className="space-y-4 animate-fadeIn">
-              {/* List of Registered IP Cameras */}
+            <div className="animate-fadeIn">
+              {/* Form to stage a new IP camera into the pending selection */}
               <div>
-                <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">
-                  Câmeras IP Cadastradas ({ipCameras.length})
+                <h3 className="text-[11px] font-semibold text-gray-300">
+                  Nova câmera IP / MJPEG
                 </h3>
-                {ipCameras.length === 0 ? (
-                  <p className="text-xs text-gray-400 bg-white/5 rounded-xl p-3.5 text-center">
-                    Nenhuma câmera IP cadastrada ainda.
-                  </p>
-                ) : (
-                  <div className="space-y-2">
-                    {ipCameras.map((cam) => (
-                      <div
-                        key={cam.id}
-                        className="flex items-center justify-between p-3 rounded-xl bg-white/5 text-gray-200"
-                      >
-                        <div className="truncate min-w-0 pr-2">
-                          <p className="text-xs font-medium text-white truncate">{cam.name}</p>
-                          <p className="text-[11px] text-gray-400 truncate">{cam.id.slice('ip:'.length)}</p>
-                        </div>
-
-                        {/* Delete Trash Button */}
-                        <button
-                          type="button"
-                          onClick={async (e) => {
-                            e.stopPropagation()
-                            await onRemoveIpCamera(cam.id)
-                          }}
-                          className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors shrink-0"
-                          title="Eliminar câmera IP"
-                        >
-                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <polyline points="3 6 5 6 21 6" />
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                          </svg>
-                        </button>
-                      </div>
-                    ))}
+                <div className="mt-3 space-y-3">
+                  <div>
+                    <label htmlFor="vision-ip-name" className="block text-[11px] font-medium text-gray-400 mb-1.5">
+                      Nome <span className="text-gray-600">(opcional)</span>
+                    </label>
+                    <input
+                      id="vision-ip-name"
+                      value={ipName}
+                      onChange={(e) => setIpName(e.target.value)}
+                      placeholder="Nome da câmera (ex.: Garagem, Entrada)"
+                      className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-emerald-500/70 focus-visible:ring-2 focus-visible:ring-emerald-500/10 transition-colors"
+                    />
                   </div>
-                )}
-              </div>
-
-              {/* Form to Register New IP Camera */}
-              <div className="pt-2 space-y-3">
-                <h3 className="text-xs font-medium text-gray-300">
-                  Cadastrar Nova Câmera IP / MJPEG
-                </h3>
-                {ipError ? <p className="text-xs text-red-400">{ipError}</p> : null}
-                <div className="space-y-2">
-                  <input
-                    value={ipName}
-                    onChange={(e) => setIpName(e.target.value)}
-                    placeholder="Nome da câmera (ex.: Garagem, Entrada)"
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-white/30"
-                  />
-                  <input
-                    value={ipUrl}
-                    onChange={(e) => setIpUrl(e.target.value)}
-                    placeholder="URL (http://ip:porta/video ou rtsp://user:pass@ip)"
-                    className="w-full bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-white/30"
-                  />
+                  <div>
+                    <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-gray-400 mb-1.5">
+                      URL da câmera
+                    </label>
+                    <input
+                      id="vision-ip-url"
+                      value={ipUrl}
+                      onChange={(e) => setIpUrl(e.target.value)}
+                      placeholder="URL (http://ip:porta/video ou rtsp://user:pass@ip)"
+                      className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-emerald-500/70 focus-visible:ring-2 focus-visible:ring-emerald-500/10 transition-colors"
+                    />
+                  </div>
                   <button
                     type="button"
-                    disabled={busy || !ipUrl}
-                    onClick={handleAddIp}
-                    className="w-full rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-xs font-medium py-2.5 text-white transition-colors shadow-sm"
+                    disabled={!ipUrl.trim()}
+                    onClick={handleStageIp}
+                    className="w-full rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:hover:bg-emerald-600 text-xs font-semibold py-2.5 text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
                   >
-                    Adicionar Câmera IP
+                    Adicionar à seleção
                   </button>
                 </div>
               </div>
             </div>
           )}
+            </div>
+          </div>
+
+        {pendingCount > 0 && (
+          <aside className="min-w-0 self-start md:border-l md:border-white/10 md:pl-4">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-400/80 mb-2">
+              Revisão
+            </p>
+            <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] overflow-hidden">
+              <ul className="divide-y divide-emerald-500/15">
+                {pendingWebcamIds.map((id) => {
+                  const cam = webcamCameras.find((c) => c.id === id)
+                  return (
+                    <li
+                      key={id}
+                      className="flex items-center justify-between gap-2 px-2.5 py-1.5"
+                    >
+                      <span className="text-[11px] text-gray-200 truncate flex items-center gap-1.5 min-w-0">
+                        <svg className="w-3 h-3 text-emerald-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                          <circle cx="12" cy="13" r="4" />
+                        </svg>
+                        <span className="truncate">{cam?.name || id}</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removePendingWebcam(id)}
+                        aria-label={`Remover ${cam?.name || id} da seleção`}
+                        className="text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded p-0.5 shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40"
+                      >
+                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </li>
+                  )
+                })}
+                {pendingIpDrafts.map((draft, i) => (
+                  <li
+                    key={`ip-${draft.url}-${i}`}
+                    className="flex items-center justify-between gap-2 px-2.5 py-1.5"
+                  >
+                    <span className="text-[11px] text-gray-200 truncate flex items-center gap-1.5 min-w-0">
+                      <svg className="w-3 h-3 text-emerald-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="2" y1="12" x2="22" y2="12" />
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                      </svg>
+                      <span className="truncate">{draft.name || draft.url}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removePendingIp(i)}
+                      aria-label={`Remover ${draft.name || draft.url} da seleção`}
+                      className="text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded p-0.5 shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40"
+                    >
+                      <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <p className="text-[11px] leading-relaxed text-gray-600 mt-2">
+              A seleção será aplicada de uma vez ao confirmar.
+            </p>
+          </aside>
+        )}
         </div>
 
         {/* Modal Footer */}
-        <div className="pt-3 border-t border-white/10 flex justify-end">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 text-xs font-semibold transition-colors shadow-md"
-          >
-            Concluído
-          </button>
+        <div className="sticky bottom-0 z-20 mx-6 mt-5 mb-0 pt-4 pb-6 border-t border-white/10 bg-zinc-900/95 backdrop-blur-sm flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+          {modalError ? (
+            <p className="w-full sm:max-w-[60%] text-xs text-red-400 bg-red-500/10 border border-red-500/25 rounded-lg px-3 py-2 sm:mr-auto text-left">
+              {modalError}
+            </p>
+          ) : confirmUnsaved ? (
+            <p className="w-full sm:max-w-[60%] text-xs text-amber-300 bg-amber-500/10 border border-amber-500/25 rounded-lg px-3 py-2 sm:mr-auto text-left">
+              Você preencheu os campos de uma câmera IP sem adicioná-la à lista de seleção. Confirmar mesmo assim?
+            </p>
+          ) : null}
+          {confirmUnsaved ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setConfirmUnsaved(false)}
+                className="w-full sm:w-auto rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 px-4 py-2 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => void doConfirm()}
+                className="w-full sm:w-auto rounded-xl bg-amber-500 hover:bg-amber-400 text-black px-5 py-2 text-xs font-semibold transition-colors shadow-md active:scale-95 disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
+              >
+                {submitting ? 'Adicionando...' : 'Sim, adicionar mesmo assim'}
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                className="w-full sm:w-auto rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 px-4 py-2 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={submitting || pendingCount === 0}
+                onClick={() => void handleConfirm()}
+                className={`w-full sm:w-auto rounded-xl text-white px-5 py-2 text-xs font-semibold transition-colors shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 ${
+                  pendingCount === 0
+                    ? 'bg-zinc-800 text-gray-500 cursor-not-allowed'
+                    : 'bg-emerald-600 hover:bg-emerald-500 active:scale-95'
+                }`}
+              >
+                {submitting
+                  ? 'Adicionando...'
+                  : pendingCount === 0
+                  ? 'Nenhuma câmera selecionada'
+                  : `Adicionar ${pendingCount} ${pendingCount === 1 ? 'câmera' : 'câmeras'}`}
+              </button>
+            </>
+          )}
         </div>
       </div>
+    </div>
     </div>
   )
 }
@@ -1978,42 +2104,49 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     [config.selectedCameras]
   )
 
-  const handleAddIpFromModal = useCallback(
-    async (url: string, name: string) => {
-      const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string }> } }>(
-        'configure',
-        {}
-      )
-      const current = configRes.config || {}
-      const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
-      const id = `ip:${url}`
-      if (ipCamerasList.some((c) => c.id === id)) {
-        throw new Error('Esta câmera já foi adicionada.')
-      }
-      const updatedIp = [...ipCamerasList, { id, name: name || 'Câmera IP', url }]
-      const currentSelected = config.selectedCameras ?? []
-      const nextSelected = currentSelected.includes(id) ? currentSelected : [...currentSelected, id]
-      await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
-      setConfig((prev) => ({ ...prev, selectedCameras: nextSelected }))
-      await refresh()
-    },
-    [config.selectedCameras, refresh]
-  )
+  // Applies the whole pending selection in one configure call: registers new
+  // IP cameras and selects webcams/IPs together. Only called on confirm.
+  const confirmAddCameras = useCallback(
+    async (webcamIds: string[], ipDrafts: Array<{ name: string; url: string }>) => {
+      setBusy(true)
+      try {
+        const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string }> } }>(
+          'configure',
+          {}
+        )
+        const current = configRes.config || {}
+        const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
+        const existingIpIds = new Set(ipCamerasList.map((c) => c.id))
 
-  const removeIpCamera = useCallback(
-    async (cameraId: string) => {
-      const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string }> } }>(
-        'configure',
-        {}
-      )
-      const current = configRes.config || {}
-      const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
-      const updatedIp = ipCamerasList.filter((c) => c.id !== cameraId)
-      const currentSelected = config.selectedCameras ?? []
-      const nextSelected = currentSelected.filter((id) => id !== cameraId)
-      await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
-      setConfig((prev) => ({ ...prev, selectedCameras: nextSelected }))
-      await refresh()
+        const newIpCameras: Array<{ id: string; name: string; url: string }> = []
+        for (const draft of ipDrafts) {
+          const id = `ip:${draft.url}`
+          if (existingIpIds.has(id)) continue
+          existingIpIds.add(id)
+          newIpCameras.push({ id, name: draft.name || 'Câmera IP', url: draft.url })
+        }
+
+        const updatedIp = [...ipCamerasList, ...newIpCameras]
+        const toAdd = new Set<string>(webcamIds)
+        for (const cam of newIpCameras) toAdd.add(cam.id)
+        const currentSelected = config.selectedCameras ?? []
+        const nextSelected = [...new Set([...currentSelected, ...toAdd])]
+
+        await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
+        setConfig((prev) => {
+          const next = { ...prev, selectedCameras: nextSelected }
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+          }
+          return next
+        })
+        await refresh()
+        setIsModalOpen(false)
+      } catch (err) {
+        throw err instanceof Error ? err : new Error(String(err))
+      } finally {
+        setBusy(false)
+      }
     },
     [config.selectedCameras, refresh]
   )
@@ -2532,10 +2665,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         onClose={() => setIsModalOpen(false)}
         allCameras={cameras}
         selectedCameraIds={activeSelectedIds}
-        onToggleCamera={(id) => void toggleCameraSelection(id)}
-        onAddIpCamera={handleAddIpFromModal}
-        onRemoveIpCamera={removeIpCamera}
-        busy={busy}
+        onConfirm={confirmAddCameras}
       />
 
       <ExpandedCameraModal
