@@ -1,6 +1,6 @@
 {
   "name": "momai-vision",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "description": "MomAI Vision — olhos para a MomAI: snapshots de câmeras, monitoramento e alertas",
   "type": "module",
