@@ -1169,6 +1169,21 @@ async function stopWebcamWatch(camera: CameraEntry): Promise<void> {
   }).catch(() => {})
 }
 
+// Stop a watch by its `webcam:<deviceId>` id. After a replug the deviceId can
+// change, so the OLD id is no longer resolvable through findCamera — but the
+// host may still hold a (frozen) stream for it that keeps the physical device
+// busy. Stopping by id releases the device so the new id can be acquired.
+async function stopWebcamWatchById(cameraId: string): Promise<void> {
+  if (!cameraId.startsWith('webcam:')) return
+  const deviceId = cameraId.slice('webcam:'.length)
+  if (!deviceId) return
+  webcamWatches.delete(cameraId)
+  await hostFetch('/media/camera/stop-watch', {
+    method: 'POST',
+    body: JSON.stringify({ deviceId })
+  }).catch(() => {})
+}
+
 async function isWebcamOnline(camera: CameraEntry): Promise<boolean> {
   if (!camera || camera.source !== 'webcam' || !camera.deviceId) return false
   try {
@@ -1259,17 +1274,20 @@ async function syncWebcamWatches(): Promise<void> {
   if (webcamCache.length > 0) {
     for (const id of [...webcamWatches]) {
       if (!wanted.has(id)) {
-        const cam = findCamera(id)
-        if (cam && cam.source === 'webcam') await stopWebcamWatch(cam)
+        // Stop by id, not by findCamera: an orphaned watch whose deviceId
+        // changed on replug is no longer resolvable, but its frozen host
+        // stream still holds the device — releasing it unblocks the new id.
+        await stopWebcamWatchById(id)
       }
     }
   }
   for (const id of wanted) {
     // Re-acquire only if the stream stopped delivering frames (replug/device
     // change). A healthy camera is left untouched — no start/stop churn, so it
-    // does not blink.
+    // does not blink. A camera being manually reloaded right now is also left
+    // alone: the reload is already rebuilding its stream.
     const cam = findCamera(id)
-    if (cam && cam.source === 'webcam') await reconnectWebcamIfStale(cam)
+    if (cam && cam.source === 'webcam' && !reloadingCameras.has(id)) await reconnectWebcamIfStale(cam)
   }
 }
 
@@ -1664,7 +1682,9 @@ async function getStatusData(): Promise<Record<string, { online: boolean; monito
     listCameras().map(async (camera) => {
       const active = byCamera.get(camera.id) || []
       const online =
-        camera.source === 'webcam' ? await isWebcamOnline(camera) : mjpegStreams.has(camera.id)
+        camera.source === 'webcam'
+          ? reloadingCameras.has(camera.id) || await isWebcamOnline(camera)
+          : mjpegStreams.has(camera.id)
       status[camera.id] = {
         online,
         monitors: active.length,
@@ -1764,17 +1784,105 @@ async function toolGetFrame(args: { cameraId?: string }): Promise<unknown> {
   if (camera.source === 'ip') {
     await startMjpeg(camera)
   } else if (camera.source === 'webcam') {
-    await ensureWebcamWatch(camera.id)
-    // A visible card polls get_frame frequently — reconnect fast (but
-    // rate-limited) when the stream stopped, so replug recovery is near
-    // immediate without a steady re-acquire loop.
-    await reconnectWebcamIfStale(camera)
+    if (!reloadingCameras.has(camera.id)) {
+      await ensureWebcamWatch(camera.id)
+      // A visible card polls get_frame frequently — reconnect fast (but
+      // rate-limited) when the stream stopped, so replug recovery is near
+      // immediate without a steady re-acquire loop.
+      await reconnectWebcamIfStale(camera)
+    }
   }
   const frame = await getCameraFrame(camera)
   if (frame?.jpegBase64) {
     return { ok: true, jpegBase64: frame.jpegBase64 }
   }
   return { ok: false, error: 'no frame available' }
+}
+
+// POST /extensions/momai-vision/command reload_camera — tear down and rebuild
+// the camera source (webcam host watch or IP/MJPEG/RTSP stream) so a stuck
+// camera comes back, then block until a fresh frame is available.
+const reloadingCameras = new Set<string>()
+
+// findCamera after a replug: the device may take a moment to show up in
+// enumerateDevices, and a replugged USB webcam can change its deviceId while
+// keeping the same label. Retry the enumeration briefly and fall back to a
+// label match so the card's stale id still resolves.
+async function findCameraForReload(desiredId: string, name?: string): Promise<CameraEntry | undefined> {
+  for (let i = 0; i < 10; i++) {
+    await refreshWebcams()
+    const cam = findCamera(desiredId)
+    if (cam) return cam
+    if (name) {
+      const norm = name.trim().toLowerCase()
+      const byName = listCameras().find(
+        (c) => c.name.trim().toLowerCase() === norm || c.name.trim().toLowerCase().includes(norm)
+      )
+      if (byName) return byName
+    }
+    await new Promise((r) => setTimeout(r, 300))
+  }
+  return undefined
+}
+
+async function toolReloadCamera(args: { cameraId?: string; cameraName?: string }): Promise<unknown> {
+  if (!args.cameraId) return { ok: false, error: 'cameraId required' }
+  const camera = await findCameraForReload(args.cameraId, args.cameraName)
+  if (!camera) {
+    return { ok: false, error: 'Câmera não encontrada. Verifique se ela está conectada.', cameraId: args.cameraId }
+  }
+  const config = await loadConfig()
+  const selectedList = config.selectedCameras || []
+  if (!selectedList.includes(camera.id) && !selectedList.includes(args.cameraId)) {
+    return { ok: false, error: `A câmera "${camera.name}" não está selecionada no painel.` }
+  }
+  // Replugged USB webcam with a new deviceId but the same label: adopt the
+  // resolved id so get_frame stops failing and the card reconnects now.
+  if (camera.source === 'webcam' && !selectedList.includes(camera.id)) {
+    config.selectedCameras = (config.selectedCameras || []).map((id) =>
+      id === args.cameraId ? camera.id : id
+    )
+    for (const m of monitors.values()) {
+      if (m.config.cameraId === args.cameraId) m.config.cameraId = camera.id
+    }
+    void saveMonitors()
+    await bridge!.storage.set('config', config)
+  }
+  reloadingCameras.add(camera.id)
+  try {
+    if (camera.source === 'ip') {
+      stopMjpeg(camera.id)
+      await startMjpeg(camera)
+    } else if (camera.source === 'webcam') {
+      // If the card held a stale id (replug changed the deviceId), the host
+      // may still hold a frozen stream under the OLD id that keeps the device
+      // busy — release it so the new id can actually be acquired.
+      if (camera.id !== args.cameraId && args.cameraId.startsWith('webcam:')) {
+        await stopWebcamWatchById(args.cameraId)
+      }
+      await stopWebcamWatch(camera)
+      // Arm the reconnect rate-limit BEFORE the fresh stream is created. The
+      // card polls get_frame continuously; without this the very next poll
+      // would see "no frame yet" and immediately reconnect, racing this
+      // rebuild and toggling the device LED while it settles.
+      if (camera.deviceId) webcamLastReconnectTs.set(camera.deviceId, Date.now())
+      await ensureWebcamWatch(camera.id, 10, true)
+    } else {
+      return { ok: false, error: 'unsupported camera source' }
+    }
+    let frame: { jpegBase64: string } | null = null
+    for (let i = 0; i < 10; i++) {
+      frame = await getCameraFrame(camera)
+      if (frame) break
+      await new Promise((r) => setTimeout(r, 300))
+    }
+    if (!frame) {
+      return { ok: false, error: 'no frame available after reload', cameraId: camera.id }
+    }
+    return { ok: true, jpegBase64: frame.jpegBase64, cameraId: camera.id }
+  } finally {
+    reloadingCameras.delete(camera.id)
+  }
 }
 
 // POST /extensions/momai-vision/frame — the dashboard page pumps webcam & IP camera
@@ -1902,6 +2010,7 @@ const tools: Record<string, (args: any) => Promise<unknown>> = {
   list_alerts: toolListAlerts,
   clear_alerts: toolClearAlerts,
   get_frame: toolGetFrame,
+  reload_camera: toolReloadCamera,
   frame_pump: toolFramePump,
   configure: toolConfigure
 }

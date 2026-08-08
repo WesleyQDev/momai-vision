@@ -258,6 +258,7 @@ function CameraCard({
   onSnapshot,
   onRemove,
   onExpand,
+  onReload,
   refreshKey = 0,
   isActive = true,
   index,
@@ -274,6 +275,7 @@ function CameraCard({
   onSnapshot: (cameraId: string) => Promise<void> | void
   onRemove?: (cameraId: string) => void
   onExpand?: (camera: CameraInfo) => void
+  onReload?: (cameraId: string) => void
   refreshKey?: number
   isActive?: boolean
   index: number
@@ -291,6 +293,7 @@ function CameraCard({
   const [error, setError] = useState<string | null>(null)
   const [flashing, setFlashing] = useState(false)
   const [printStatus, setPrintStatus] = useState<'idle' | 'capturing' | 'success'>('idle')
+  const [reloading, setReloading] = useState(false)
   const [ipBase64, setIpBase64] = useState<string | null>(null)
   const mode = 'fluid'
   const ipBase64Ref = useRef<string | null>(null)
@@ -428,6 +431,36 @@ function CameraCard({
     }
   }
 
+  const handleReloadCamera = async () => {
+    setReloading(true)
+    setError(null)
+    try {
+      const res = await command<{ jpegBase64?: string; cameraId?: string }>('reload_camera', {
+        cameraId: camera.id,
+        cameraName: camera.name
+      })
+      if (res.jpegBase64) {
+        setIpBase64(res.jpegBase64)
+        setReady(true)
+        setError(null)
+      }
+      // A replug can change the deviceId while keeping the same name — sync the
+      // card with the resolved id so polling stops hitting the stale one.
+      if (res.cameraId && res.cameraId !== camera.id) {
+        onReload?.(res.cameraId)
+      }
+    } catch {
+      // Friendly status instead of a raw backend error (e.g. a stale device id
+      // right after a replug). The live polling keeps retrying and clears it
+      // as soon as a frame arrives; the poll below re-syncs the camera list so
+      // the card picks up a changed deviceId sooner.
+      setError('Conectando à sua câmera...')
+      onReload?.(camera.id)
+    } finally {
+      setReloading(false)
+    }
+  }
+
   return (
     <div
       ref={cardRef}
@@ -446,7 +479,7 @@ function CameraCard({
       }`}
     >
       <div className="relative w-full aspect-video bg-black rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
-        {camera.online && ready && ipBase64 ? (
+        {ready && ipBase64 ? (
           <img
             src={`data:image/jpeg;base64,${ipBase64}`}
             alt={camera.name}
@@ -455,7 +488,7 @@ function CameraCard({
         ) : (
           <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-gray-400 bg-black p-4 text-center">
             <VisionIcon className="w-6 h-6 text-gray-400 mb-2 animate-pulse" />
-            <span>{camera.online ? 'Iniciando câmera...' : 'Sem sinal'}</span>
+            <span>{reloading ? 'Conectando à sua câmera...' : camera.online ? 'Iniciando câmera...' : 'Sem sinal'}</span>
           </div>
         )}
         <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
@@ -533,6 +566,28 @@ function CameraCard({
           {camera.source === 'webcam' ? 'Webcam' : 'MJPEG / IP'}
         </span>
 
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Reload: rebuild the camera source when the feed is stuck */}
+          <button
+            disabled={reloading}
+            onClick={() => void handleReloadCamera()}
+            className="w-7 h-7 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white transition-all flex items-center justify-center shadow-md active:scale-95 disabled:opacity-70 disabled:hover:bg-zinc-800"
+            title="Recarregar câmera"
+            aria-label="Recarregar câmera"
+          >
+            <svg
+              className={`w-3.5 h-3.5 ${reloading ? 'animate-spin' : ''}`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+            </svg>
+          </button>
+
         {/* Interactive Print Button with Depth & State Feedback */}
         <button
           disabled={printStatus === 'capturing'}
@@ -570,6 +625,7 @@ function CameraCard({
             </>
           )}
         </button>
+        </div>
       </div>
     </div>
   )
@@ -2345,6 +2401,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 onSnapshot={takeSnapshot}
                 onRemove={(id) => void toggleCameraSelection(id)}
                 onExpand={(cam) => setExpandedCamera(cam)}
+                onReload={() => void poll()}
                 refreshKey={refreshKey}
                 isActive={isActive}
                 index={idx}

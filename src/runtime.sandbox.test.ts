@@ -44,6 +44,7 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   let nextId = 1
   const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   const events: Array<{ eventType: string; data: unknown }> = []
+  const cameraPostLog: string[] = []
 
   function spawnWorker(): Promise<void> {
     events.length = 0
@@ -116,6 +117,7 @@ describe('runtime.js as a persistent worker (host contract)', () => {
         return
       }
       if (url.startsWith('/media/camera/') && req.method === 'POST') {
+        cameraPostLog.push(url)
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
         return
@@ -244,6 +246,56 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       })) as { ok: boolean; error?: string }
       expect(result.ok).toBe(false)
       expect(result.error).toMatch(/invalid trigger/)
+    },
+    60000
+  )
+
+  it(
+    'reload_camera tears down and re-acquires the webcam source',
+    async () => {
+      // Self-contained: make sure the camera is selected regardless of order.
+      await execute({
+        toolName: 'configure',
+        args: { selectedCameras: ['webcam:test-cam'] }
+      })
+      cameraPostLog.length = 0
+      const res = (await execute({
+        toolName: 'reload_camera',
+        args: { cameraId: 'webcam:test-cam' }
+      })) as { ok: boolean; cameraId?: string; error?: string }
+      // The mock has no /media/camera/frame endpoint, so a fresh frame can't
+      // be returned here — what matters is the source was rebuilt: the host
+      // watch was stopped and restarted.
+      expect(res.cameraId).toBe('webcam:test-cam')
+      expect(cameraPostLog.some((u) => u.includes('/stop-watch'))).toBe(true)
+      expect(cameraPostLog.some((u) => u.includes('/start-watch'))).toBe(true)
+    },
+    60000
+  )
+
+  it(
+    'reload_camera resolves a stale webcam id by label and remaps the selection',
+    async () => {
+      // Simulate a replug: the card still holds `webcam:old` but the device is
+      // now enumerated as `webcam:test-cam` with the same label.
+      await execute({
+        toolName: 'configure',
+        args: { selectedCameras: ['webcam:old'] }
+      })
+      cameraPostLog.length = 0
+      const res = (await execute({
+        toolName: 'reload_camera',
+        args: { cameraId: 'webcam:old', cameraName: 'Test Webcam' }
+      })) as { ok: boolean; cameraId?: string; error?: string }
+      // The stale id resolved to the real device by label.
+      expect(res.cameraId).toBe('webcam:test-cam')
+      expect(cameraPostLog.some((u) => u.includes('/stop-watch'))).toBe(true)
+      expect(cameraPostLog.some((u) => u.includes('/start-watch'))).toBe(true)
+      // The persisted selection was remapped so the card reconnects now.
+      const list = (await execute({ toolName: 'list_cameras', args: {} })) as {
+        selectedCameras: string[]
+      }
+      expect(list.selectedCameras).toEqual(['webcam:test-cam'])
     },
     60000
   )

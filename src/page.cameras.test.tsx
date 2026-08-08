@@ -332,3 +332,22 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
     })
   })
 })
+
+describe('VisionPage — botão recarregar câmera', () => {
+  it('dispara reload_camera para a câmera do card ao clicar no ícone', async () => {
+    const { calls } = setupServer({ cameras: [WEB_A], selectedCameras: ['webcam:a'] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    const reloadBtn = await screen.findByRole('button', { name: 'Recarregar câmera' })
+    fireEvent.click(reloadBtn)
+
+    await waitFor(() => {
+      expect(calls.find((c) => c.toolName === 'reload_camera')).toBeTruthy()
+    })
+    expect(calls.find((c) => c.toolName === 'reload_camera')!.args).toEqual({
+      cameraId: 'webcam:a',
+      cameraName: 'Webcam A'
+    })
+  })
+})
