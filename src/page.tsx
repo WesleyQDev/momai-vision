@@ -32,6 +32,37 @@ interface MonitorInfo {
   label?: string
   createdAt?: number
   lastAlertTs?: number
+  actions?: MonitorActionUI[]
+}
+
+interface MonitorActionUI {
+  id?: string
+  target: string
+  tool: string
+  args?: Record<string, unknown>
+}
+
+interface CatalogToolParam {
+  type?: string
+  description?: string
+  default?: unknown
+  enum?: string[]
+}
+interface CatalogTool {
+  name: string
+  description?: string
+  parameters?: {
+    properties?: Record<string, CatalogToolParam>
+    required?: string[]
+  } | null
+}
+interface CatalogExt {
+  id: string
+  name?: string
+  installed?: boolean
+  enabled?: boolean
+  tools?: CatalogTool[]
+  eventFields?: Record<string, Record<string, { label?: string; type?: string }>>
 }
 
 interface Alert {
@@ -71,6 +102,7 @@ interface VisionConfig {
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
   selectedCameras?: string[]
+  sendActions?: MonitorActionUI[]
 }
 
 const CLASS_COLORS = [
@@ -1477,6 +1509,441 @@ interface AddEditMonitorModalProps {
   onSave: () => Promise<void> | void
 }
 
+const EVENT_PLACEHOLDERS = [
+  { token: '{cameraName}', label: 'Câmera' },
+  { token: '{description}', label: 'Descrição' },
+  { token: '{ts}', label: 'Horário' },
+  { token: '{event.imageDataUri}', label: 'Imagem' }
+]
+
+// i18n pt-BR: traduz nomes de tools e campos para o seletor, mantendo o nome
+// técnico apenas como fallback.
+const TOOL_LABELS: Record<string, string> = {
+  send_message: 'Enviar mensagem',
+  list_contacts: 'Listar contatos',
+  add_contact: 'Adicionar contato',
+  remove_contact: 'Remover contato',
+  get_stats: 'Estatísticas',
+  get_history: 'Histórico',
+  get_wa_contacts: 'Buscar contatos',
+  get_wa_groups: 'Buscar grupos',
+  control_device: 'Controlar dispositivo',
+  set_light_color: 'Cor da luz',
+  control_tv_remote: 'Controle da TV',
+  control_climate: 'Controlar clima',
+  call_ha_service: 'Serviço da casa',
+  list_devices: 'Listar dispositivos',
+  query_device: 'Consultar dispositivo',
+  capture_snapshot: 'Capturar print',
+  start_monitoring: 'Iniciar monitoramento',
+  set_actions: 'Configurar ações',
+  get_actions: 'Ver ações'
+}
+
+const PARAM_LABELS: Record<string, string> = {
+  contact: 'Contato ou número',
+  message: 'Mensagem',
+  image: 'Imagem',
+  media: 'Imagem',
+  device_name: 'Dispositivo',
+  action: 'Ação',
+  brightness: 'Brilho',
+  color: 'Cor',
+  temperature: 'Temperatura',
+  domain: 'Domínio',
+  service: 'Serviço',
+  data: 'Dados',
+  room: 'Cômodo',
+  cameraId: 'Câmera',
+  camera: 'Câmera',
+  monitorId: 'Monitor',
+  label: 'Rótulo'
+}
+
+function humanizeKey(key: string): string {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function toolLabel(name: string): string {
+  return TOOL_LABELS[name] || humanizeKey(name)
+}
+
+function paramLabel(key: string): string {
+  return PARAM_LABELS[key] || humanizeKey(key)
+}
+
+// Formata os args de uma ação em texto legível, ex.: "Dispositivo: Luz, Cor: verde".
+function formatActionArgs(args?: Record<string, unknown>): string {
+  if (!args) return ''
+  return Object.entries(args)
+    .filter(([, v]) => !(typeof v === 'string' && !v.trim()))
+    .map(([k, v]) => {
+      const val = v && typeof v === 'object' ? JSON.stringify(v) : String(v)
+      return `${paramLabel(k)}: ${val}`
+    })
+    .join(' · ')
+}
+
+// Campos que representam "entidades" (contato, dispositivo, câmera…) e
+// merecem um seletor com busca em vez de um input livre.
+const ENTITY_PARAM_KEYS = new Set(['contact', 'device_name', 'cameraId', 'camera', 'monitorId'])
+
+/**
+ * Generic action selector (MOM-115): reads the host catalog of installed
+ * extensions and lets the user pick target → tool → args. Args pre-fill from
+ * the tool schema defaults; the host resolves placeholders at execution time.
+ *
+ * UX: labels em português, campos de entidade (ex.: contato) viram seletor com
+ * busca, placeholders clicáveis para pré-preencher.
+ */
+function ActionEditor({
+  actions,
+  onChange,
+  footerButton = false
+}: {
+  actions: MonitorActionUI[]
+  onChange: (next: MonitorActionUI[]) => void
+  footerButton?: boolean
+}): JSX.Element {
+  const [catalog, setCatalog] = useState<CatalogExt[]>([])
+  const [showDraft, setShowDraft] = useState(false)
+  const [target, setTarget] = useState('')
+  const [tool, setTool] = useState('')
+  const [draftArgs, setDraftArgs] = useState<Record<string, unknown>>({})
+
+  useEffect(() => {
+    let cancelled = false
+    sdk.api
+      .get<CatalogExt[]>('/extensions')
+      .then((res) => {
+        if (cancelled || !res.ok) return
+        const installed = (res.data || []).filter(
+          (e) => e.installed !== false && e.enabled !== false && Array.isArray(e.tools) && e.tools.length > 0
+        )
+        setCatalog(installed)
+        if (installed.length > 0) setTarget((prev) => prev || installed[0].id)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const targetExt = catalog.find((e) => e.id === target)
+  const toolDef = targetExt?.tools?.find((t) => t.name === tool)
+
+  function selectTarget(nextTarget: string) {
+    setTarget(nextTarget)
+    const ext = catalog.find((e) => e.id === nextTarget)
+    const first = ext?.tools?.find((t) => t.name !== 'get_actions' && t.name !== 'set_actions') || ext?.tools?.[0]
+    setTool(first?.name || '')
+    setDraftArgs(first ? defaultArgsFor(first) : {})
+  }
+
+  function selectTool(nextTool: string) {
+    setTool(nextTool)
+    setDraftArgs(defaultArgsFor(targetExt?.tools?.find((t) => t.name === nextTool) as CatalogTool))
+  }
+
+  function defaultArgsFor(def: CatalogTool | undefined): Record<string, unknown> {
+    const props = def?.parameters?.properties || {}
+    const out: Record<string, unknown> = {}
+    for (const [key, param] of Object.entries(props)) {
+      out[key] = param && param.default !== undefined ? param.default : ''
+    }
+    return out
+  }
+
+  function addAction() {
+    if (!target || !tool) return
+    const cleanArgs: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(draftArgs)) {
+      if (typeof value === 'string' && !value.trim()) continue
+      cleanArgs[key] = value
+    }
+    onChange([
+      ...actions,
+      { id: `act-${Date.now()}`, target, tool, args: Object.keys(cleanArgs).length ? cleanArgs : undefined }
+    ])
+    setShowDraft(false)
+  }
+
+  const props = toolDef?.parameters?.properties || {}
+
+  return (
+    <div className="space-y-3">
+      <div className={`${footerButton ? 'flex items-center' : 'flex items-center justify-between'}`}>
+        <label className="block text-xs font-semibold text-gray-300">
+          Ações automáticas (o que fazer quando disparar)
+        </label>
+        {!footerButton ? (
+          <button
+            type="button"
+            onClick={() => setShowDraft((v) => !v)}
+            className="text-[11px] font-medium text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 hover:border-emerald-400 px-2.5 py-1 rounded-lg transition-colors"
+          >
+            {showDraft ? 'Cancelar' : '+ Adicionar ação'}
+          </button>
+        ) : null}
+      </div>
+
+      {actions.length === 0 && !showDraft ? (
+        <p className="text-[11px] text-gray-500">
+          Ex.: detectou pessoa → WhatsApp envia mensagem com o print. Campos
+          disponíveis: {EVENT_PLACEHOLDERS.map((p) => p.label).join(', ')}
+        </p>
+      ) : null}
+
+      {actions.map((a, i) => (
+        <div
+          key={a.id || i}
+          className="flex items-start justify-between gap-2 bg-white/5 border border-white/10 rounded-xl px-3 py-2"
+        >
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-gray-100">
+              {catalog.find((e) => e.id === a.target)?.name || a.target}
+              <span className="text-gray-400"> / </span>
+              {toolLabel(a.tool)}
+            </div>
+            {a.args && Object.keys(a.args).length > 0 ? (
+              <div className="text-[11px] text-gray-500 truncate">{formatActionArgs(a.args)}</div>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            onClick={() => onChange(actions.filter((_, j) => j !== i))}
+            className="text-gray-500 hover:text-red-400 text-sm shrink-0"
+            aria-label="Remover ação"
+          >
+            ×
+          </button>
+        </div>
+      ))}
+
+      {showDraft ? (
+        <div className="space-y-3 bg-white/5 border border-white/10 rounded-xl p-3">
+          <div>
+            <label className="block text-[11px] font-semibold text-gray-400 mb-1">
+              Extensão alvo
+            </label>            <select
+              value={target}
+              onChange={(e) => selectTarget(e.target.value)}
+              className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+            >
+              {catalog.length === 0 ? (
+                <option value="">Nenhuma extensão com ações instalada</option>
+              ) : null}
+              {catalog.map((ext) => (
+                <option key={ext.id} value={ext.id}>
+                  {ext.name || ext.id}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {toolDef ? (
+            <>
+              <div>
+                <label className="block text-[11px] font-semibold text-gray-400 mb-1">Ação</label>
+                <select
+                  value={tool}
+                  onChange={(e) => selectTool(e.target.value)}
+                  className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+                >
+                  {targetExt?.tools
+                    ?.filter((t) => t.name !== 'get_actions' && t.name !== 'set_actions')
+                    .map((t) => (
+                      <option key={t.name} value={t.name}>
+                        {toolLabel(t.name)}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div className="space-y-2">
+                {Object.entries(props).map(([key, param]) => (
+                  <div key={key}>
+                    <label className="block text-[11px] font-semibold text-gray-400 mb-1">
+                      {paramLabel(key)}
+                      {param?.default !== undefined ? ' (pré-preenchido)' : ''}
+                    </label>
+                    {param?.enum ? (
+                      <select
+                        value={String(draftArgs[key] ?? '')}
+                        onChange={(e) => setDraftArgs((d) => ({ ...d, [key]: e.target.value }))}
+                        className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
+                      >
+                        {param.enum.map((opt) => (
+                          <option key={opt} value={opt}>
+                            {opt}
+                          </option>
+                        ))}
+                      </select>
+                    ) : ENTITY_PARAM_KEYS.has(key) ? (
+                      <SearchInput
+                        paramKey={key}
+                        target={target}
+                        tool={tool}
+                        value={String(draftArgs[key] ?? '')}
+                        onChange={(v) => setDraftArgs((d) => ({ ...d, [key]: v }))}
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        value={String(draftArgs[key] ?? '')}
+                        onChange={(e) => setDraftArgs((d) => ({ ...d, [key]: e.target.value }))}
+                        placeholder={param?.description || ''}
+                        className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-emerald-500"
+                      />
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                {EVENT_PLACEHOLDERS.map((p) => (
+                  <button
+                    key={p.token}
+                    type="button"
+                    onClick={() =>
+                      setDraftArgs((d) => {
+                        const firstEmpty = Object.keys(props).find(
+                          (k) => !String(d[k] ?? '').trim()
+                        )
+                        if (!firstEmpty) return d
+                        return { ...d, [firstEmpty]: p.token }
+                      })
+                    }
+                    className="text-[10px] text-gray-400 border border-white/10 hover:border-emerald-500/50 hover:text-emerald-300 rounded-lg px-2 py-0.5 transition-colors"
+                  >
+                    {p.label} {p.token}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={addAction}
+                className="text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg transition-colors"
+              >
+                Usar esta ação
+              </button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+
+      {footerButton ? (
+        <button
+          type="button"
+          onClick={() => setShowDraft((v) => !v)}
+          className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-1.5 rounded-lg transition-colors shadow-md active:scale-[0.99] disabled:opacity-60"
+        >
+          {showDraft ? 'Cancelar' : 'Adicionar ação'}
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Input com dropdown + busca para campos de entidade (ex.: contato do
+ * WhatsApp). Tenta carregar sugestões da extensão-alvo quando ela expõe uma
+ * tool de listagem; caso contrário vira um campo de texto simples.
+ */
+function SearchInput({
+  paramKey,
+  target,
+  tool,
+  value,
+  onChange
+}: {
+  paramKey: string
+  target: string
+  tool: string
+  value: string
+  onChange: (v: string) => void
+}): JSX.Element {
+  const [options, setOptions] = useState<string[]>([])
+  const [open, setOpen] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    // Tool genérica de listagem por tipo de campo (contato → get_wa_contacts).
+    const listTool =
+      paramKey === 'contact' || paramKey === 'device_name'
+        ? paramKey === 'contact'
+          ? 'get_wa_contacts'
+          : 'list_devices'
+        : null
+    if (!listTool) return
+    sdk.api
+      .post<{ ok?: boolean; contacts?: unknown[]; devices?: unknown[] }>(
+        `/extensions/${target}/command`,
+        { toolName: listTool, args: {} }
+      )
+      .then((res) => {
+        if (cancelled || !res.ok) return
+        const items = paramKey === 'contact' ? res.data?.contacts : res.data?.devices
+        const names = (items || [])
+          .map((c) => {
+            if (paramKey === 'contact') {
+              const cc = c as { name?: string | null; notify?: string | null; phone?: string }
+              return cc.name || cc.notify || cc.phone || ''
+            }
+            return String((c as { name?: string }).name || '')
+          })
+          .filter(Boolean) as string[]
+        setOptions(Array.from(new Set(names)))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [paramKey, target, tool])
+
+  const filtered = value.trim()
+    ? options.filter((o) => o.toLowerCase().includes(value.toLowerCase()))
+    : options
+
+  return (
+    <div className="relative">
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder={options.length > 0 ? 'Digite para buscar…' : 'Digite nome ou número'}
+        className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-emerald-500"
+      />
+      {open && filtered.length > 0 ? (
+        <div className="absolute z-20 mt-1 w-full max-h-40 overflow-y-auto bg-zinc-800 border border-white/10 rounded-xl shadow-xl custom-scrollbar">
+          {filtered.slice(0, 30).map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                onChange(opt)
+                setOpen(false)
+              }}
+              className="block w-full text-left px-3 py-1.5 text-xs text-gray-200 hover:bg-emerald-500/10 hover:text-emerald-300 transition-colors"
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function AddEditMonitorModal({
   isOpen,
   onClose,
@@ -1500,6 +1967,7 @@ function AddEditMonitorModal({
   const [customCooldownUnit, setCustomCooldownUnit] = useState<'sec' | 'min'>(
     initCooldown % 60 === 0 && initCooldown >= 60 ? 'min' : 'sec'
   )
+  const [actions, setActions] = useState<MonitorActionUI[]>(initialMonitor?.actions || [])
 
   const firstTrigger = initialMonitor?.triggers?.[0]
 
@@ -1572,14 +2040,16 @@ function AddEditMonitorModal({
           cameraId,
           triggers: [trigger],
           cooldownSec: finalCooldown,
-          label: label.trim() || undefined
+          label: label.trim() || undefined,
+          actions: actions.length ? actions : undefined
         })
       } else {
         await command('start_monitoring', {
           cameraId,
           triggers: [trigger],
           cooldownSec: finalCooldown,
-          label: label.trim() || undefined
+          label: label.trim() || undefined,
+          actions: actions.length ? actions : undefined
         })
       }
       await onSave()
@@ -1864,6 +2334,8 @@ function AddEditMonitorModal({
               </div>
             )}
           </div>
+
+          <ActionEditor actions={actions} onChange={setActions} />
 
           <div className="flex items-center justify-end gap-3 pt-3 border-t border-white/10 shrink-0">
             <button
@@ -2662,6 +3134,24 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           </div>
 
 
+
+          <div className="rounded-2xl border border-white/10 bg-zinc-900/70 backdrop-blur-md p-6 shadow-xl space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-sky-400" />
+                Opções de Envio
+              </h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Ações executadas automaticamente quando um alerta disparar (ex.: enviar
+                mensagem no WhatsApp com o print).
+              </p>
+            </div>
+            <ActionEditor
+              actions={config.sendActions || []}
+              onChange={(next) => void saveSettings({ sendActions: next })}
+              footerButton
+            />
+          </div>
 
           <div className="rounded-2xl border border-white/10 bg-zinc-900/70 backdrop-blur-md p-6 shadow-xl space-y-4">
             <div>

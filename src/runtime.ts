@@ -20,6 +20,7 @@ import {
   normalizeClassName,
   type MonitorConfig,
   type MonitorState,
+  type MonitorAction,
   type Trigger,
   type Detection,
   type SceneAnswer
@@ -93,6 +94,7 @@ interface StoredConfig {
   trackingMode?: 'fluid' | 'balanced' | 'economy'
   ipCameras?: Array<{ id: string; name: string; url: string }>
   selectedCameras?: string[]
+  sendActions?: MonitorAction[]
 }
 
 async function loadConfig(): Promise<StoredConfig> {
@@ -1116,12 +1118,18 @@ async function fireAlert(config: MonitorConfig, alert: import('./vision/triggers
     imageDataUri
   }
 
+  const mergedActions = ([] as MonitorAction[])
+    .concat(config.actions || [], (await loadConfig().catch(() => ({}) as StoredConfig)).sendActions || [])
+    .filter(Boolean)
+
   const data = {
     type: 'vision_alert',
     data: {
       ...alertPayload,
       tts: description,
-      actions: ['open_momai', 'stop_monitoring']
+      // Actions configuradas no monitor + as ações globais (Opções de envio).
+      // O host executa todas (MOM-115).
+      actions: mergedActions.length ? mergedActions : undefined
     }
   }
 
@@ -1408,6 +1416,7 @@ interface StartMonitoringArgs {
   notify?: { native?: boolean; chat?: boolean }
   confirm?: boolean
   label?: string
+  actions?: MonitorAction[]
 }
 
 interface UpdateMonitoringArgs {
@@ -1418,6 +1427,7 @@ interface UpdateMonitoringArgs {
   cooldownSec?: number
   notify?: { native?: boolean; chat?: boolean }
   label?: string
+  actions?: MonitorAction[]
 }
 
 async function toolStartMonitoring(
@@ -1545,7 +1555,7 @@ async function toolStartMonitoring(
       ? Number(rawArgs.cooldown)
       : 300
 
-  const plan = describePlan(camera, triggers)
+  const plan = describePlan(camera, triggers) + await describeSendActionsSuffix(args.actions)
   // NOTE: no confirmation gate — the host has no requiresConfirmation flow,
   // so blocking here would silently fail to start monitoring. Monitoring
   // starts immediately; the plan is returned in the response text.
@@ -1560,6 +1570,7 @@ async function toolStartMonitoring(
     cooldownSec: Math.min(Math.max(requestedCooldown, 10), 3600),
     notify: args.notify,
     label: args.label,
+    actions: Array.isArray(args.actions) ? args.actions : undefined,
     createdAt: Date.now()
   }
   monitors.set(id, { config: monitorConfig, state: createMonitorState() })
@@ -1636,6 +1647,10 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
     entry.config.label = args.label
   }
 
+  if (Array.isArray(args.actions)) {
+    entry.config.actions = args.actions
+  }
+
   await saveMonitors()
 
   if (oldCameraId !== entry.config.cameraId) {
@@ -1647,7 +1662,9 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
     ensureCameraTicker(camera.id)
   }
 
-  const plan = camera ? describePlan(camera, entry.config.triggers) : 'Monitor atualizado.'
+  const plan =
+    (camera ? describePlan(camera, entry.config.triggers) : 'Monitor atualizado.') +
+    (await describeSendActionsSuffix(entry.config.actions))
   bridge?.log(`[vision] monitoring updated: ${args.monitorId}`)
 
   return { ok: true, monitorId: args.monitorId, plan, config: entry.config }
@@ -1707,6 +1724,7 @@ async function toolGetStatus(): Promise<unknown> {
       schedule: config.schedule,
       cooldownSec: config.cooldownSec,
       label: config.label,
+      actions: config.actions,
       createdAt: config.createdAt,
       lastAlertTs: state.lastAlertTs
     })),
@@ -1919,6 +1937,7 @@ async function toolConfigure(args: {
   trackingMode?: 'fluid' | 'balanced' | 'economy'
   ipCameras?: Array<{ id: string; name: string; url: string }>
   selectedCameras?: string[]
+  sendActions?: MonitorAction[]
 }): Promise<unknown> {
   const current = ((await bridge!.storage.get('config')) || {}) as Record<string, unknown>
   const config = {
@@ -1927,7 +1946,8 @@ async function toolConfigure(args: {
     ...(args.maxSnapshots !== undefined ? { maxSnapshots: args.maxSnapshots } : {}),
     ...(args.trackingMode !== undefined ? { trackingMode: args.trackingMode } : {}),
     ...(args.ipCameras !== undefined ? { ipCameras: args.ipCameras } : {}),
-    ...(args.selectedCameras !== undefined ? { selectedCameras: args.selectedCameras } : {})
+    ...(args.selectedCameras !== undefined ? { selectedCameras: args.selectedCameras } : {}),
+    ...(args.sendActions !== undefined ? { sendActions: args.sendActions } : {})
   }
   await bridge!.storage.set('config', config)
   if (args.ipCameras !== undefined) {
@@ -1964,6 +1984,53 @@ function describePlan(camera: CameraEntry, triggers: Trigger[]): string {
     }
   })
   return `Vou monitorar "${camera.name}" para: ${parts.join('; ')}. Alertas com snapshot.`
+}
+
+const SEND_TARGET_NAMES: Record<string, string> = {
+  whatsapp: 'WhatsApp',
+  momaismarthome: 'casa inteligente',
+  'momai-vision': 'MomAI Vision'
+}
+
+function describeSendAction(a: MonitorAction): string {
+  const args = (a.args || {}) as Record<string, unknown>
+  const targetName = SEND_TARGET_NAMES[a.target] || a.target
+  const contact = typeof args.contact === 'string' && args.contact.trim() ? args.contact.trim() : null
+  const device = typeof args.device_name === 'string' && args.device_name.trim() ? args.device_name.trim() : null
+  const action = typeof args.action === 'string' ? args.action : null
+  switch (a.tool) {
+    case 'send_message':
+      return contact
+        ? `enviarei uma mensagem para ${contact} no ${targetName}`
+        : `enviarei uma mensagem no ${targetName}`
+    case 'control_device': {
+      const verb =
+        action === 'on' ? 'ligarei' : action === 'off' ? 'desligarei' : action === 'toggle' ? 'alternarei' : 'acionarei'
+      return device ? `${verb} ${device}` : `${verb} o dispositivo`
+    }
+    case 'set_light_color':
+      return device ? `ajustarei a cor de ${device}` : `ajustarei a cor da luz`
+    case 'capture_snapshot':
+      return `tirarei um print de registro`
+    default:
+      return `executarei a ação ${a.tool} em ${targetName}`
+  }
+}
+
+/**
+ * Descreve os envios configurados (actions) em linguagem natural para o LLM
+ * anunciar ao criar/editar um monitoramento.
+ */
+function describeSendActions(actions: MonitorAction[] | undefined): string {
+  if (!actions || actions.length === 0) return ''
+  const phrases = actions.map(describeSendAction)
+  return `\nQuando o alerta disparar, ${phrases.join(' e ')}.`
+}
+
+async function describeSendActionsSuffix(actions: MonitorAction[] | undefined): Promise<string> {
+  const config = await loadConfig().catch(() => ({}) as StoredConfig)
+  const merged = ([] as MonitorAction[]).concat(actions || [], config.sendActions || []).filter(Boolean)
+  return describeSendActions(merged)
 }
 
 // ---------------------------------------------------------------------------

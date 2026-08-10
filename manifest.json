@@ -16,13 +16,23 @@
     "panel": "dist/panel.js",
     "panelType": "extension-panel"
   },
-  "eventTypes": [
-    "vision_alert",
-    "vision_status",
-    "vision_detections",
-    "open_overlay",
-    "close_overlay"
-  ],
+  "eventTypes": {
+    "vision_alert": {
+      "fields": {
+        "cameraName": { "label": "Câmera", "type": "string" },
+        "monitorLabel": { "label": "Monitor", "type": "string" },
+        "triggeredBy": { "label": "Gatilho", "type": "string" },
+        "className": { "label": "Objeto", "type": "string" },
+        "description": { "label": "Descrição", "type": "string" },
+        "ts": { "label": "Horário", "type": "number" },
+        "imageDataUri": { "label": "Imagem", "type": "image" }
+      }
+    },
+    "vision_status": {},
+    "vision_detections": {},
+    "open_overlay": {},
+    "close_overlay": {}
+  },
   "routes": [
     { "method": "POST", "path": "/frame", "tool": "frame_pump" },
     { "method": "POST", "path": "/configure", "tool": "configure" }
@@ -127,6 +137,10 @@
               "chat": { "type": "boolean", "description": "Notificação no chat." }
             }
           },
+          "actions": {
+            "type": "array",
+            "description": "Actions (MOM-115) a executar quando este monitor disparar: cada uma { target, tool, args }. Args podem usar {cameraName}, {description}, {ts}, {event.imageDataUri}."
+          },
           "label": { "type": "string", "description": "Rótulo amigável para o monitoramento." }
         },
         "required": ["cameraId", "triggers"]
@@ -199,6 +213,10 @@
               "native": { "type": "boolean" },
               "chat": { "type": "boolean" }
             }
+          },
+          "actions": {
+            "type": "array",
+            "description": "Nova lista de actions a executar quando este monitor disparar."
           },
           "label": { "type": "string", "description": "Novo rótulo/nome do monitoramento (opcional)." }
         },

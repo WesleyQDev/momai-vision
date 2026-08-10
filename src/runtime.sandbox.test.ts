@@ -238,6 +238,36 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   )
 
   it(
+    'persists monitor actions across tool calls (MOM-115)',
+    async () => {
+      const status = (await execute({ toolName: 'get_status', args: {} })) as {
+        monitors: Array<{ id: string }>
+      }
+      const targetId = status.monitors[0].id
+      const actions = [
+        {
+          id: 'act-test',
+          target: 'whatsapp',
+          tool: 'send_message',
+          args: { contact: 'Ana', message: '{description}', image: '{event.imageDataUri}' }
+        }
+      ]
+      const updateRes = (await execute({
+        toolName: 'update_monitoring',
+        args: { monitorId: targetId, actions }
+      })) as { ok: boolean; config?: { actions?: unknown[] } }
+      expect(updateRes.ok).toBe(true)
+      expect(updateRes.config?.actions).toEqual(actions)
+
+      const status2 = (await execute({ toolName: 'get_status', args: {} })) as {
+        monitors: Array<{ id: string; actions?: unknown[] }>
+      }
+      expect(status2.monitors[0].actions).toEqual(actions)
+    },
+    60000
+  )
+
+  it(
     'rejects start_monitoring with invalid triggers',
     async () => {
       const result = (await execute({

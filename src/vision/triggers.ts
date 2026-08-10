@@ -31,6 +31,19 @@ export interface Schedule {
   end?: string // "HH:MM"
 }
 
+/**
+ * Action (MOM-115): "quando este monitor disparar → pedir à extensão `target`
+ * que execute `tool` com `args`". Valores de args podem ser fixos, templates
+ * com placeholders ({cameraName}, {description}, {ts}, {event.imageDataUri}) ou
+ * { from: 'event.<campo>' } — o host resolve contra os dados do alerta.
+ */
+export interface MonitorAction {
+  id?: string
+  target: string
+  tool: string
+  args?: Record<string, unknown>
+}
+
 export interface MonitorConfig {
   id: string
   cameraId: string
@@ -40,6 +53,7 @@ export interface MonitorConfig {
   cooldownSec?: number
   notify?: { native?: boolean; chat?: boolean }
   label?: string
+  actions?: MonitorAction[]
   createdAt?: number
 }
 
