@@ -55,6 +55,8 @@ export interface MonitorConfig {
   label?: string
   actions?: MonitorAction[]
   createdAt?: number
+  /** Quando true, o monitor está pausado: permanece salvo, mas não executa. */
+  paused?: boolean
 }
 
 export interface MonitorState {
@@ -204,7 +206,9 @@ export function evaluateMonitor(
 
     if (trigger.type === 'object') {
       const className = trigger.className || 'person'
-      const minConf = trigger.minConfidence ?? 0.4
+      // Default 0.25: mesmo limite do engine YOLO, para que toda detecção
+      // visível na página (frame_pump) também possa disparar o monitor.
+      const minConf = trigger.minConfidence ?? 0.25
       const found = findDetections(ctx.detections, className, minConf).length > 0
       const wantPresent = trigger.present !== false
       if (found === wantPresent && !inCooldown(state, monitor, now)) {
@@ -225,7 +229,9 @@ export function evaluateMonitor(
 
     if (trigger.type === 'presence' || trigger.type === 'absence') {
       const className = trigger.className || 'person'
-      const minConf = 0.4
+      // Mesmo limite do engine YOLO (0.25): detecções visíveis na página
+      // também contam para presença/ausência.
+      const minConf = 0.25
       const key = presenceKey(className)
       const present = findDetections(ctx.detections, className, minConf).length > 0
       const entry = state.presence[key] || { present: false, since: now, lastSeen: now }

@@ -127,6 +127,19 @@ describe('runtime.js as a persistent worker (host contract)', () => {
         res.end(JSON.stringify({ visionAvailable: false, error: 'vision_unavailable' }))
         return
       }
+      if (url.startsWith('/automations/') && url.endsWith('/toggle') && req.method === 'PATCH') {
+        // A automação autotest existe no hub (aceita o toggle); qualquer outra
+        // (ex.: auto-nao-existe) não existe — 404, para validar que o runtime
+        // não engole a falha silenciosamente.
+        if (url.includes('/autotest/')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, enabled: false }))
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ detail: 'Not found' }))
+        }
+        return
+      }
       res.writeHead(404, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ detail: 'Not found' }))
     })
@@ -268,6 +281,48 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   )
 
   it(
+    'pauses a monitor without deleting it, then resumes it',
+    async () => {
+      const status = (await execute({ toolName: 'get_status', args: {} })) as {
+        monitors: Array<{ id: string; label?: string; paused?: boolean }>
+      }
+      expect(status.monitors.length).toBeGreaterThan(0)
+      const targetId = status.monitors[0].id
+
+      // Pause: the monitor stays saved but is marked paused.
+      const pauseRes = (await execute({
+        toolName: 'pause_monitoring',
+        args: { monitorId: targetId }
+      })) as { ok: boolean; paused?: string[] }
+      expect(pauseRes.ok).toBe(true)
+      expect(pauseRes.paused).toContain(targetId)
+      // UIs are notified so the page refreshes its monitor list right away.
+      expect(events.some((e) => e.eventType === 'vision_status')).toBe(true)
+
+      const afterPause = (await execute({ toolName: 'get_status', args: {} })) as {
+        monitors: Array<{ id: string; paused?: boolean }>
+      }
+      const pausedMonitor = afterPause.monitors.find((m) => m.id === targetId)
+      expect(pausedMonitor).toBeTruthy()
+      expect(pausedMonitor?.paused).toBe(true)
+
+      // Resume: back to active.
+      const resumeRes = (await execute({
+        toolName: 'resume_monitoring',
+        args: { monitorId: targetId }
+      })) as { ok: boolean; resumed?: string[] }
+      expect(resumeRes.ok).toBe(true)
+      expect(resumeRes.resumed).toContain(targetId)
+
+      const afterResume = (await execute({ toolName: 'get_status', args: {} })) as {
+        monitors: Array<{ id: string; paused?: boolean }>
+      }
+      expect(afterResume.monitors.find((m) => m.id === targetId)?.paused).toBe(false)
+    },
+    60000
+  )
+
+  it(
     'rejects start_monitoring with invalid triggers',
     async () => {
       const result = (await execute({
@@ -343,6 +398,38 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       expect(detectionEvent).toBeTruthy()
     },
     120000
+  )
+
+  it(
+    'pauses an automation monitor: toggles the hub automation via PATCH and returns ok',
+    async () => {
+      // O branch auto- de pause_monitoring desativa a automação no hub (PATCH
+      // /automations/:id/toggle). Antes da correção o toggle era fire-and-forget:
+      // a falha era engolida e o resultado nunca chegava à UI. O teste 2 cobre
+      // o caso de falha; aqui validamos o fluxo de sucesso.
+      const res = (await execute({
+        toolName: 'pause_monitoring',
+        args: { monitorId: 'auto-autotest' }
+      })) as { ok: boolean; error?: string }
+      expect(res.ok).toBe(true)
+      expect(res.error).toBeUndefined()
+    },
+    60000
+  )
+
+  it(
+    'returns an error when pausing an automation fails in the hub (no silent swallow)',
+    async () => {
+      // O mock responde 404 para /automations/nao-existe/toggle — a falha não
+      // pode ser engolida silenciosamente: o runtime deve reportar erro.
+      const res = (await execute({
+        toolName: 'pause_monitoring',
+        args: { monitorId: 'auto-nao-existe' }
+      })) as { ok: boolean; error?: string }
+      expect(res.ok).toBe(false)
+      expect(res.error).toMatch(/pausar/i)
+    },
+    60000
   )
 
   it(

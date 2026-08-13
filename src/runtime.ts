@@ -864,6 +864,11 @@ function saveMonitors(): Promise<void> {
   )
 }
 
+/** Avisa as UIs (página/overlay) que o conjunto de monitoramentos mudou. */
+function notifyMonitorsChanged(): void {
+  bridge?.sendEvent('vision_status', { changedAt: Date.now() })
+}
+
 function needsDetection(config: MonitorConfig): boolean {
   return config.triggers.some((t) => t.type === 'object' || t.type === 'presence' || t.type === 'absence')
 }
@@ -893,9 +898,152 @@ function ensureCameraTicker(cameraId: string): void {
   cameraTickers.set(cameraId, timer)
 }
 
+let autoMonitorsCache: ActiveMonitor[] = []
+let lastAutomationSyncTs = 0
+let lastAutomationSyncOkTs = 0
+
+async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
+  const now = Date.now()
+  if (now - lastAutomationSyncTs < 3000) {
+    return autoMonitorsCache
+  }
+  lastAutomationSyncTs = now
+
+  try {
+    const activeTriggers = await fetchHostActiveTriggers()
+    if (!Array.isArray(activeTriggers)) {
+      autoMonitorsCache = []
+      lastAutomationSyncOkTs = now
+      return []
+    }
+
+    const allCams = listCameras()
+    const synced: ActiveMonitor[] = []
+
+    for (const auto of activeTriggers) {
+      if (!auto || auto.enabled === false) continue
+      const trig = auto.trigger || {}
+      const camCond = (auto.global_conditions || []).find(
+        (c: any) => c.field?.toLowerCase().includes('camera') || c.field?.toLowerCase().includes('câmera')
+      )
+      const rawCam = String(
+        trig.trigger_config?.camera || trig.params?.camera || trig.camera || camCond?.value || ''
+      ).trim()
+
+      let cam = rawCam
+        ? allCams.find(
+            (c) =>
+              c.id === rawCam ||
+              c.name === rawCam ||
+              (rawCam.length >= 3 &&
+                (c.id.toLowerCase().includes(rawCam.toLowerCase()) ||
+                  c.name.toLowerCase().includes(rawCam.toLowerCase())))
+          )
+        : null
+
+      if (!cam) {
+        // Fallback: se a câmera não for especificada ou não for encontrada pelo nome, usa a primeira selecionada ou disponível
+        const config = await loadConfig()
+        const selectedList = config.selectedCameras || []
+        cam = allCams.find((c) => selectedList.includes(c.id)) || allCams[0]
+      }
+      if (!cam) continue
+
+      const objCond = (auto.global_conditions || []).find(
+        (c: any) =>
+          c.field?.toLowerCase().includes('objeto') ||
+          c.field?.toLowerCase().includes('class') ||
+          c.field?.toLowerCase().includes('pessoa') ||
+          c.field?.toLowerCase().includes('carro')
+      )
+      let rawObj = String(
+        trig.trigger_config?.className ||
+          trig.params?.className ||
+          trig.className ||
+          trig.object ||
+          objCond?.value ||
+          ''
+      ).trim()
+
+      const rawType = String(trig.type || trig.id || '').toLowerCase()
+      const isMotion = rawType.includes('motion') || rawType.includes('movimento')
+
+      if (!isMotion && !rawObj) {
+        rawObj = 'person'
+      }
+
+      const normType = isMotion
+        ? 'motion'
+        : rawType.includes('presence') || rawType.includes('presenca') || rawType.includes('presença')
+        ? 'presence'
+        : 'object'
+
+      const triggerObj: Trigger = isMotion
+        ? { type: 'motion' }
+        : normType === 'presence'
+        ? { type: 'presence', className: normalizeClassName(rawObj), event: 'entered' }
+        : { type: 'object', className: normalizeClassName(rawObj) }
+
+      const id = `auto-${auto.automationId}`
+      const existing = autoMonitorsCache.find((m) => m.config.id === id)
+      const state = existing?.state || createMonitorState()
+
+      const config: MonitorConfig = {
+        id,
+        cameraId: cam.id,
+        cameraName: cam.name,
+        triggers: [triggerObj],
+        label: `⚡ ${auto.automationName || 'Automação Hub'}`,
+        createdAt: Date.now(),
+        paused: false,
+        actions: auto.actions || []
+      }
+
+      synced.push({ config, state })
+
+      if (cam.source === 'webcam') void ensureWebcamWatch(cam.id).catch(() => {})
+      if (cam.source === 'ip') void startMjpeg(cam).catch(() => {})
+      ensureCameraTicker(cam.id)
+    }
+
+    // Automação pausada/excluída direto no hub (sem passar pelas tools):
+    // se o monitor sumiu do sync, fecha o overlay dele se estiver aberto —
+    // senão a janela flutuante continua na tela com o último alerta.
+    const removed = autoMonitorsCache.filter((m) => !synced.some((s) => s.config.id === m.config.id))
+    for (const gone of removed) {
+      if (lastOverlayMonitorId === gone.config.id) {
+        bridge?.sendEvent('close_overlay', {})
+        lastOverlayMonitorId = null
+      }
+    }
+
+    autoMonitorsCache = synced
+    lastAutomationSyncOkTs = now
+    return synced
+  } catch {
+    // Backend inacessível: expira o cache 10s após o último sync bem-sucedido
+    // para não deixar monitores de automação fantasma (ex.: automação pausada
+    // no hub) disparando alertas/overlay com estado desatualizado.
+    if (now - lastAutomationSyncOkTs > 10000) {
+      autoMonitorsCache = []
+    }
+    return autoMonitorsCache
+  }
+}
+
+function getActiveMonitorsForCamera(cameraId: string): ActiveMonitor[] {
+  const localActive = [...monitors.values()].filter(
+    (m) => m.config.cameraId === cameraId && !m.config.paused
+  )
+  const autoActive = autoMonitorsCache.filter(
+    (m) => m.config.cameraId === cameraId && !m.config.paused
+  )
+  return [...localActive, ...autoActive]
+}
+
 function stopCameraTickerIfIdle(cameraId: string): void {
-  const active = [...monitors.values()].some((m) => m.config.cameraId === cameraId)
-  if (active) return
+  const active = getActiveMonitorsForCamera(cameraId)
+  if (active.length > 0) return
   const timer = cameraTickers.get(cameraId)
   if (timer) {
     clearInterval(timer)
@@ -918,7 +1066,8 @@ interface TickFrame {
 }
 
 async function tickCamera(cameraId: string): Promise<void> {
-  const active = [...monitors.values()].filter((m) => m.config.cameraId === cameraId)
+  void syncAutomationMonitors().catch(() => {})
+  const active = getActiveMonitorsForCamera(cameraId)
   if (active.length === 0) return
   const camera = findCamera(cameraId)
   if (!camera) return
@@ -1072,6 +1221,7 @@ interface PersistedAlert {
   ts: number
   description?: string
   imageDataUri?: string
+  actions?: MonitorAction[]
 }
 
 async function loadAlertsHistory(): Promise<PersistedAlert[]> {
@@ -1083,10 +1233,23 @@ async function saveAlertsHistory(alerts: PersistedAlert[]): Promise<void> {
   await bridge!.storage.set('alerts_history', alerts)
 }
 
-async function saveAlertToHistory(alert: PersistedAlert): Promise<void> {
-  const history = await loadAlertsHistory()
-  history.unshift(alert)
-  await saveAlertsHistory(history.slice(0, 200))
+// Serializa as escritas do histórico de alertas. Alertas em rajada (vários
+// monitores, tickers de 1s por câmera) chamam saveAlertToHistory de forma
+// concorrente via fire-and-forget; um read-modify-write ingênuo perde
+// entradas quando duas gravações se sobrepõem (ambas leem o arquivo antigo e
+// a última gravação vence). Enfileirar as operações numa promise chain faz
+// cada save ler o estado mais recente antes de gravar.
+let alertsHistoryWriteChain: Promise<void> = Promise.resolve()
+
+function saveAlertToHistory(alert: PersistedAlert): Promise<void> {
+  const task = alertsHistoryWriteChain.then(async () => {
+    const history = await loadAlertsHistory()
+    history.unshift(alert)
+    await saveAlertsHistory(history.slice(0, 200))
+  })
+  // Uma falha de gravação não pode envenenar a fila dos alertas seguintes.
+  alertsHistoryWriteChain = task.catch(() => {})
+  return task
 }
 
 async function fireAlert(config: MonitorConfig, alert: import('./vision/triggers').AlertInfo, jpegBase64: string): Promise<void> {
@@ -1102,6 +1265,13 @@ async function fireAlert(config: MonitorConfig, alert: import('./vision/triggers
 
   let description = describeAlert(alert)
 
+  const sysConfig = await loadConfig().catch(() => ({} as StoredConfig))
+  const mergedActions = (Array.isArray(config.actions) && config.actions.length > 0)
+    ? config.actions
+    : (Array.isArray(sysConfig.sendActions) && sysConfig.sendActions.length > 0)
+    ? sysConfig.sendActions
+    : undefined
+
   const imageDataUri = `data:image/jpeg;base64,${jpegBase64}`
   const alertPayload: PersistedAlert = {
     cameraId: config.cameraId,
@@ -1115,21 +1285,15 @@ async function fireAlert(config: MonitorConfig, alert: import('./vision/triggers
     snapshotId: snapshot?.id,
     ts: alert.ts,
     description,
-    imageDataUri
+    imageDataUri,
+    actions: mergedActions
   }
-
-  const mergedActions = ([] as MonitorAction[])
-    .concat(config.actions || [], (await loadConfig().catch(() => ({}) as StoredConfig)).sendActions || [])
-    .filter(Boolean)
 
   const data = {
     type: 'vision_alert',
     data: {
       ...alertPayload,
-      tts: description,
-      // Actions configuradas no monitor + as ações globais (Opções de envio).
-      // O host executa todas (MOM-115).
-      actions: mergedActions.length ? mergedActions : undefined
+      tts: description
     }
   }
 
@@ -1275,7 +1439,8 @@ async function syncWebcamWatches(): Promise<void> {
     if (id.startsWith('webcam:')) wanted.add(id)
   }
   for (const m of monitors.values()) {
-    if (m.config.cameraId.startsWith('webcam:')) wanted.add(m.config.cameraId)
+    // Paused monitors do not keep the webcam alive by themselves.
+    if (!m.config.paused && m.config.cameraId.startsWith('webcam:')) wanted.add(m.config.cameraId)
   }
   // Only stop watches when we have a valid device list — otherwise a
   // transient refresh failure would kill cameras that are still present.
@@ -1575,6 +1740,7 @@ async function toolStartMonitoring(
   }
   monitors.set(id, { config: monitorConfig, state: createMonitorState() })
   await saveMonitors()
+  notifyMonitorsChanged()
 
   if (camera.source === 'webcam') await ensureWebcamWatch(camera.id)
   if (camera.source === 'ip') await startMjpeg(camera)
@@ -1652,11 +1818,13 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
   }
 
   await saveMonitors()
+  notifyMonitorsChanged()
 
   if (oldCameraId !== entry.config.cameraId) {
     stopCameraTickerIfIdle(oldCameraId)
   }
-  if (camera) {
+  // A paused monitor must not (re)activate camera resources when edited.
+  if (camera && !entry.config.paused) {
     if (camera.source === 'webcam') await ensureWebcamWatch(camera.id)
     if (camera.source === 'ip') await startMjpeg(camera)
     ensureCameraTicker(camera.id)
@@ -1670,7 +1838,119 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
   return { ok: true, monitorId: args.monitorId, plan, config: entry.config }
 }
 
+/**
+ * Pausa monitoramento(s) sem excluir: interrompe a execução, mas mantém os
+ * dados/configurações salvos para gerenciar depois (retomar ou excluir).
+ */
+async function toolPauseMonitoring(args: { monitorId?: string; all?: boolean }): Promise<unknown> {
+  if (args.monitorId?.startsWith('auto-')) {
+    const autoId = args.monitorId.replace('auto-', '')
+    try {
+      const res = await hostFetch(`/automations/${autoId}/toggle`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: false })
+      })
+      if (!res.ok) {
+        bridge?.log(`[vision] pause_monitoring: toggle failed for automation ${autoId} (HTTP ${res.status})`)
+        return { ok: false, error: `Falha ao pausar a automação (HTTP ${res.status}).` }
+      }
+    } catch (err) {
+      bridge?.log(`[vision] pause_monitoring: toggle error for automation ${autoId}: ${err instanceof Error ? err.message : String(err)}`)
+      return { ok: false, error: 'Falha ao pausar a automação. Backend inacessível.' }
+    }
+    // Remove do cache imediatamente: o ticker não pode disparar alertas/overlay
+    // enquanto a automação está pausada (o próximo sync também a excluiria).
+    autoMonitorsCache = autoMonitorsCache.filter((m) => m.config.id !== args.monitorId)
+    if (lastOverlayMonitorId === args.monitorId) {
+      bridge?.sendEvent('close_overlay', {})
+      lastOverlayMonitorId = null
+    }
+    notifyMonitorsChanged()
+    return { ok: true }
+  }
+  const ids = args.all ? [...monitors.keys()] : args.monitorId ? [args.monitorId] : []
+  if (ids.length === 0) return { ok: false, error: 'monitorId required (or all: true)' }
+  for (const id of ids) {
+    const entry = monitors.get(id)
+    if (!entry) continue
+    entry.config.paused = true
+    stopCameraTickerIfIdle(entry.config.cameraId)
+    if (lastOverlayMonitorId === id) {
+      bridge?.sendEvent('close_overlay', {})
+      lastOverlayMonitorId = null
+    }
+  }
+  await saveMonitors()
+  notifyMonitorsChanged()
+  return { ok: true, paused: ids }
+}
+
+/**
+ * Retoma monitoramento(s) pausado(s), reativando a execução e os recursos
+ * de câmera necessários.
+ */
+async function toolResumeMonitoring(args: { monitorId?: string; all?: boolean }): Promise<unknown> {
+  if (args.monitorId?.startsWith('auto-')) {
+    const autoId = args.monitorId.replace('auto-', '')
+    try {
+      const res = await hostFetch(`/automations/${autoId}/toggle`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: true })
+      })
+      if (!res.ok) {
+        bridge?.log(`[vision] resume_monitoring: toggle failed for automation ${autoId} (HTTP ${res.status})`)
+        return { ok: false, error: `Falha ao retomar a automação (HTTP ${res.status}).` }
+      }
+    } catch (err) {
+      bridge?.log(`[vision] resume_monitoring: toggle error for automation ${autoId}: ${err instanceof Error ? err.message : String(err)}`)
+      return { ok: false, error: 'Falha ao retomar a automação. Backend inacessível.' }
+    }
+    // Força o próximo sync a rodar já no próximo tick, reativando o monitor o
+    // quanto antes (o rate-limit do cache é de 3s).
+    lastAutomationSyncTs = 0
+    notifyMonitorsChanged()
+    return { ok: true }
+  }
+  const ids = args.all ? [...monitors.keys()] : args.monitorId ? [args.monitorId] : []
+  if (ids.length === 0) return { ok: false, error: 'monitorId required (or all: true)' }
+  for (const id of ids) {
+    const entry = monitors.get(id)
+    if (!entry) continue
+    entry.config.paused = false
+    const camera = findCamera(entry.config.cameraId)
+    if (camera) {
+      if (camera.source === 'webcam') await ensureWebcamWatch(camera.id)
+      if (camera.source === 'ip') await startMjpeg(camera)
+      ensureCameraTicker(camera.id)
+    }
+  }
+  await saveMonitors()
+  notifyMonitorsChanged()
+  return { ok: true, resumed: ids }
+}
+
+/** Exclui monitoramento(s) definitivamente, removendo dados e configurações. */
 async function toolStopMonitoring(args: { monitorId?: string; all?: boolean }): Promise<unknown> {
+  if (args.monitorId?.startsWith('auto-')) {
+    const autoId = args.monitorId.replace('auto-', '')
+    try {
+      const res = await hostFetch(`/automations/${autoId}`, { method: 'DELETE' })
+      if (!res.ok) {
+        bridge?.log(`[vision] stop_monitoring: delete failed for automation ${autoId} (HTTP ${res.status})`)
+        return { ok: false, error: `Falha ao excluir a automação (HTTP ${res.status}).` }
+      }
+    } catch (err) {
+      bridge?.log(`[vision] stop_monitoring: delete error for automation ${autoId}: ${err instanceof Error ? err.message : String(err)}`)
+      return { ok: false, error: 'Falha ao excluir a automação. Backend inacessível.' }
+    }
+    autoMonitorsCache = autoMonitorsCache.filter((m) => m.config.id !== args.monitorId)
+    if (lastOverlayMonitorId === args.monitorId) {
+      bridge?.sendEvent('close_overlay', {})
+      lastOverlayMonitorId = null
+    }
+    notifyMonitorsChanged()
+    return { ok: true }
+  }
   const ids = args.all ? [...monitors.keys()] : args.monitorId ? [args.monitorId] : []
   if (ids.length === 0) return { ok: false, error: 'monitorId required (or all: true)' }
   for (const id of ids) {
@@ -1684,6 +1964,7 @@ async function toolStopMonitoring(args: { monitorId?: string; all?: boolean }): 
     }
   }
   await saveMonitors()
+  notifyMonitorsChanged()
   return { ok: true, stopped: ids }
 }
 
@@ -1691,6 +1972,7 @@ async function getStatusData(): Promise<Record<string, { online: boolean; monito
   const status: Record<string, { online: boolean; monitors: number; since?: number }> = {}
   const byCamera = new Map<string, ActiveMonitor[]>()
   for (const m of monitors.values()) {
+    if (m.config.paused) continue
     const list = byCamera.get(m.config.cameraId) || []
     list.push(m)
     byCamera.set(m.config.cameraId, list)
@@ -1712,22 +1994,88 @@ async function getStatusData(): Promise<Record<string, { online: boolean; monito
   return status
 }
 
+async function fetchHostActiveTriggers(): Promise<any[]> {
+  const configured = [
+    process.env.MOMAI_API_URL,
+    process.env.MOMAI_NODE_CORE_PORT ? `http://127.0.0.1:${process.env.MOMAI_NODE_CORE_PORT}` : null
+  ].filter(Boolean) as string[]
+
+  const candidateUrls = configured.length > 0
+    ? configured
+    : (process.env.VITEST
+        ? []
+        : [
+            'http://127.0.0.1:8050',
+            'http://127.0.0.1:8100',
+            'http://127.0.0.1:8000',
+            'http://127.0.0.1:8200'
+          ])
+
+  for (const baseUrl of candidateUrls) {
+    try {
+      const cleanUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
+      const res = await fetch(`${cleanUrl}/automations/active-triggers?provider=vision`)
+      if (res.ok) {
+        const data = await res.json()
+        if (Array.isArray(data)) return data
+      }
+    } catch {}
+  }
+  return []
+}
+
 async function toolGetStatus(): Promise<unknown> {
   const status = await getStatusData()
+  let autoMonitors: any[] = []
+  try {
+    const activeTriggers = await fetchHostActiveTriggers()
+    if (Array.isArray(activeTriggers)) {
+      autoMonitors = activeTriggers.map((auto) => {
+        const trig = auto.trigger || {}
+        const camCond = (auto.global_conditions || []).find((c: any) => c.field?.toLowerCase().includes('camera'))
+        const rawCam = trig.trigger_config?.camera || trig.params?.camera || trig.camera || camCond?.value || ''
+        const allCams = [...webcamCache, ...ipCameras]
+        const cam = allCams.find((c) => c.id === rawCam || c.name === rawCam) || allCams[0]
+        const camId = cam ? cam.id : (rawCam || 'webcam:0')
+        const camName = cam ? cam.name : camId
+        const labelName = auto.automationName || 'Automação Hub'
+
+        // Ativa o ticker/watch da câmera se necessário
+        if (cam && auto.enabled) {
+          if (cam.source === 'webcam') void ensureWebcamWatch(cam.id).catch(() => {})
+          if (cam.source === 'ip') void startMjpeg(cam).catch(() => {})
+          ensureCameraTicker(cam.id)
+        }
+
+        return {
+          id: `auto-${auto.automationId}`,
+          cameraId: camId,
+          cameraName: camName,
+          triggers: [{ type: trig.id || trig.type || 'vision:detection' }],
+          label: `⚡ ${labelName}`,
+          createdAt: Date.now(),
+          paused: !auto.enabled,
+          isAutomation: true,
+          actions: auto.actions || []
+        }
+      })
+    }
+  } catch (err) {
+    bridge?.log(`[vision] failed to fetch active automation triggers: ${err}`)
+  }
+
+  const localMonitors = [...monitors.values()].map((m) => m.config)
+  const combined = [...localMonitors]
+  const existingIds = new Set(localMonitors.map((m) => m.id))
+  for (const am of autoMonitors) {
+    if (!existingIds.has(am.id)) {
+      combined.push(am)
+    }
+  }
+
   return {
     ok: true,
-    monitors: [...monitors.values()].map(({ config, state }) => ({
-      id: config.id,
-      cameraId: config.cameraId,
-      cameraName: config.cameraName,
-      triggers: config.triggers,
-      schedule: config.schedule,
-      cooldownSec: config.cooldownSec,
-      label: config.label,
-      actions: config.actions,
-      createdAt: config.createdAt,
-      lastAlertTs: state.lastAlertTs
-    })),
+    monitors: combined,
     cameras: status
   }
 }
@@ -1864,7 +2212,7 @@ async function toolReloadCamera(args: { cameraId?: string; cameraName?: string }
       if (m.config.cameraId === args.cameraId) m.config.cameraId = camera.id
     }
     void saveMonitors()
-    await bridge!.storage.set('config', config)
+    await bridge?.storage?.set('config', config).catch(() => {})
   }
   reloadingCameras.add(camera.id)
   try {
@@ -1879,11 +2227,9 @@ async function toolReloadCamera(args: { cameraId?: string; cameraName?: string }
         await stopWebcamWatchById(args.cameraId)
       }
       await stopWebcamWatch(camera)
-      // Arm the reconnect rate-limit BEFORE the fresh stream is created. The
-      // card polls get_frame continuously; without this the very next poll
-      // would see "no frame yet" and immediately reconnect, racing this
-      // rebuild and toggling the device LED while it settles.
-      if (camera.deviceId) webcamLastReconnectTs.set(camera.deviceId, Date.now())
+      await new Promise((r) => setTimeout(r, 150))
+      // Reset rate limit timestamp on explicit reload command so reconnection is immediate
+      if (camera.deviceId) webcamLastReconnectTs.delete(camera.deviceId)
       await ensureWebcamWatch(camera.id, 10, true)
     } else {
       return { ok: false, error: 'unsupported camera source' }
@@ -2049,7 +2395,11 @@ async function restoreMonitors(): Promise<void> {
     if (cam) config.cameraId = cam.id
     monitors.set(config.id, { config, state: createMonitorState() })
   }
-  const cameras = new Set([...monitors.values()].map((m) => m.config.cameraId))
+  const cameras = new Set(
+    [...monitors.values()]
+      .filter((m) => !m.config.paused)
+      .map((m) => m.config.cameraId)
+  )
   await syncWebcamWatches().catch(() => {})
   for (const cameraId of cameras) {
     const camera = findCamera(cameraId)
@@ -2071,6 +2421,8 @@ const tools: Record<string, (args: any) => Promise<unknown>> = {
   clear_snapshots: toolClearSnapshots,
   start_monitoring: toolStartMonitoring,
   update_monitoring: toolUpdateMonitoring,
+  pause_monitoring: toolPauseMonitoring,
+  resume_monitoring: toolResumeMonitoring,
   stop_monitoring: toolStopMonitoring,
   get_status: toolGetStatus,
   list_snapshots: toolListSnapshots,
@@ -2092,10 +2444,12 @@ function ensureInitialized(): Promise<void> {
       await restoreMonitors().catch((err) => {
         bridge?.log(`[vision] restore failed: ${err instanceof Error ? err.message : String(err)}`)
       })
-      // Recovery net: keep webcam watches in sync even when the page is closed.
+      // Recovery net: keep webcam watches and automation monitors in sync even when the page is closed.
+      void syncAutomationMonitors().catch(() => {})
       setInterval(() => {
         void syncWebcamWatches().catch(() => {})
-      }, 10000)
+        void syncAutomationMonitors().catch(() => {})
+      }, 5000)
     })()
   }
   return initPromise
