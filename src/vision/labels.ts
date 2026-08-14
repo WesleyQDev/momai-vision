@@ -90,3 +90,28 @@ export function ptLabel(className?: string): string {
   if (!className) return ''
   return PT_CLASS[className.toLowerCase()] || className
 }
+
+function cap(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+/**
+ * Friendly PT-BR label for a raw `triggeredBy` value (e.g. "object:person" ->
+ * "Pessoa", "motion" -> "Movimento"). Used by the alert cards, the expanded
+ * alert footer and the notification panel so the UI never shows raw types.
+ */
+export function triggerLabel(alert: { triggeredBy?: string; className?: string }): string {
+  const by = alert.triggeredBy || ''
+  if (by === 'motion') return 'Movimento'
+  if (by === 'snapshot') return 'Snapshot'
+  if (by.startsWith('object:')) {
+    const cls = cap(ptLabel(alert.className))
+    return cls || 'Objeto'
+  }
+  if (by.startsWith('presence') || by.startsWith('absence')) {
+    const cls = cap(ptLabel(alert.className))
+    const base = by.startsWith('presence') ? 'Presença' : 'Ausência'
+    return cls ? `${base} de ${cls}` : base
+  }
+  return cap(by.replace(/[:_-]+/g, ' '))
+}

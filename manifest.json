@@ -18,7 +18,9 @@
   },
   "eventTypes": {
     "vision_alert": {
+      "label": "Alerta de Detecção da Câmera",
       "fields": {
+        "monitorId": { "label": "ID do Monitoramento", "type": "string" },
         "cameraName": { "label": "Câmera", "type": "string" },
         "monitorLabel": { "label": "Monitor", "type": "string" },
         "triggeredBy": { "label": "Gatilho", "type": "string" },
@@ -28,10 +30,10 @@
         "imageDataUri": { "label": "Imagem", "type": "image" }
       }
     },
-    "vision_status": {},
-    "vision_detections": {},
-    "open_overlay": {},
-    "close_overlay": {}
+    "vision_status": { "label": "Status do Motor de Visão Alterado" },
+    "vision_detections": { "label": "Novas Detecções de Visão" },
+    "open_overlay": { "label": "Overlay de Câmera Aberto" },
+    "close_overlay": { "label": "Overlay de Câmera Fechado" }
   },
   "routes": [
     { "method": "POST", "path": "/frame", "tool": "frame_pump" },
@@ -69,83 +71,7 @@
         "required": ["snapshotId"]
       }
     },
-    {
-      "name": "start_monitoring",
-      "description": "Inicia monitoramento de uma câmera com triggers (motion, object, presence/absence, scene, periodic), schedule, cooldown e notificações. ATENÇÃO: OBRIGATÓRIO informar qual câmera o usuário deseja monitorar no campo cameraId retornado por list_cameras. className usa nomes COCO em inglês (person, cat, dog, car…).",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "cameraId": {
-            "type": "string",
-            "description": "ID exato ou nome da câmera a ser monitorada (ex: 'webcam:...', 'ip:...', ou 'USB2.0 PC CAMERA'). OBRIGATÓRIO."
-          },
-          "triggers": {
-            "type": "array",
-            "description": "Lista de gatilhos de monitoramento.",
-            "items": {
-              "type": "object",
-              "properties": {
-                "type": {
-                  "type": "string",
-                  "enum": ["motion", "object", "presence", "absence", "scene", "periodic"],
-                  "description": "Tipo do gatilho: 'presence' (chegou/saiu), 'motion' (movimento), 'object' (detecção), 'absence' (ausência)."
-                },
-                "className": {
-                  "type": "string",
-                  "description": "Classe do objeto COCO em inglês (ex: 'person', 'cat', 'dog', 'car')."
-                },
-                "event": {
-                  "type": "string",
-                  "enum": ["entered", "left", "present", "absent"],
-                  "description": "Evento de presença/ausência (ex: 'entered' para quando alguém chega)."
-                },
-                "sensitivity": {
-                  "type": "string",
-                  "enum": ["low", "med", "high"],
-                  "description": "Sensibilidade do movimento ('low', 'med', 'high')."
-                },
-                "everySec": {
-                  "type": "number",
-                  "description": "Intervalo em segundos para resumo periódico."
-                }
-              },
-              "required": ["type"]
-            }
-          },
-          "schedule": {
-            "type": "object",
-            "description": "Horário de agendamento (opcional).",
-            "properties": {
-              "days": {
-                "type": "array",
-                "items": { "type": "number" },
-                "description": "Dias da semana (0=Domingo, 1=Segunda... 6=Sábado)."
-              },
-              "start": { "type": "string", "description": "Horário de início em 24h (ex: '22:00')." },
-              "end": { "type": "string", "description": "Horário de término em 24h (ex: '06:00')." }
-            }
-          },
-          "cooldownSec": {
-            "type": "number",
-            "description": "Intervalo mínimo entre alertas do mesmo monitor em segundos (10-3600; padrão: 300)."
-          },
-          "notify": {
-            "type": "object",
-            "description": "Configurações de notificação.",
-            "properties": {
-              "native": { "type": "boolean", "description": "Notificação nativa do sistema." },
-              "chat": { "type": "boolean", "description": "Notificação no chat." }
-            }
-          },
-          "actions": {
-            "type": "array",
-            "description": "Actions (MOM-115) a executar quando este monitor disparar: cada uma { target, tool, args }. Args podem usar {cameraName}, {description}, {ts}, {event.imageDataUri}."
-          },
-          "label": { "type": "string", "description": "Rótulo amigável para o monitoramento." }
-        },
-        "required": ["cameraId", "triggers"]
-      }
-    },
+
     {
       "name": "update_monitoring",
       "description": "Edita as configurações de um monitoramento ativo existente (como alterar triggers, schedule, cooldownSec, câmera ou rótulo). Use get_status ou list_cameras para obter o monitorId.",
@@ -214,18 +140,36 @@
               "chat": { "type": "boolean" }
             }
           },
-          "actions": {
-            "type": "array",
-            "description": "Nova lista de actions a executar quando este monitor disparar."
-          },
           "label": { "type": "string", "description": "Novo rótulo/nome do monitoramento (opcional)." }
         },
         "required": ["monitorId"]
       }
     },
     {
+      "name": "pause_monitoring",
+      "description": "Pausa um monitoramento sem excluir (monitorId ou all:true). O monitoramento para de executar e o card some, mas os dados e configurações permanecem salvos e podem ser retomados depois (resume_monitoring) ou excluídos (stop_monitoring).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "monitorId": { "type": "string", "description": "ID exato do monitoramento a pausar (ex.: 'mon-1722880000000')." },
+          "all": { "type": "boolean", "description": "Pausa todos os monitoramentos." }
+        }
+      }
+    },
+    {
+      "name": "resume_monitoring",
+      "description": "Retoma um monitoramento pausado (monitorId ou all:true), reativando a execução e as notificações.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "monitorId": { "type": "string", "description": "ID exato do monitoramento a retomar (ex.: 'mon-1722880000000')." },
+          "all": { "type": "boolean", "description": "Retoma todos os monitoramentos pausados." }
+        }
+      }
+    },
+    {
       "name": "stop_monitoring",
-      "description": "Para um monitoramento ativo (monitorId ou all:true).",
+      "description": "EXCLUI um monitoramento definitivamente, removendo seus dados e configurações (monitorId ou all:true). Para apenas interromper mantendo os dados salvos, use pause_monitoring.",
       "parameters": {
         "type": "object",
         "properties": {

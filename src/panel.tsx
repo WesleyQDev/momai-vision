@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
-import { ptLabel } from './vision/labels'
+import { ptLabel, triggerLabel } from './vision/labels'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
@@ -177,12 +177,20 @@ function VisionIcon({ className = 'w-5 h-5' }: { className?: string }): JSX.Elem
   )
 }
 
-async function stopMonitor(monitorId: string | undefined, onClose?: () => void): Promise<void> {
+async function pauseMonitor(monitorId: string | undefined, onClose?: () => void): Promise<void> {
   if (!monitorId) return
-  await sdk.api.post(`/extensions/${EXT_ID}/command`, {
-    toolName: 'stop_monitoring',
-    args: { monitorId }
-  })
+  // Fechar o overlay DESTRÓI a janela do overlay (Electron), o que abortaria um
+  // fetch comum ainda em andamento e a pausa nunca chegaria ao servidor.
+  // keepalive mantém o request vivo mesmo com a janela fechando em seguida.
+  const baseUrl = (window as any).api?.getApiBaseUrl?.() || 'http://127.0.0.1:8000'
+  const token = (window as any).api?.getSessionToken?.() || ''
+  void fetch(`${baseUrl}/extensions/${EXT_ID}/command`, {
+    method: 'POST',
+    keepalive: true,
+    headers: { 'Content-Type': 'application/json', 'X-Session-Token': token },
+    body: JSON.stringify({ toolName: 'pause_monitoring', args: { monitorId } })
+  }).catch(() => {})
+  // Fecha o overlay imediatamente; a pausa continua em segundo plano.
   onClose?.()
 }
 
@@ -381,7 +389,7 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
           {data?.description || (isSnapshot ? 'Snapshot capturado' : 'Alerta da câmera')}
         </p>
         {data?.triggeredBy && !isSnapshot ? (
-          <p className="mt-1 text-xs text-gray-500">{formatTime(data.ts)} · {data.triggeredBy}</p>
+          <p className="mt-1 text-xs text-gray-500">{formatTime(data.ts)} · {triggerLabel(data)}</p>
         ) : null}
         <div
           className="mt-3 flex gap-2"
@@ -407,12 +415,15 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
               disabled={stopping}
               onClick={() => {
                 setStopping(true)
-                void stopMonitor(data.monitorId, data.onClose).catch(() => setStopping(false))
+                void pauseMonitor(data.monitorId, data.onClose).catch(() => setStopping(false))
               }}
-              className="flex-1 rounded-lg border border-red-500/40 text-red-300 hover:bg-red-500/10 hover:border-red-400 text-xs font-medium py-2 transition-colors disabled:opacity-50 cursor-pointer"
+              className="flex-1 rounded-lg border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 hover:border-amber-400 text-xs font-medium py-2 transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
               style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
             >
-              {stopping ? 'Parando...' : 'Parar monitoramento'}
+              <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M6 5h4v14H6zM14 5h4v14h-4z" />
+              </svg>
+              {stopping ? 'Pausando...' : 'Pausar monitoramento'}
             </button>
           ) : null}
         </div>

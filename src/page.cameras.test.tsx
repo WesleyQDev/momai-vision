@@ -333,6 +333,49 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
   })
 })
 
+describe('VisionPage — X no card remove câmera IP do cadastro (webcam só da exibição)', () => {
+  it('remover câmera IP pelo X apaga do cadastro (ipCameras) e da seleção', async () => {
+    const registeredIp = { id: 'ip:http://10.0.0.1:8080/video', name: 'Portão', url: 'http://10.0.0.1:8080/video' }
+    const { calls } = setupServer({
+      cameras: [{ id: registeredIp.id, name: 'Portão', source: 'ip', online: true, monitors: 0 }],
+      selectedCameras: [registeredIp.id],
+      ipCameras: [registeredIp]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    fireEvent.click(await screen.findByTitle('Remover câmera IP (cadastro e exibição)'))
+
+    await waitFor(() => {
+      const write = calls.find((c) => c.toolName === 'configure' && c.args.ipCameras !== undefined)
+      expect(write).toBeTruthy()
+      expect(write!.args.ipCameras).toEqual([])
+      expect(write!.args.selectedCameras).toEqual([])
+    })
+  })
+
+  it('remover webcam pelo X mantém o cadastro das câmeras IP intacto', async () => {
+    const registeredIp = { id: 'ip:http://10.0.0.1:8080/video', name: 'Portão', url: 'http://10.0.0.1:8080/video' }
+    const { calls } = setupServer({
+      cameras: [WEB_A, { id: registeredIp.id, name: 'Portão', source: 'ip', online: true, monitors: 0 }],
+      selectedCameras: ['webcam:a', registeredIp.id],
+      ipCameras: [registeredIp]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    fireEvent.click(await screen.findByTitle('Fechar / Remover câmera da exibição'))
+
+    await waitFor(() => {
+      const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
+      expect(write).toBeTruthy()
+      expect(write!.args.selectedCameras).toEqual([registeredIp.id])
+      // Webcam removal never touches the IP registry
+      expect(write!.args.ipCameras).toBeUndefined()
+    })
+  })
+})
+
 describe('VisionPage — botão recarregar câmera', () => {
   it('dispara reload_camera para a câmera do card ao clicar no ícone', async () => {
     const { calls } = setupServer({ cameras: [WEB_A], selectedCameras: ['webcam:a'] })
@@ -348,6 +391,82 @@ describe('VisionPage — botão recarregar câmera', () => {
     expect(calls.find((c) => c.toolName === 'reload_camera')!.args).toEqual({
       cameraId: 'webcam:a',
       cameraName: 'Webcam A'
+    })
+  })
+})
+
+describe('VisionPage — atualização imediata de monitoramentos (vision_status)', () => {
+  it('faz poll imediato ao receber o evento vision_status', async () => {
+    const { calls } = setupServer({ cameras: [WEB_A] })
+    const sdk = getSDK()
+    const subscribed: Array<{ type: string; handler: (data: unknown) => void }> = []
+    vi.mocked(sdk.events.subscribe).mockImplementation(
+      ((type: string, handler: (data: unknown) => void) => {
+        subscribed.push({ type, handler })
+        return () => {}
+      }) as never
+    )
+
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    const statusHandler = subscribed.find((s) => s.type === 'vision_status')?.handler
+    expect(statusHandler).toBeTruthy()
+
+    const pollsBefore = calls.filter((c) => c.toolName === 'get_status').length
+    statusHandler!({ changedAt: Date.now() })
+    await waitFor(() => {
+      expect(calls.filter((c) => c.toolName === 'get_status').length).toBeGreaterThan(pollsBefore)
+    })
+  })
+})
+
+describe('VisionPage — cache de monitoramentos', () => {
+  it('mostra os monitoramentos do cache imediatamente ao abrir', async () => {
+    const cachedMonitors = [
+      {
+        id: 'mon-1',
+        cameraId: 'webcam:a',
+        cameraName: 'Webcam A',
+        triggers: [{ type: 'motion' }],
+        paused: false
+      }
+    ]
+    // Same snapshot the poll saves: cameras + monitors together.
+    localStorage.setItem('momai-vision:cameras', JSON.stringify([WEB_A]))
+    localStorage.setItem('momai-vision:monitors', JSON.stringify(cachedMonitors))
+    const { calls } = setupServer({ cameras: [WEB_A] })
+
+    render(<VisionPage />)
+
+    // Rendered from the cache without waiting for the poll to finish.
+    expect(screen.getByText('Pausar')).toBeTruthy()
+
+    // The poll still refreshes the list in the background.
+    await waitFor(() => {
+      expect(calls.some((c) => c.toolName === 'get_status')).toBe(true)
+    })
+  })
+
+  it('salva os monitoramentos do poll no cache', async () => {
+    const { sdk } = setupServer({ cameras: [WEB_A] })
+    const original = vi.mocked(sdk.api.post).getMockImplementation()!
+    vi.mocked(sdk.api.post).mockImplementation(async (path, body) => {
+      if (path === '/extensions/momai-vision/command' && body?.toolName === 'get_status') {
+        return {
+          ok: true,
+          data: { monitors: [{ id: 'mon-9', cameraId: 'webcam:a', triggers: [{ type: 'motion' }] }] }
+        }
+      }
+      return original(path, body)
+    })
+
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    await waitFor(() => {
+      const saved = localStorage.getItem('momai-vision:monitors')
+      expect(saved).toContain('mon-9')
     })
   })
 })

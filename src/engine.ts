@@ -21,8 +21,12 @@ const ENGINE_DIR = __dirname
 const MODEL_PATH = path.join(ENGINE_DIR, '..', 'models', 'yolo11n.onnx')
 const WASM_PATH = path.join(ENGINE_DIR, 'ort-wasm-simd-threaded.wasm')
 
-const INPUT_W = 640
-const INPUT_H = 480
+// Entrada reduzida (320x320 em vez de 640x640): a inferência YOLO roda na CPU
+// (WASM, sem acesso a GPU no sidecar Node). Reduzir a entrada deixa o YOLO
+// ~4x mais rápido com queda pequena de precisão para vigilância (as caixas são
+// normalizadas em 0..1, então a UI desenha igual).
+const INPUT_W = 320
+const INPUT_H = 320
 
 const COCO_CLASSES = [
   'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
@@ -153,10 +157,10 @@ function parseOutput(
   return nms(boxes, 0.45)
 }
 
-async function detect(pixelsBase64: string, width: number, height: number, confThreshold: number) {
+async function detect(pixels: Uint8Array, width: number, height: number, confThreshold: number) {
   const s = await ensureSession()
-  const rgb = Buffer.from(pixelsBase64, 'base64')
-  const { data, scale, padX, padY } = letterbox(new Uint8Array(rgb.buffer, rgb.byteOffset, rgb.byteLength), width, height)
+  const u8 = new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength)
+  const { data, scale, padX, padY } = letterbox(u8, width, height)
   const feeds: Record<string, ort.Tensor> = {}
   feeds[s.inputNames[0]] = new ort.Tensor('float32', data, [1, 3, INPUT_H, INPUT_W])
   const results = await s.run(feeds)
@@ -190,7 +194,7 @@ process.on('message', async (msg: unknown) => {
     try {
       const { pixels, width, height } = decodeJpeg(m.jpegBase64)
       const t0 = Date.now()
-      const boxes = await detect(pixels.toString('base64'), width, height, Number(m.confThreshold) || 0.25)
+      const boxes = await detect(pixels, width, height, Number(m.confThreshold) || 0.25)
       process.send?.({ type: 'detect-result', id, boxes, ms: Date.now() - t0 })
     } catch (err) {
       process.send?.({ type: 'detect-result', id, error: err instanceof Error ? err.message : String(err) })

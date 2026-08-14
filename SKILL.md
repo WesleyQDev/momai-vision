@@ -27,33 +27,36 @@ intents:
 
 A MomAI Vision dá olhos à MomAI: snapshots de câmeras (webcam + IP/MJPEG),
 descrição de cena com o modelo de visão local e monitoramento com alertas —
-funcionando mesmo com a MomAI minimizada.
-
-## Ferramentas
+funcionando mesmo com a M## Ferramentas
 
 | Ferramenta | Uso |
 | --- | --- |
 | `list_cameras` | Lista câmeras (webcam/IP) com status e monitors ativos |
 | `capture_snapshot {cameraId?}` | Captura e descreve a cena ("o que você vê aí?") |
 | `describe_snapshot {snapshotId}` | Re-descreve um snapshot da galeria |
-| `start_monitoring {cameraId, triggers[], ...}` | Inicia monitoramento com alertas (**REQUER CÂMERA**) |
-| `update_monitoring {monitorId, cameraId?, triggers?, ...}` | Edita as configurações de um monitoramento ativo existente |
-| `stop_monitoring {monitorId?}` | Para monitoramento(s) |
-| `get_status` | Monitors ativos por câmera |
+| `update_monitoring {monitorId, cameraId?, triggers?, ...}` | Edita as configurações de um monitoramento existente |
+| `pause_monitoring {monitorId?}` | Pausa sem excluir: para a execução e o card some, mas os dados ficam salvos |
+| `resume_monitoring {monitorId?}` | Retoma um monitoramento pausado |
+| `stop_monitoring {monitorId?}` | **EXCLUI** definitivamente o monitoramento e seus dados |
+| `get_status` | Monitors ativos/pausados por câmera |
 | `list_snapshots {limit?}` | Galeria (mais recentes primeiro) |
 
-## Regra Estrita de Câmera para Monitoramento e Snapshots
+## Regra Estrita de Câmera para Snapshots
 
-- **APENAS CÂMERAS SELECIONADAS NO PAINEL**: As ferramentas (`start_monitoring`, `capture_snapshot`, `get_frame`, etc.) funcionam **apenas** nas câmeras que o usuário ativou/selecionou no painel da página MomAI Vision (`selected: true` em `list_cameras`).
-- Se o usuário pedir para monitorar ou tirar snapshot de uma câmera que não está selecionada/ativa no painel, informe ao usuário para abrir o painel da MomAI Vision e clicar no botão `+` para selecionar/ativar a câmera desejada.
-- **REQUER CÂMERA EXPLÍCITA**: O LLM **NUNCA** deve chamar `start_monitoring` sem que o usuário tenha informado explicitamente qual câmera deseja monitorar (ex.: "garagem", "Yoosee", "webcam", "da porta").
-- Se o usuário pedir para iniciar monitoramento sem especificar a câmera, o LLM **DEVE** primeiro perguntar ao usuário qual câmera ele quer usar (ou chamar `list_cameras` para mostrar as opções disponíveis antes de perguntar ao usuário).
+- **APENAS CÂMERAS SELECIONADAS NO PAINEL**: As ferramentas (`capture_snapshot`, `get_frame`, etc.) funcionam **apenas** nas câmeras que o usuário ativou/selecionou no painel da página MomAI Vision (`selected: true` em `list_cameras`).
+- Se o usuário pedir para tirar snapshot ou interagir com uma câmera que não está selecionada/ativa no painel, informe ao usuário para abrir o painel da MomAI Vision e clicar no botão `+` para selecionar/ativar a câmera desejada.
 
-## Triggers (start_monitoring / update_monitoring)
+## Integração com o Automation Hub (Notificações & Ações Externas)
+
+- **REGRA DE OURO PARA O ASSISTENTE (LLM)**:
+  - Sempre que o usuário solicitar uma automação, alerta ou notificação envolvendo o MomAI Vision (ex.: avisar no WhatsApp, e-mail, tocar som ou notificação quando a câmera detectar algo), o assistente **DEVE APENAS CHAMAR A FERRAMENTA `create_automation`** (da skill `automation`).
+  - **NÃO chame nenhuma ferramenta individual de monitoramento visual antes.** Execute **somente** `create_automation`, vinculando o evento `momai-vision.vision_alert` à ação desejada (ex: `whatsapp.send_message`), utilizando `{{trigger.payload.description}}` e `{{trigger.payload.imageDataUri}}`.
+
+## Triggers (update_monitoring)
 
 ```json
 {
-  "cameraId": "webcam:<deviceId>",
+  "monitorId": "mon-1722880000000",
   "triggers": [{ "type": "motion", "sensitivity": "med" }],
   "schedule": { "days": [0,1,2,3,4,5,6], "start": "22:00", "end": "06:00" },
   "cooldownSec": 300,
@@ -67,24 +70,26 @@ funcionando mesmo com a MomAI minimizada.
 - `presence`/`absence` — `className` (default person), `event`: entered/left/still_present, `windowSec`.
 - `scene` — pergunta SIM/NÃO via visão local: `question`, `everySec` (15-300), `onAnswer`: yes/no/change, `confirmN`.
 - `periodic` — resumo periódico: `everySec`, `task`.
-- `cooldownSec` — intervalo mínimo entre alertas do mesmo monitor (padrão 300 = 5min; aceita desde 10s). Quando o usuário falar em frequência ("avise a cada X", "não enche muito", "quero saber na hora"), passe o valor; se ficar em dúvida, pergunte ao usuário antes de iniciar.
-- `schedule.days`: 0-6 (domingo=0). O monitoramento começa imediatamente na chamada; o plano é anunciado na resposta.
+- `cooldownSec` — intervalo mínimo entre alertas do mesmo monitor (padrão 300 = 5min; aceita desde 10s).
+- `schedule.days`: 0-6 (domingo=0).
 
 ## Edição de Monitoramento (update_monitoring)
 
-Para alterar um monitoramento que já está rodando (ex.: "mude o tempo do alerta da garagem para 10 minutos" ou "altere os triggers da câmera da porta"), use `update_monitoring { monitorId: "mon-...", cooldownSec: 600 }`. Use `get_status` caso precise descobrir o `monitorId`.
+Para alterar um monitoramento existente (ex.: "mude o tempo do alerta da garagem para 10 minutos" ou "altere os triggers da câmera da porta"), use `update_monitoring { monitorId: "mon-...", cooldownSec: 600 }`. Use `get_status` caso precise descobrir o `monitorId`.
+
+## Pausar, Retomar e Excluir
+
+- **Pausar** (`pause_monitoring`): o monitoramento para de executar e o card some, mas os dados e a configuração ficam salvos. "pausa o monitoramento da garagem", "para de monitorar por enquanto, mas não exclui".
+- **Retomar** (`resume_monitoring`): reativa um monitoramento pausado. "volta a monitorar a garagem".
+- **Excluir** (`stop_monitoring`): remove o monitoramento **definitivamente**, incluindo dados/configurações. "exclui o monitoramento da garagem", "quero parar de vez com esse monitoramento". Pausar não é excluir; se o usuário quiser apagar de vez, use `stop_monitoring`.
 
 ## Como usar (gramática)
 
 - "o que você vê aí?" → `capture_snapshot`
 - "ver as câmeras" → chame `list_cameras` e liste as câmeras disponíveis
-- "me avise quando alguém chegar em casa na câmera da garagem" → `start_monitoring` com `cameraId: "garagem"` e `presence entered` (person)
+- "me avise quando alguém chegar em casa na câmera da garagem" → `create_automation` vinculando `momai-vision.vision_alert` com condição `className: "person"`
 - "mude o intervalo da câmera da garagem para 10 minutos" → `update_monitoring` com `cooldownSec: 600`
-- "vigia a garagem de madrugada" → `start_monitoring` com `cameraId: "garagem"` + `motion` + `schedule` 22h-6h + cooldown
-- "avise se alguém ficar parado na porta por 2 minutos na câmera da frente" → `start_monitoring` com `cameraId: "frente"` e `presence still_present` windowSec 120
-- "me avise se o gato subir na mesa na câmera da sala" → `start_monitoring` com `cameraId: "sala"`, `motion` (gate) + `scene` "tem um gato na mesa?"
-
-Quando o usuário nomear uma câmera específica ("da caza", "do j6", "da usb"), SEMPRE passe o `cameraId` exato retornado por `list_cameras` (ou o nome da câmera — ex.: `"caza"`). Se o usuário não disser qual câmera quer monitorar, PERGUNTE a ele.
+- "pausar monitoramento da garagem" → `pause_monitoring`
 
 ## Honestidade (limites que a MomAI declara)
 
@@ -94,14 +99,15 @@ Quando o usuário nomear uma câmera específica ("da caza", "do j6", "da usb"),
 - **Iluminação/clima**: noite sem IR, chuva, reflexos reduzem a qualidade.
 - **Geometria/escala**: objeto muito pequeno ou distante não é detectado.
 - **Subjetivo**: "está arrumado", "está triste" — não consigo avaliar; refinar para uma pergunta verificável.
-- "Encomenda/pacote", "porta aberta", "luz acesa" **não são classes COCO** — use `scene` com pergunta SIM/NÃO (muitas vezes combinado com `motion` como gate).
+- "Encomenda/pacote", "porta aberta", "luz acesa" **não são classes COCO** — use `scene` com pergunta SIM/NÃO.
 
 ## Fluxo de monitoramento
 
-1. Chame `start_monitoring` com `cameraId` e `triggers` — o monitoramento começa imediatamente.
-2. Anuncie na resposta o plano (câmera, triggers, horário, cooldown) e informe que está monitorando.
-3. Ao disparar um trigger: snapshot salvo na galeria + **overlay flutuante** com a imagem + cartão no chat (`vision_alert`) + entrada no feed de alertas da página.
-4. Para parar: `stop_monitoring {monitorId}` — ou o usuário para pela página/overlay.
+1. Para criar uma automação de visão, chame **somente** `create_automation`.
+2. Ao disparar um trigger: snapshot salvo na galeria + **overlay flutuante** com a imagem + cartão no chat (`vision_alert`) + entrada no feed de alertas da página.
+3. Para pausar (manter salvo): `pause_monitoring {monitorId}` — o overlay e o card somem, mas o monitor continua gerenciável na página. Para retomar depois: `resume_monitoring {monitorId}`.
+4. Para excluir de vez (remover dados): `stop_monitoring {monitorId}` — também pela página (botão lixeira) ou pelo overlay.�gina. Para retomar depois: `resume_monitoring {monitorId}`.
+5. Para excluir de vez (remover dados): `stop_monitoring {monitorId}` — também pela página (botão lixeira) ou pelo overlay.
 
 ## Performance
 

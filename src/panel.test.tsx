@@ -64,7 +64,7 @@ describe('VisionAlertCard', () => {
     const img = screen.getByRole('img') as HTMLImageElement
     expect(img.src).toContain('data:image/jpeg;base64,abc')
     expect(screen.queryByText('Abrir MomAI')).toBeNull()
-    expect(screen.queryByText('Parar monitoramento')).toBeNull()
+    expect(screen.queryByText('Pausar monitoramento')).toBeNull()
     expect(screen.queryByText('Webcam')).toBeNull()
   })
 
@@ -94,17 +94,28 @@ describe('VisionAlertCard', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
-  it('stops the monitor via the command route', async () => {
+  it('pauses the monitor via keepalive fetch and closes the overlay immediately', async () => {
     const onClose = vi.fn()
-    const sdk = getSDK()
-    vi.mocked(sdk.api.post).mockResolvedValue({ ok: true, data: { ok: true } })
+    // The overlay window is destroyed on close, which aborts a plain fetch.
+    // The pause command must be sent with keepalive before closing.
+    const fetchMock = vi.fn(() =>
+      Promise.resolve({ ok: true, json: async () => ({ ok: true }) } as unknown as Response)
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
     render(<VisionAlertCard data={{ cameraName: 'Garagem', monitorId: 'mon-9', onClose }} />)
-    fireEvent.click(screen.getByText('Parar monitoramento'))
-    await act(async () => {})
-    expect(sdk.api.post).toHaveBeenCalledWith('/extensions/momai-vision/command', {
-      toolName: 'stop_monitoring',
+    fireEvent.click(screen.getByText('Pausar monitoramento'))
+
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('http://127.0.0.1:8000/extensions/momai-vision/command')
+    expect(init.method).toBe('POST')
+    expect(init.keepalive).toBe(true)
+    expect(JSON.parse(String(init.body))).toEqual({
+      toolName: 'pause_monitoring',
       args: { monitorId: 'mon-9' }
     })
-    expect(onClose).toHaveBeenCalled()
+    vi.unstubAllGlobals()
   })
 })
