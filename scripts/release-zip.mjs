@@ -9,8 +9,6 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync }
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import { createGzip } from 'node:zlib'
-import { pipeline } from 'node:stream/promises'
 import { createRequire } from 'node:module'
 
 const root = join(process.cwd())
@@ -141,8 +139,10 @@ async function main() {
     ...collectFiles(join(dist, 'cv'), 'cv/'),
     ...collectFiles(join(dist, 'models'), 'models/')
   ]
-  // UI bundles land in dist/ inside the archive.
-  for (const name of ['page.js', 'panel.js']) {
+  // UI bundles land in dist/ inside the archive. `mjpeg-worker.js` é
+  // referenciado pelo page.js via `new URL('./mjpeg-worker.js', import.meta.url)`
+  // — sem ele no ZIP, o preview MJPEG não tem Web Worker e cai no parser inline.
+  for (const name of ['page.js', 'panel.js', 'mjpeg-worker.js']) {
     const full = join(dist, name)
     if (existsSync(full)) files.push({ path: `dist/${name}`, data: readFileSync(full) })
   }

@@ -11,6 +11,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
 import { ptLabel, PT_CLASS, triggerLabel } from './vision/labels'
 import { AlertCanvasOverlay } from './panel'
+import { classColor } from './vision/theme-color'
+import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
@@ -146,10 +148,9 @@ interface VisionConfig {
   sendActions?: MonitorActionUI[]
 }
 
-const CLASS_COLORS = [
-  '#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899',
-  '#14b8a6', '#f97316', '#84cc16', '#06b6d4'
-]
+// Array vazio estável (módulo): evita criar referência nova a cada render do
+// card, o que invalidaria o memo do drawBoxes sem necessidade.
+const EMPTY_DETECTIONS: Detection[] = []
 
 export function VisionIcon({ className = 'w-6 h-6' }: { className?: string }): JSX.Element {
   return (
@@ -169,12 +170,6 @@ export function VisionIcon({ className = 'w-6 h-6' }: { className?: string }): J
       <path d="M17.6 4.9v3.2M16 6.5h3.2" />
     </svg>
   )
-}
-
-function classColor(className: string): string {
-  let hash = 0
-  for (const ch of className) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
-  return CLASS_COLORS[hash % CLASS_COLORS.length]
 }
 
 function formatTime(ts?: number): string {
@@ -212,35 +207,51 @@ function mergeAlerts(existing: Alert[], fresh: Alert[]): Alert[] {
     .slice(0, 100)
 }
 
-async function command<T = unknown>(toolName: string, args: Record<string, unknown> = {}): Promise<T> {
-  const res = await sdk.api.post<{ ok: boolean; error?: string } & T>(
-    `/extensions/${EXT_ID}/command`,
-    { toolName, args }
-  )
-  if (!res.ok || res.data?.ok === false) {
-    throw new Error(res.error || res.data?.error || `command failed: ${toolName}`)
-  }
-  return res.data as T
-}
+// Timeout global dos comandos para o runtime. Sem isso, um comando preso
+// (ex.: list_cameras esperando o start-watch de uma webcam lenta no bridge)
+// segura a Promise do onConfirm e o modal fica em "Adicionando..." sem
+// nunca terminar — o fluxo precisa SEMPRE finalizar em sucesso ou erro.
+//
+// O valor fica ACIMA do limite de 30s do host (extension-host-manager
+// `_sendRequest`): se a página abortasse antes (ex.: 15s), um comando que o
+// host concluiria em 16–30s (reaquisição de uma webcam USB recém-lançada via
+// getUserMedia na janela oculta) seria falsamente cancelado com "demorou
+// demais". Com este alinhamento, o próprio host é quem arbitra: se ele
+// responder, o comando conclui; se travar de verdade, o host rejeita em 30s
+// com um erro claro e o modal finaliza de qualquer forma.
+const COMMAND_TIMEOUT_MS = 35000
 
-// Busca direta do frame no node-core como Blob binário zero-copy (image/jpeg).
-// Elimina o overhead de JSON/Base64 e permite manter 20-24 FPS contínuos mesmo com múltiplas câmeras.
-async function fetchDirectFrameBlob(cameraId: string): Promise<Blob | null> {
-  const deviceId = cameraId.startsWith('webcam:') ? cameraId.slice('webcam:'.length) : cameraId
+// Timeout curto para o frame_pump do CARD (não o do modal): o pump é um loop
+// contínuo e cada ciclo deve desistir rápido se o worker estiver ocupado com o
+// poll (list_cameras → startMjpeg/ffmpeg). Com o timeout global de 35s, o pump
+// ficava pendurado e deixava POSTs órfãos no node-core.
+const PUMP_COMMAND_TIMEOUT_MS = 4000
+
+async function command<T = unknown>(toolName: string, args: Record<string, unknown> = {}): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    const base = (window as any).api?.getApiBaseUrl?.() || 'http://127.0.0.1:8000'
-    const token = (window as any).api?.getSessionToken?.() || ''
-    const res = await fetch(`${base}/media/camera/frame/${encodeURIComponent(deviceId)}?format=binary`, {
-      headers: {
-        Accept: 'image/jpeg',
-        Authorization: `Bearer ${token}`,
-        'x-extension-id': EXT_ID
-      }
-    })
-    if (!res.ok) return null
-    return await res.blob()
-  } catch {
-    return null
+    const res = await Promise.race([
+      sdk.api.post<{ ok: boolean; error?: string } & T>(
+        `/extensions/${EXT_ID}/command`,
+        { toolName, args }
+      ),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`O comando "${toolName}" demorou demais e foi cancelado. Tente novamente.`)),
+          COMMAND_TIMEOUT_MS
+        )
+        if (typeof timer.unref === 'function') timer.unref()
+      })
+    ])
+    if (!res.ok || res.data?.ok === false) {
+      throw new Error(res.error || res.data?.error || `command failed: ${toolName}`)
+    }
+    return res.data as T
+  } finally {
+    // O timer do Promise.race nunca era limpo quando o fetch vencia — o
+    // setTimeout ficava vivo até disparar (35s) mantendo o processo de página
+    // com timers inúteis.
+    if (timer) clearTimeout(timer)
   }
 }
 
@@ -253,6 +264,42 @@ function blobToBase64(blob: Blob): Promise<string> {
     }
     reader.readAsDataURL(blob)
   })
+}
+
+// Espera LIMITADA pelo status "online" das webcams recém-adicionadas. O
+// start-watch roda em background no runtime; este helper aguarda o frame
+// chegar (via get_status) até um teto fixo, sem nunca travar o fluxo.
+const WEBCAM_ONLINE_WAIT_MS = 12000
+
+async function waitForWebcamOnline(
+  webcamIds: string[],
+  onStatus?: (cams: Record<string, { online?: boolean }>) => void
+): Promise<void> {
+  if (!webcamIds || webcamIds.length === 0) return
+  const deadline = Date.now() + WEBCAM_ONLINE_WAIT_MS
+  while (Date.now() < deadline) {
+    try {
+      // Cada chamada também é limitada (1.5s) — o teto total é sempre
+      // respeitado mesmo se um get_status individual demorar.
+      const statusRes = await Promise.race([
+        command<{ cameras?: Record<string, { online?: boolean }> }>('get_status', {}),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500))
+      ])
+      if (!statusRes) continue
+      const cams = statusRes.cameras
+      // Sem dados de câmera no get_status (runtime antigo / resposta parcial):
+      // não dá para saber o status — não bloqueia o fluxo de forma alguma.
+      if (!cams) return
+      // Atualiza o card em tempo real (quando um callback é passado): a webcam
+      // recém-adicionada vira "Conectado" assim que o watch subir no host, sem
+      // esperar o próximo poll de 5s (que sob carga pode demorar bastante).
+      onStatus?.(cams)
+      if (webcamIds.every((id) => cams[id]?.online)) return
+    } catch {
+      // transiente — continua tentando até o teto
+    }
+    await new Promise((r) => setTimeout(r, 800))
+  }
 }
 
 // Busca direta do frame no node-core como Base64 (fallback para testes/compatibilidade).
@@ -276,7 +323,12 @@ async function fetchDirectFrame(cameraId: string): Promise<string | null> {
   }
 }
 
-const PUMP_INTERVALS: Record<string, number> = { fluid: 500, balanced: 1000, economy: 2000 }
+// Taxa de detecção na página. Com o YOLO11s 640x640 a ~300-600ms por
+// inferência e um mutex global (1 inferência por vez), 2 câmeras precisam
+// ~600-1200ms por ciclo. fluid=500 dá ~2 detecções/s por câmera;
+// balanced=1000 é um bom equilíbrio; economy=1500 poupa CPU sem perder
+// carros em movimento.
+const PUMP_INTERVALS: Record<string, number> = { fluid: 500, balanced: 1000, economy: 1500 }
 
 // Leitor MJPEG em JS (via fetch + ReadableStream) — alternativa confiável ao
 // <img src="multipart/x-mixed-replace">, que no Chromium congela no mesmo frame
@@ -288,13 +340,18 @@ const PUMP_INTERVALS: Record<string, number> = { fluid: 500, balanced: 1000, eco
 function createMjpegReader(
   url: string,
   handlers: {
-    onFrame: (blob: Blob, decodedW: number, decodedH: number) => void
+    // `frame` são os BYTES do JPEG (subarray view, ZERO cópia). O consumidor
+    // decodifica direto com createImageBitmap(frame) — sem Blob intermediário.
+    onFrame: (frame: Uint8Array) => void
     onError: (err: unknown) => void
   },
   signal: AbortSignal
 ): void {
   const BOUNDARY = new TextEncoder().encode('--frame\r\n')
   const HEADER_END = new TextEncoder().encode('\r\n\r\n')
+  // Reutilizar o TextDecoder (criar um por frame a 24fps × N câmeras era
+  // alocação desnecessária no main thread).
+  const DECODER = new TextDecoder('latin1')
 
   const start = async () => {
     const res = await fetch(url, { signal, headers: { Accept: 'image/jpeg' } })
@@ -313,49 +370,89 @@ function createMjpegReader(
       return out
     }
     let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
-    const indexOf = (hay: Uint8Array, needle: Uint8Array, from = 0): number => {
-      outer: for (let i = from; i <= hay.length - needle.length; i++) {
-        for (let j = 0; j < needle.length; j++) {
-          if (hay[i + j] !== needle[j]) continue outer
-        }
-        return i
-      }
-      return -1
-    }
+    // Busca de sequência otimizada (indexOfSeq em vision/mjpeg-parse.ts): o
+    // primeiro byte via `indexOf` NATIVO (memchr do V8, ~10x mais rápido que
+    // scan JS puro) e validação dos bytes seguintes apenas quando ele casa.
     const parse = (buf: Uint8Array): Uint8Array => {
-      let idx = indexOf(buf, BOUNDARY)
+      let idx = indexOfSeq(buf, BOUNDARY)
       while (idx !== -1) {
         const after = idx + BOUNDARY.length
-        const hEnd = indexOf(buf, HEADER_END, after)
-        if (hEnd === -1) break
-        const header = new TextDecoder('latin1').decode(buf.subarray(after, hEnd))
-        const clIdx = header.indexOf('Content-Length:')
-        let length = 0
-        if (clIdx !== -1) {
-          length = parseInt(header.slice(clIdx + 'Content-Length:'.length).trim(), 10) || 0
+        // Sem Content-Length o frame termina no próximo boundary — antes era
+        // emitido um frame de 0 bytes (length = 0) que quebrava o
+        // createImageBitmap.
+        const range = extractJpegFrame(buf, BOUNDARY, HEADER_END, (bytes) => DECODER.decode(bytes), after)
+        if (!range) break
+        // View do JPEG dentro do buffer de concat — sem cópia. O buffer não é
+        // mutado depois (o parse substitui `joined` por subarrays novos), então
+        // é seguro o createImageBitmap ler assíncrono dele.
+        latestFrame = buf.subarray(range.start, range.end)
+        if (!emitScheduled) {
+          // Caso comum (frames a ~24fps, intervalo já decorrido): emite
+          // SÍNCRONO, sem a latência de um setTimeout(0) extra no event loop
+          // (que, com o main thread ocupado, adicionava atraso perceptível).
+          // O timer só é agendado para o throttle quando os frames chegam mais
+          // rápido que MAX_EMIT_INTERVAL.
+          const now = Date.now()
+          if (now - lastEmit >= MAX_EMIT_INTERVAL) {
+            emitLatest()
+          } else {
+            emitScheduled = true
+            setTimeout(emitLatest, MAX_EMIT_INTERVAL - (now - lastEmit))
+          }
         }
-        const dataStart = hEnd + HEADER_END.length
-        if (buf.length < dataStart + length) break
-        const frame = buf.subarray(dataStart, dataStart + length)
-        // Decodifica as dimensões reais do JPEG (mais barato que decodificar o frame).
-        const dims = jpegDims(frame)
-        handlers.onFrame(
-          new Blob([frame.slice(0)], { type: 'image/jpeg' }),
-          dims?.w || 0,
-          dims?.h || 0
-        )
-        buf = buf.subarray(dataStart + length)
-        idx = indexOf(buf, BOUNDARY)
+        buf = buf.subarray(range.end)
+        idx = indexOfSeq(buf, BOUNDARY)
       }
       return buf
     }
+
+    // Teto de ~24fps com latest-wins, emitindo BYTES (zero cópia por frame).
+    // O stream MJPEG do node-core é clampado a 20-24fps. Se a fonte entregar
+    // acima disso, só o frame mais recente é emitido a cada 42ms — preview
+    // sempre no frame mais novo, sem backlog nem fila de decodes.
+    const MAX_EMIT_INTERVAL = 42 // ~24fps (teto, não piso)
+    let latestFrame: Uint8Array | null = null
+    let emitScheduled = false
+    let lastEmit = 0
+
+    const emitLatest = () => {
+      emitScheduled = false
+      if (!latestFrame) return
+      const now = Date.now()
+      const wait = lastEmit + MAX_EMIT_INTERVAL - now
+      if (wait > 0) {
+        emitScheduled = true
+        setTimeout(emitLatest, wait)
+        return
+      }
+      lastEmit = now
+      const frame = latestFrame
+      latestFrame = null
+      handlers.onFrame(frame)
+    }
+
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
       chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
-      const joined = pending.length ? concatBytes(pending, flushToU8()) : flushToU8()
+      // Caso comum em LAN: cada frame chega num ÚNICO chunk (o node-core
+      // escreve o multipart por frame). Nesse caso `joined` é a view do próprio
+      // chunk — evita a cópia de ~100KB por frame (a maior fonte de alocação
+      // do main thread com 3 câmeras → GC → jank).
+      let joined: Uint8Array
+      if (chunks.length === 1 && pending.length === 0) {
+        joined = chunks[0]
+        chunks.length = 0
+      } else {
+        joined = pending.length ? concatBytes(pending, flushToU8()) : flushToU8()
+      }
       pending = parse(joined)
+      // Guarda anti-vazamento: stream malformado (sem boundary/frame completo)
+      // não pode acumular memória sem limite no main thread.
+      if (pending.length > 5 * 1024 * 1024) {
+        pending = new Uint8Array(0)
+      }
     }
   }
 
@@ -372,7 +469,22 @@ function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array<ArrayBuffer> {
   return out
 }
 
+// Hash simples de string → usado para dessincronizar os pumps de detecção
+// entre câmeras (ver pump do card). Os pumps começam juntos no mount e, sem
+// stagger, ficam SINCRONIZADOS: o YOLO (mutex global, 1 inferência por vez)
+// processa rajadas de N inferências a cada intervalo → picos de CPU que fazem
+// os 3 vídeos travarem juntos. Espalhar por câmera suaviza a carga.
+function hashCode(s: string): number {
+  let h = 0
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 31 + s.charCodeAt(i)) | 0
+  }
+  return Math.abs(h)
+}
+
 // Extrai as dimensões de um JPEG lendo o SOF0/SOF2 marker (sem decodificar).
+// Usado para o scaled decode (resizeWidth do createImageBitmap) e para manter
+// as dims ORIGINAIS do frame nos boxes (que são normalizados 0-1 ao frame).
 function jpegDims(buf: Uint8Array): { w: number; h: number } | null {
   let i = 2 // skip SOI
   while (i + 9 < buf.length) {
@@ -381,7 +493,6 @@ function jpegDims(buf: Uint8Array): { w: number; h: number } | null {
       continue
     }
     const marker = buf[i + 1]
-    // SOF0..SOF3, SOF5..SOF7, SOF9..SOF11, SOF13..SOF15
     const isSof =
       (marker >= 0xc0 && marker <= 0xc3) ||
       (marker >= 0xc5 && marker <= 0xc7) ||
@@ -401,6 +512,111 @@ function jpegDims(buf: Uint8Array): { w: number; h: number } | null {
     i += 2 + len
   }
   return null
+}
+
+/**
+ * Parser MJPEG em Web Worker: o fetch + parse + throttle acontecem numa THREAD
+ * SEPARADA, fora do main thread do renderer principal (que também roda a UI do
+ * MomAI). Os frames chegam via postMessage transferable (zero cópia no main);
+ * o decode (createImageBitmap) e o draw ficam no main, como no caminho inline.
+ *
+ * O canvas NUNCA é transferido: se o worker não carregar (URL não resolvida
+ * em dev, etc.), o caller cai no createMjpegReader inline e o preview continua
+ * funcionando — sem canvas "queimado", sem "iniciando câmera" eterno.
+ */
+interface ParserWorker {
+  start(url: string): void
+  getFrame(): Promise<Uint8Array | null>
+  dispose(): void
+  /** true quando o script do worker carregou (ack 'ready' recebido). */
+  isReady(): boolean
+}
+
+function createParserWorker(opts: {
+  onFrame: (frame: Uint8Array) => void
+  onError?: () => void
+  onFps?: (fps: number) => void
+}): ParserWorker | null {
+  if (typeof Worker === 'undefined') return null
+  let worker: Worker
+  try {
+    worker = new Worker(new URL('./mjpeg-worker.js', import.meta.url), { type: 'module' })
+  } catch {
+    return null
+  }
+
+  let disposed = false
+  let ready = false
+  let pendingFrame: { resolve: (v: Uint8Array | null) => void; timer: ReturnType<typeof setTimeout> } | null = null
+
+  worker.onmessage = (e: MessageEvent) => {
+    if (disposed) return
+    const msg = e.data
+    switch (msg?.type) {
+      case 'ready':
+        // Ack de carregamento: o script avaliou e o worker está vivo.
+        ready = true
+        break
+      case 'frame':
+        if (msg.buffer) opts.onFrame(new Uint8Array(msg.buffer))
+        break
+      case 'get_frame_response':
+        if (pendingFrame) {
+          clearTimeout(pendingFrame.timer)
+          const p = pendingFrame
+          pendingFrame = null
+          p.resolve(msg.buffer ? new Uint8Array(msg.buffer) : null)
+        }
+        break
+      case 'fps':
+        opts.onFps?.(Number(msg.fps) || 0)
+        break
+      case 'error':
+        opts.onError?.()
+        break
+    }
+  }
+
+  // O `new Worker` não lança quando a URL não resolve (ex.: mjpeg-worker.js
+  // não servido pelo Vite em dev): o erro é assíncrono. Sinalizamos que o
+  // worker NÃO está pronto para o caller cair no parser inline.
+  worker.onerror = () => {
+    ready = false
+  }
+
+  return {
+    start: (url: string) => {
+      if (!disposed) worker.postMessage({ type: 'start', url })
+    },
+    getFrame: () =>
+      new Promise<Uint8Array | null>((resolve) => {
+        if (disposed || pendingFrame || !ready) {
+          resolve(null)
+          return
+        }
+        const timer = setTimeout(() => {
+          if (pendingFrame) {
+            pendingFrame.resolve(null)
+            pendingFrame = null
+          }
+        }, 2000)
+        pendingFrame = { resolve, timer }
+        worker.postMessage({ type: 'get_frame' })
+      }),
+    isReady: () => ready && !disposed,
+    dispose: () => {
+      disposed = true
+      try {
+        worker.postMessage({ type: 'abort' })
+      } catch {}
+      worker.terminate()
+      if (pendingFrame) {
+        clearTimeout(pendingFrame.timer)
+        pendingFrame.resolve(null)
+        pendingFrame = null
+      }
+    }
+  }
 }
 
 interface CustomSelectOption<T extends string = string> {
@@ -525,6 +741,70 @@ function CustomSelect<T extends string = string>({
 }
 
 // ---------------------------------------------------------------------------
+// SVG Bounding Box Overlay — renders detection boxes as SVG elements.
+// React manages the redraw: when `boxes` changes, the SVG re-renders
+// automatically. No manual canvas drawing, no refs, no ResizeObserver.
+// ---------------------------------------------------------------------------
+
+function SvgBoxOverlay({
+  boxes,
+  frameDims,
+  fit = 'cover'
+}: {
+  boxes: Detection[]
+  frameDims?: { w: number; h: number }
+  fit?: 'cover' | 'contain'
+}): JSX.Element | null {
+  if (boxes.length === 0) return null
+
+  // With object-contain, the image is centered inside the container with
+  // letterbox bars. The SVG must be offset to align with the image.
+  // With object-cover, the image fills the container (crops overflow),
+  // so normalized 0-1 coordinates map directly to the full container.
+  const style: React.CSSProperties = fit === 'contain' && frameDims?.w && frameDims?.h
+    ? { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }
+    : {}
+
+  return (
+    <svg
+      className="absolute inset-0 w-full h-full pointer-events-none z-10"
+      style={style}
+      viewBox={fit === 'contain' && frameDims?.w && frameDims?.h
+        ? `0 0 ${frameDims.w} ${frameDims.h}`
+        : undefined
+      }
+      preserveAspectRatio={fit === 'contain' ? 'xMidYMid meet' : undefined}
+    >
+      {boxes.map((box, i) => {
+        const color = classColor(box.className)
+        const x1 = box.x1 * 100
+        const y1 = box.y1 * 100
+        const w = (box.x2 - box.x1) * 100
+        const h = (box.y2 - box.y1) * 100
+        return (
+          <g key={`${box.className}-${i}`}>
+            <rect
+              x={`${x1}%`} y={`${y1}%`} width={`${w}%`} height={`${h}%`}
+              stroke={color} strokeWidth="2" fill="none"
+            />
+            <rect
+              x={`${x1}%`} y={`${Math.max(0, y1 - 3)}%`} width={`${w}%`} height="3%"
+              fill={color}
+            />
+            <text
+              x={`${x1 + 0.5}%`} y={`${Math.max(1.5, y1 - 0.5)}%`}
+              fill="#0a0a0a" fontSize="11" fontFamily="sans-serif"
+            >
+              {ptLabel(box.className)} {Math.round(box.confidence * 100)}%
+            </text>
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Camera Card with Live Preview & Top Header Bar (Name, Expand & Close)
 // ---------------------------------------------------------------------------
 
@@ -547,7 +827,8 @@ function CameraCard({
   onDragEnd,
   onDetections,
   mode = 'balanced',
-  hasMonitor = false
+  hasMonitor = false,
+  suppressPump = false
 }: {
   camera: CameraInfo
   detections: Record<string, Detection[]>
@@ -568,9 +849,12 @@ function CameraCard({
   onDetections?: (cameraId: string, boxes: Detection[]) => void
   mode?: 'fluid' | 'balanced' | 'economy'
   hasMonitor?: boolean
+  // Quando o ExpandedCameraModal está aberto para esta câmera, o modal já
+  // bombeia frames de detecção para ela — o card por trás não precisa
+  // duplicar a carga (2 fetchDirectFrame + 2 frame_pump por ciclo).
+  suppressPump?: boolean
 }): JSX.Element {
   const cardRef = useRef<HTMLDivElement | null>(null)
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const [ready, setReady] = useState(false)
   // True apenas quando um frame REAL foi exibido no preview. Antes disso, o
@@ -581,61 +865,55 @@ function CameraCard({
   const [flashing, setFlashing] = useState(false)
   const [printStatus, setPrintStatus] = useState<'idle' | 'capturing' | 'success'>('idle')
   const [reloading, setReloading] = useState(false)
-  const [ipBase64, setIpBase64] = useState<string | null>(null)
   const [fps, setFps] = useState(0)
   const framesRef = useRef(0)
   const fpsTsRef = useRef(0)
-  const ipBase64Ref = useRef<string | null>(null)
   const frameDimsRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 })
 
-  useEffect(() => {
-    ipBase64Ref.current = ipBase64
-  }, [ipBase64])
+  // Rastreadores de estado "commitado": evita chamar setHasFrame/setReady/
+  // setError a CADA frame. Mesmo com bail-out do React, cada setState agenda
+  // uma render pass do card — com 3 câmeras a 24fps isso eram ~216 renders/s
+  // de vdom no main thread, competindo com o parse/draw (causa real da
+  // oscilação de FPS 13-24). Com os refs, o card NÃO re-renderiza enquanto o
+  // estado não muda de verdade.
+  const hasFrameRef = useRef(false)
+  const readyRef = useRef(false)
+  const errorRef = useRef<string | null>(null)
 
-  const drawBoxes = useCallback(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    const w = canvas.clientWidth || canvas.offsetWidth
-    const h = canvas.clientHeight || canvas.offsetHeight
-    if (!w || !h) return
-    if (canvas.width !== w) canvas.width = w
-    if (canvas.height !== h) canvas.height = h
-    ctx.clearRect(0, 0, w, h)
-    const boxes = detections[camera.id] || []
-    const iw = frameDimsRef.current.w || 0
-    const ih = frameDimsRef.current.h || 0
-    let ox = 0
-    let oy = 0
-    let dw = w
-    let dh = h
-    if (iw && ih) {
-      const scale = Math.max(w / iw, h / ih)
-      dw = iw * scale
-      dh = ih * scale
-      ox = (w - dw) / 2
-      oy = (h - dh) / 2
-    }
-    for (const box of boxes) {
-      const x1 = ox + box.x1 * dw
-      const y1 = oy + box.y1 * dh
-      const x2 = ox + box.x2 * dw
-      const y2 = oy + box.y2 * dh
-      const color = classColor(box.className)
-      ctx.strokeStyle = color
-      ctx.lineWidth = 2
-      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
-      ctx.fillStyle = color
-      ctx.fillRect(x1, Math.max(0, y1 - 18), Math.min(w - x1, x2 - x1), 16)
-      ctx.fillStyle = '#0a0a0a'
-      ctx.font = '11px sans-serif'
-      ctx.fillText(`${ptLabel(box.className)} ${Math.round(box.confidence * 100)}%`, x1 + 4, Math.max(0, y1 - 6))
-    }
-  }, [camera.id, detections])
+  // Último frame (bytes JPEG) do preview MJPEG — o pump de detecção reusa
+  // este frame local em vez de baixar outro do node-core (ver pump abaixo).
+  const lastFrameRef = useRef<Uint8Array | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const isWebcam = camera.source === 'webcam' || camera.id.startsWith('webcam:')
+
+  // Parser de preview em Web Worker (thread separada) — parse fora do main
+  // thread; null = fallback inline (jsdom / worker indisponível).
+  const parserWorkerRef = useRef<ParserWorker | null>(null)
+
+  // Redraw de boxes apenas quando as detecções DESTA câmera mudam. Usar o
+  // objeto `detections` inteiro nas deps fazia TODOS os cards redesenharem o
+  // canvas quando QUALQUER câmera recebia detecções novas (o state é um novo
+  // Record a cada applyDetections).
+  const myDetections = detections[camera.id] || EMPTY_DETECTIONS
 
   const fetchingRef = useRef(false)
+  // A corrida visual de 8 s abaixo não cancela o POST do SDK. Sem este ref, o
+  // próximo ciclo criava outro POST enquanto o anterior ainda estava no
+  // node-core, acumulando comandos de frame_pump quando uma câmera RTSP estava
+  // lenta. O worker já mantém a inferência em background; basta um request do
+  // card por vez para receber os SSEs normalmente.
   const pumpingRef = useRef(false)
+
+  // Refs para condições voláteis do pump (hasMonitor/suppressPump) que o poll
+  // atualiza a cada 5s. Se elas estivessem nas deps do pump effect, QUALQUER
+  // mudança re-executava o effect → `cancelled=true` do run antigo → o
+  // frame_pump em andamento acordava com cancelled e descartava detections
+  // válidas (e o POST órfão seguia no node-core). Com refs, o loop do pump
+  // NUNCA reinicia por mudança de monitor — só lê o valor atual a cada ciclo.
+  const hasMonitorRef = useRef(hasMonitor)
+  hasMonitorRef.current = hasMonitor
+  const suppressPumpRef = useRef(suppressPump)
+  suppressPumpRef.current = suppressPump
 
   const isCardVisible = useCallback(() => {
     if (!isActive) return false
@@ -668,15 +946,12 @@ function CameraCard({
     let cancelled = false
     const warm = async () => {
       try {
-        const res = await command<{ jpegBase64?: string }>('get_frame', {
-          cameraId: camera.id
-        })
-        if (!cancelled && res?.jpegBase64) {
-          // Guarda o frame para o pump de detecção, sem tocar no <img>.
-          ipBase64Ref.current = res.jpegBase64
-        }
+        // Dispara get_frame único para INICIAR o stream no backend (startMjpeg
+        // / start-watch) cedo. O frame em si é descartado — o preview usa o
+        // stream MJPEG e o pump usa o último blob que o leitor recebeu.
+        await command('get_frame', { cameraId: camera.id })
       } catch {
-        // O loop visível (fetchFrame) cuida do retry.
+        // O loop visível cuida do retry.
       }
     }
     void warm()
@@ -697,107 +972,317 @@ function CameraCard({
     setReady(true)
     setHasFrame(true)
     setError(null)
-    drawBoxes()
   }
 
   // Preview ao vivo + FPS real. Usa o leitor MJPEG em JS (fetch + ReadableStream)
   // em vez do <img multipart/x-mixed-replace>, que no Chromium congela no mesmo
-  // frame de forma aleatória e não deixa contar FPS. Cada frame JPEG é desenhado
-  // no canvas de preview e o número de frames recebidos por segundo vira o FPS.
+  // frame de forma aleatória e não deixa contar FPS.
+  //
+  // PERFORMANCE: o parse roda num Web Worker (thread separada) quando
+  // disponível; o draw é direto com "latest-wins": se um decode ainda está em
+  // andamento, só o último frame é guardado — nunca acumula fila de
+  // createImageBitmap/drawImage no main thread. O canvas NUNCA é transferido:
+  // se o worker falhar, o createMjpegReader inline assume na hora.
   useEffect(() => {
     if (!isActive) return
+
+    if (isWebcam) {
+      let activeStream: MediaStream | null = null
+      let cancelled = false
+      // CameraInfo não expõe deviceId (list_cameras não o devolve); o card
+      // resolve o id bruto a partir do id `webcam:<deviceId>`.
+      const rawId = (camera as { deviceId?: string }).deviceId || (camera.id.startsWith('webcam:') ? camera.id.slice('webcam:'.length) : camera.id)
+
+      const startWebcamStream = async () => {
+        try {
+          let stream: MediaStream
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: rawId ? { deviceId: { exact: rawId } } : true
+            })
+          } catch {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true })
+          }
+          if (cancelled) {
+            stream.getTracks().forEach((t) => t.stop())
+            return
+          }
+          activeStream = stream
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream
+            videoRef.current.play().catch(() => {})
+          }
+          hasFrameRef.current = true
+          readyRef.current = true
+          setHasFrame(true)
+          setReady(true)
+          setError(null)
+          setFps(30)
+          // Atualiza frameDimsRef com as dimensões reais da webcam para o
+          // letterbox mapping dos boxes. Sem isso, iw/ih = 0 e os boxes
+          // desenhariam com proporção errada.
+          const updateDims = () => {
+            if (cancelled) return
+            const v = videoRef.current
+            if (v && v.videoWidth && v.videoHeight) {
+              frameDimsRef.current = { w: v.videoWidth, h: v.videoHeight }
+            }
+            if (!cancelled) requestAnimationFrame(updateDims)
+          }
+          requestAnimationFrame(updateDims)
+        } catch (err: any) {
+          if (!cancelled) {
+            setError('Sem acesso à webcam local: ' + (err?.message || 'Desconectada'))
+          }
+        }
+      }
+
+      void startWebcamStream()
+
+      return () => {
+        cancelled = true
+        if (activeStream) {
+          activeStream.getTracks().forEach((t) => t.stop())
+        }
+      }
+    }
+
     let cancelled = false
     const ac = new AbortController()
     const frameCanvas = frameCanvasRef.current
     const ctx = frameCanvas?.getContext('2d')
     if (!frameCanvas || !ctx) return
 
-    const draw = async (blob: Blob, _w: number, _h: number) => {
+    let drawing = false
+    let queued: Uint8Array | null = null
+
+    // Tamanho do canvas CACHEADO: ler clientWidth/Height a cada frame (72/s
+    // com 3 câmeras) é layout read no main thread. O ResizeObserver atualiza
+    // o ref apenas quando o card realmente muda de tamanho (raro).
+    let canvasW = frameCanvas.clientWidth || frameCanvas.width
+    let canvasH = frameCanvas.clientHeight || frameCanvas.height
+    const ro =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            canvasW = frameCanvas.clientWidth || frameCanvas.width
+            canvasH = frameCanvas.clientHeight || frameCanvas.height
+          })
+        : null
+    ro?.observe(frameCanvas)
+
+    const drawToCanvas = (
+      bitmap: ImageBitmap | HTMLImageElement,
+      origW = 0,
+      origH = 0
+    ): void => {
+      const cw = canvasW
+      const ch = canvasH
+      if (frameCanvas.width !== cw) frameCanvas.width = cw
+      if (frameCanvas.height !== ch) frameCanvas.height = ch
+      // object-cover SEM clearRect: com scale = max(...) o drawImage cobre
+      // 100% do canvas (corta o excesso), então limpar antes era redundante —
+      // e o clearRect por frame (72/s com 3 câmeras) é trabalho no main thread
+      // à toa.
+      const scale = Math.max(cw / bitmap.width, ch / bitmap.height)
+      const dw = bitmap.width * scale
+      const dh = bitmap.height * scale
+      ctx.drawImage(bitmap, (cw - dw) / 2, (ch - dh) / 2, dw, dh)
+      // frameDimsRef usa as dims ORIGINAIS do frame (não as do bitmap se foi
+      // decodificado em escala reduzida) — os boxes são normalizados 0-1 ao
+      // frame original.
+      frameDimsRef.current = {
+        w: origW || bitmap.width,
+        h: origH || bitmap.height
+      }
+      framesRef.current++
+      const now = Date.now()
+      if (now - fpsTsRef.current >= 1000) {
+        setFps(framesRef.current)
+        framesRef.current = 0
+        fpsTsRef.current = now
+      }
+      // setState apenas na transição (primeiro frame / erro → ok), nunca por
+      // frame — senão o React agenda render do card a 24fps × N câmeras.
+      if (!hasFrameRef.current) {
+        hasFrameRef.current = true
+        setHasFrame(true)
+      }
+      if (!readyRef.current) {
+        readyRef.current = true
+        setReady(true)
+      }
+      if (errorRef.current !== null) {
+        errorRef.current = null
+        setError(null)
+      }
+    }
+
+    const drawFallback = (frame: Uint8Array): Promise<void> =>
+      new Promise((resolve) => {
+        const img = new Image()
+        const url = URL.createObjectURL(new Blob([frame as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' }))
+        img.onload = () => {
+          try {
+            if (!cancelled) drawToCanvas(img, img.naturalWidth, img.naturalHeight)
+          } catch {
+            // ignora frame inválido
+          } finally {
+            URL.revokeObjectURL(url)
+            resolve()
+          }
+        }
+        img.onerror = () => {
+          URL.revokeObjectURL(url)
+          resolve()
+        }
+        img.src = url
+      })
+
+    const drawFrame = async (frame: Uint8Array): Promise<void> => {
       if (cancelled) return
       try {
         if (typeof createImageBitmap === 'function') {
-          const bitmap = await createImageBitmap(blob)
+          // Decodifica direto dos BYTES do frame (BufferSource) — sem Blob,
+          // sem cópia intermediária; o decode roda em thread de background.
+          //
+          // SCALED DECODE: para câmeras de alta resolução (>640px), o
+          // createImageBitmap com resizeWidth/Height usa o decode em escala
+          // reduzida do libjpeg-turbo (frações 1/2, 1/4...), que é ~3x mais
+          // rápido que decodificar cheio. O card exibe ~400-500px — decodificar
+          // acima de 640 é desperdício. Os boxes continuam certos (frameDimsRef
+          // usa as dims originais).
+          const dims = jpegDims(frame)
+          if (dims && dims.w > 640) {
+            let scale = 0.5
+            while (dims.w * scale > 640) scale *= 0.5
+            const rw = Math.max(1, Math.round(dims.w * scale))
+            const rh = Math.max(1, Math.round(dims.h * scale))
+            const bitmap = await createImageBitmap(frame as unknown as ImageBitmapSource, {
+              resizeWidth: rw,
+              resizeHeight: rh
+            })
+            if (cancelled) {
+              bitmap.close()
+              return
+            }
+            drawToCanvas(bitmap, dims.w, dims.h)
+            bitmap.close()
+            return
+          }
+          const bitmap = await createImageBitmap(frame as unknown as ImageBitmapSource)
           if (cancelled) {
             bitmap.close()
             return
           }
-          const cw = frameCanvas.clientWidth || frameCanvas.width
-          const ch = frameCanvas.clientHeight || frameCanvas.height
-          if (frameCanvas.width !== cw) frameCanvas.width = cw
-          if (frameCanvas.height !== ch) frameCanvas.height = ch
-          ctx.clearRect(0, 0, cw, ch)
-          // object-cover: preenche mantendo proporção.
-          const scale = Math.max(cw / bitmap.width, ch / bitmap.height)
-          const dw = bitmap.width * scale
-          const dh = bitmap.height * scale
-          ctx.drawImage(bitmap, (cw - dw) / 2, (ch - dh) / 2, dw, dh)
-          frameDimsRef.current = { w: bitmap.width, h: bitmap.height }
+          drawToCanvas(bitmap, dims?.w || 0, dims?.h || 0)
           bitmap.close()
-          framesRef.current++
-          const now = Date.now()
-          if (now - fpsTsRef.current >= 1000) {
-            setFps(framesRef.current)
-            framesRef.current = 0
-            fpsTsRef.current = now
-          }
-          setHasFrame(true)
-          setReady(true)
-          setError(null)
-          drawBoxes()
           return
         }
       } catch {
         // fallback para Image se createImageBitmap falhar
       }
-      const img = new Image()
-      const url = URL.createObjectURL(blob)
-      img.onload = () => {
-        try {
-          if (cancelled) return
-          const cw = frameCanvas.clientWidth || frameCanvas.width
-          const ch = frameCanvas.clientHeight || frameCanvas.height
-          if (frameCanvas.width !== cw) frameCanvas.width = cw
-          if (frameCanvas.height !== ch) frameCanvas.height = ch
-          ctx.clearRect(0, 0, cw, ch)
-          // object-cover: preenche mantendo proporção.
-          const scale = Math.max(cw / img.naturalWidth, ch / img.naturalHeight)
-          const dw = img.naturalWidth * scale
-          const dh = img.naturalHeight * scale
-          ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh)
-          frameDimsRef.current = { w: img.naturalWidth, h: img.naturalHeight }
-          framesRef.current++
-          const now = Date.now()
-          if (now - fpsTsRef.current >= 1000) {
-            setFps(framesRef.current)
-            framesRef.current = 0
-            fpsTsRef.current = now
-          }
-          setHasFrame(true)
-          setReady(true)
-          setError(null)
-          drawBoxes()
-        } catch {
-          // ignora frame inválido
-        } finally {
-          URL.revokeObjectURL(url)
-        }
-      }
-      img.onerror = () => {
-        URL.revokeObjectURL(url)
-      }
-      img.src = url
+      await drawFallback(frame)
     }
 
+    const drawNext = (frame: Uint8Array): void => {
+      if (cancelled) return
+      if (drawing) {
+        queued = frame
+        return
+      }
+      drawing = true
+      void drawFrame(frame).finally(() => {
+        drawing = false
+        if (queued && !cancelled) {
+          const q = queued
+          queued = null
+          drawNext(q)
+        }
+      })
+    }
+
+    // Fonte dos frames: parser em Web Worker (thread separada) quando
+    // disponível; senão o parser inline. O canvas NUNCA é transferido — se o
+    // worker falhar ao carregar (URL não resolvida em dev), o inline assume na
+    // hora e o preview continua.
+    const parser = createParserWorker({
+      onFrame: (frame) => {
+        if (cancelled) return
+        // Guarda os bytes do frame mais recente: o pump de detecção reusa este
+        // frame local (zero round-trip ao node-core).
+        lastFrameRef.current = frame
+        drawNext(frame)
+      },
+      onError: () => {
+        if (cancelled) return
+        if (errorRef.current === null) {
+          errorRef.current = 'Perda de conexão com a câmera. Tente recarregar.'
+          setError(errorRef.current)
+        }
+      },
+      onFps: (fps) => setFps(fps)
+    })
+    if (parser) {
+      parserWorkerRef.current = parser
+      parser.start(streamUrl)
+      // Fallback automático: o `new Worker` não lança quando a URL não resolve
+      // (erro assíncrono). Se o ack 'ready' não chegar, descarta o worker e
+      // inicia o parser inline — o preview NUNCA fica em "iniciando câmera"
+      // por causa de um worker mudo.
+      let inlineStarted = false
+      const startInline = () => {
+        if (cancelled || inlineStarted) return
+        inlineStarted = true
+        createMjpegReader(
+          streamUrl,
+          {
+            onFrame: (frame) => {
+              if (cancelled) return
+              lastFrameRef.current = frame
+              drawNext(frame)
+            },
+            onError: () => {
+              if (cancelled) return
+              if (errorRef.current === null) {
+                errorRef.current = 'Perda de conexão com a câmera. Tente recarregar.'
+                setError(errorRef.current)
+              }
+            }
+          },
+          ac.signal
+        )
+      }
+      const fallbackTimer = setTimeout(() => {
+        if (parser.isReady()) return
+        parser.dispose()
+        parserWorkerRef.current = null
+        startInline()
+      }, 500)
+      return () => {
+        clearTimeout(fallbackTimer)
+        cancelled = true
+        ac.abort()
+        ro?.disconnect()
+        parser.dispose()
+        parserWorkerRef.current = null
+      }
+    }
+
+    // Fallback direto (jsdom / Worker indisponível).
     createMjpegReader(
       streamUrl,
       {
-        onFrame: (blob, w, h) => {
+        onFrame: (frame) => {
           if (cancelled) return
-          draw(blob, w, h)
+          lastFrameRef.current = frame
+          drawNext(frame)
         },
         onError: () => {
           if (cancelled) return
-          setError('Perda de conexão com a câmera. Tente recarregar.')
+          if (errorRef.current === null) {
+            errorRef.current = 'Perda de conexão com a câmera. Tente recarregar.'
+            setError(errorRef.current)
+          }
         }
       },
       ac.signal
@@ -806,40 +1291,200 @@ function CameraCard({
     return () => {
       cancelled = true
       ac.abort()
+      ro?.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamUrl, isActive])
 
+  // YOLO detection frame pump.
+  // PERFORMANCE: o frame enviado é o ÚLTIMO frame (bytes) que o leitor MJPEG
+  // do preview já recebeu (lastFrameRef) — convertido para base64 via Blob +
+  // FileReader (encode em background), muito mais barato que o caminho antigo
+  // que baixava o frame de novo do node-core (GET /frame re-encoda o JPEG em
+  // base64 no thread único do host e devolve JSON gigante, disputando o push
+  // do MJPEG). fetchDirectFrame vira fallback apenas para cold start.
+  //
+  // Quando a câmera tem MONITOR ATIVO, o monitor já roda YOLO ~1/s e envia os
+  // boxes via vision_detections (SSE) — o pump do card seria redundante e só
+  // somaria POSTs JSON no node-core + inferências no mutex global. Nesse caso
+  // o pump é suprimido (os boxes chegam pelo SSE).
   useEffect(() => {
-    drawBoxes()
-  }, [detections, drawBoxes])
-
-  // YOLO detection frame pump — busca frame Base64 direto do node-core (1x/s)
-  // para evitar SecurityError de canvas tainted em streams cross-origin.
-  useEffect(() => {
+    if (!isActive) return
+    let cancelled = false
     const interval = PUMP_INTERVALS[mode] || 1000
+    // Último resultado de detecção recebido por esta câmera (persiste entre os
+    // ciclos do pump dentro deste effect). Quando um frame_pump não responde a
+    // tempo (timeout de PUMP_COMMAND_TIMEOUT_MS — engine ocupado / fila do
+    // worker) ou falha, o ciclo redesenha ESTE último estado em vez de deixar o
+    // canvas sem boxes: a detecção "congela" no último resultado conhecido e
+    // volta a atualizar assim que o engine responder. Antes, o timeout não
+    // redesenhava nada e o hold de 1.5s do applyDetections limpava os boxes —
+    // por isso os quadrados só apareciam após trocar de aba (remount que
+    // re-iniciava o pump e achava o engine livre).
+    let lastBoxes: Detection[] = []
+    let lastWarnTime = 0
+    const WARN_MIN_INTERVAL_MS = 30_000 // no máximo 1 warn por 30s por câmera
+
     const run = async () => {
-      if (document.hidden || !isCardVisible() || pumpingRef.current) return
-      pumpingRef.current = true
+      if (cancelled || suppressPumpRef.current || hasMonitorRef.current || document.hidden) {
+        if (!cancelled) timerRef = setTimeout(run, interval)
+        return
+      }
+      if (pumpingRef.current) {
+        // A resposta do POST anterior ainda não chegou. Não criar uma segunda
+        // chamada: o resultado pendente será entregue por SSE e o próximo
+        // intervalo retoma o pump quando o transporte liberar.
+        timerRef = setTimeout(run, interval)
+        return
+      }
       try {
-        const jpegBase64 = await fetchDirectFrame(camera.id)
-        if (!jpegBase64) return
-        const res = await command<{ detections?: Detection[] }>('frame_pump', { cameraId: camera.id, jpegBase64 })
-        if (res?.detections && Array.isArray(res.detections)) {
-          onDetections?.(camera.id, res.detections)
+        let jpegBase64: string | null = null
+        if (isWebcam && videoRef.current && (videoRef.current.readyState >= 2 || videoRef.current.videoWidth > 0)) {
+          const v = videoRef.current
+          const vw = v.videoWidth || 640
+          const vh = v.videoHeight || 360
+          frameDimsRef.current = { w: vw, h: vh }
+          const tempCanvas = document.createElement('canvas')
+          const scale = Math.min(640 / vw, 360 / vh, 1)
+          tempCanvas.width = Math.max(1, Math.round(vw * scale))
+          tempCanvas.height = Math.max(1, Math.round(vh * scale))
+          const ctx = tempCanvas.getContext('2d')
+          if (ctx) {
+            ctx.drawImage(v, 0, 0, tempCanvas.width, tempCanvas.height)
+            jpegBase64 = tempCanvas.toDataURL('image/jpeg', 0.8)
+          }
+        } else {
+          const parser = parserWorkerRef.current
+          if (parser) {
+            // O parse está no Web Worker: pede o frame mais recente (transferable
+            // — zero cópia no main) e converte via Blob+FileReader (background).
+            const buf = await parser.getFrame()
+            if (buf && buf.length > 0) {
+              jpegBase64 = await blobToBase64(
+                new Blob([buf as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' })
+              )
+            }
+          } else {
+            const localFrame = lastFrameRef.current
+            if (localFrame && localFrame.length > 0) {
+              // Cria o Blob SOB DEMANDA (1 cópia por pump, ~1x/0.9-2.5s por
+              // câmera) — nunca por frame do stream.
+              jpegBase64 = await blobToBase64(
+                new Blob([localFrame as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' })
+              )
+            }
+          }
         }
-      } catch {
-        // transient — keep pumping
+        if (!jpegBase64) {
+          jpegBase64 = await fetchDirectFrame(camera.id)
+        }
+        if (!jpegBase64) {
+          const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
+          jpegBase64 = res?.jpegBase64 || null
+        }
+        if (jpegBase64 && !cancelled) {
+          // Timeout curto específico do pump: o frame_pump pode ficar na fila
+          // do worker quando o poll (list_cameras a cada 5s) está processando
+          // startMjpeg/ffmpeg. Com o timeout global de 35s, o pump ficava 35s
+          // pendurado (POST órfão no node-core + "demorou demais"). Aqui ele
+          // desiste em PUMP_COMMAND_TIMEOUT_MS e tenta no próximo ciclo.
+          const request = command<{ detections?: Detection[]; engineBusy?: boolean; stale?: boolean }>('frame_pump', { cameraId: camera.id, jpegBase64 })
+          pumpingRef.current = true
+          void request.then(
+            () => { pumpingRef.current = false },
+            () => { pumpingRef.current = false }
+          )
+          const res = await Promise.race([
+            request,
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), PUMP_COMMAND_TIMEOUT_MS))
+          ])
+          if (res?.engineBusy) {
+            console.log(`[vision-diag][${camera.id}] frame_pump engine busy, using cached boxes`)
+          }
+          if (res?.detections && Array.isArray(res.detections) && !cancelled) {
+            lastBoxes = res.detections
+            // Atualiza o state via onDetections (React redesenha o SVG).
+            // Funciona para dados frescos E stale — o hold temporal no
+            // applyDetections suaviza a instabilidade do YOLO.
+            onDetections?.(camera.id, res.detections)
+          } else if (!cancelled) {
+            // Sem resposta a tempo (timeout — engine ocupado / frame_pump na
+            // fila do worker) ou resposta sem detections: mantém o último
+            // estado conhecido via onDetections para não limpar os boxes.
+            if (lastBoxes.length > 0) {
+              onDetections?.(camera.id, lastBoxes)
+            }
+            // DIAG: frame_pump respondeu mas sem detections (vazio/erro silencioso)
+            try {
+              const now = Date.now()
+              if (now - lastWarnTime >= WARN_MIN_INTERVAL_MS) {
+                lastWarnTime = now
+                console.warn(
+                  `[vision-diag][${camera.id}] frame_pump sem detections: ${res === null ? 'timeout-pump' : JSON.stringify(res)}`
+                )
+              }
+            } catch {
+              const now = Date.now()
+              if (now - lastWarnTime >= WARN_MIN_INTERVAL_MS) {
+                lastWarnTime = now
+                console.warn(`[vision-diag][${camera.id}] frame_pump sem detections (unserializable)`)
+              }
+            }
+          }
+        } else if (!jpegBase64) {
+          // DIAG: nenhum frame disponível — preview morto, fetchDirectFrame 404 ou get_frame falhou
+          if (Date.now() - lastWarnTime >= WARN_MIN_INTERVAL_MS) {
+            lastWarnTime = Date.now()
+            console.warn(
+              `[vision-diag][${camera.id}] pump sem frame (lastFrame=${lastFrameRef.current?.length ?? 'null'}, parser=${parserWorkerRef.current ? 'sim' : 'não'}, webcam=${isWebcam ? (videoRef.current ? `ready=${videoRef.current.readyState}` : 'sem-video') : 'não'})`
+            )
+          }
+        }
+      } catch (err) {
+        // DIAG: erros silenciosos que mantinham os boxes congelados
+        // Rate-limit do warn: no máximo 1 a cada 30s por câmera para não encher o log
+        const now = Date.now()
+        if (now - lastWarnTime >= WARN_MIN_INTERVAL_MS) {
+          lastWarnTime = now
+          console.warn(`[vision-diag][${camera.id}] pump erro:`, err instanceof Error ? err.message : String(err))
+        }
+        // Falha do frame_pump: mantém o último estado conhecido via onDetections.
+        if (!cancelled && lastBoxes.length > 0) {
+          onDetections?.(camera.id, lastBoxes)
+        }
       } finally {
-        pumpingRef.current = false
+        if (!cancelled) {
+          timerRef = setTimeout(run, interval)
+        }
       }
     }
-    void run()
-    const timer = window.setInterval(() => void run(), interval)
-    return () => {
-      clearInterval(timer)
+
+    const stagger = (hashCode(camera.id) % 3) * (interval / 3)
+    let timerRef = setTimeout(run, stagger)
+
+    // Retoma o pump imediatamente quando a página voltar a ficar visível
+    // (janela restaurada/aba do app re-focada): sem o listener, o próximo
+    // ciclo só rodaria no próximo intervalo (até 2.5s em economy). O pump em si
+    // nunca morre no hidden (só pausa e re-agenda), mas este listener torna o
+    // resume instantâneo — mesmo comportamento de um remount por troca de aba.
+    const onVisibility = () => {
+      if (!cancelled && !document.hidden) {
+        clearTimeout(timerRef)
+        timerRef = setTimeout(run, 0)
+      }
     }
-  }, [camera.id, mode, isCardVisible, onDetections])
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      cancelled = true
+      clearTimeout(timerRef)
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+    // hasMonitor/suppressPump NÃO estão nas deps: mudanças no monitor (poll 5s)
+    // NÃO devem reiniciar o loop do pump (causava descarte de detections + POSTs
+    // órfãos). A condição é lida via ref a cada ciclo.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camera.id, mode, isActive])
 
   const handleTakeSnapshot = async () => {
     setFlashing(true)
@@ -863,7 +1508,8 @@ function CameraCard({
         cameraName: camera.name
       })
       if (res.jpegBase64) {
-        setIpBase64(res.jpegBase64)
+        // O preview é o stream MJPEG; o reload apenas marca pronto. O pump
+        // reusa o próximo frame do stream, então nada a guardar aqui.
         setReady(true)
         setHasFrame(true)
       }
@@ -902,17 +1548,28 @@ function CameraCard({
         }`}
     >
       <div className="relative w-full aspect-video bg-black rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
-        <canvas
-          ref={frameCanvasRef}
-          className={`absolute inset-0 w-full h-full ${hasFrame ? 'block' : 'opacity-0'}`}
-        />
+        {isWebcam ? (
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`absolute inset-0 w-full h-full object-cover ${hasFrame ? 'block' : 'opacity-0'}`}
+          />
+        ) : (
+          <canvas
+            ref={frameCanvasRef}
+            className={`absolute inset-0 w-full h-full ${hasFrame ? 'block' : 'opacity-0'}`}
+          />
+        )}
         {!hasFrame && (
           <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-gray-400 bg-black p-4 text-center">
             <VisionIcon className="w-6 h-6 text-gray-400 mb-2 animate-pulse" />
             <span>{reloading ? 'Conectando à sua câmera...' : camera.online ? 'Iniciando câmera...' : 'Sem sinal'}</span>
           </div>
         )}
-        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+        {/* Bounding boxes — SVG overlay (React gerencia o redesenho) */}
+        <SvgBoxOverlay boxes={myDetections} />
 
         {/* FPS real do preview (diagnóstico de desempenho) */}
         {hasFrame && fps > 0 ? (
@@ -1143,6 +1800,10 @@ function AddCameraModal({
     if (!val) return
     setPendingWebcamIds((prev) => (prev.includes(val) ? prev : [...prev, val]))
     setSelectedWebcamId('')
+    // Pré-aquece a câmera (getUserMedia no host) JÁ NA SELEÇÃO, em background:
+    // assim, ao confirmar, o watch já está subindo e o card conecta mais rápido
+    // (menos tempo "sem sinal"), parecido com o navegador inicializando a webcam.
+    void command('warm_webcam', { cameraId: val }).catch(() => {})
   }
 
   const handleStageIp = () => {
@@ -1172,7 +1833,25 @@ function AddCameraModal({
     setSubmitting(true)
     setModalError(null)
     try {
-      await onConfirm(pendingWebcamIds, pendingIpDrafts)
+      // Rede de segurança absoluta: o modal NUNCA pode ficar preso em
+      // "Adicionando..." para sempre. Cada comando já tem timeout (COMMAND_TIMEOUT_MS)
+      // e o onConfirm já fecha o modal logo após a persistência; este race garante
+      // que, mesmo que algo pendure por um motivo não coberto (ex.: resposta que
+      // nunca chega sem rejeitar), o fluxo finaliza com erro claro e permite tentar
+      // de novo — em vez de congelar a UI.
+      await Promise.race([
+        onConfirm(pendingWebcamIds, pendingIpDrafts),
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(
+            () =>
+              reject(
+                new Error('Tempo esgotado ao adicionar. Verifique a conexão e tente novamente.')
+              ),
+            COMMAND_TIMEOUT_MS
+          )
+          if (typeof timer.unref === 'function') timer.unref()
+        })
+      ])
     } catch (err) {
       setModalError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -1493,66 +2172,29 @@ function ExpandedCameraModal({
   onDetections?: (cameraId: string, boxes: Detection[]) => void
   mode?: 'fluid' | 'balanced' | 'economy'
 }): JSX.Element | null {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const frameBoxRef = useRef<HTMLDivElement | null>(null)
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [flashing, setFlashing] = useState(false)
   const [printStatus, setPrintStatus] = useState<'idle' | 'capturing' | 'success'>('idle')
-  const [ipBase64, setIpBase64] = useState<string | null>(null)
-  const ipBase64Ref = useRef<string | null>(null)
   const pumpingRef = useRef(false)
   const frameDimsRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 })
 
-  useEffect(() => {
-    ipBase64Ref.current = ipBase64
-  }, [ipBase64])
+  // Rastreadores de estado "commitado" (mesma otimização do card): setReady/
+  // setError só nas transições, nunca por frame.
+  const readyRef = useRef(false)
+  const errorRef = useRef<string | null>(null)
 
-  // Boxes are normalized to the video frame. With object-contain the image is
-  // centered inside the box, so map each box to the displayed image rect.
-  const drawBoxes = useCallback(() => {
-    const canvas = canvasRef.current
-    const boxEl = frameBoxRef.current
-    if (!canvas || !boxEl || !camera) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    const cw = boxEl.clientWidth || boxEl.offsetWidth
-    const ch = boxEl.clientHeight || boxEl.offsetHeight
-    if (!cw || !ch) return
-    canvas.width = cw
-    canvas.height = ch
-    ctx.clearRect(0, 0, cw, ch)
-    const iw = frameDimsRef.current.w || 0
-    const ih = frameDimsRef.current.h || 0
-    let ox = 0
-    let oy = 0
-    let dw = cw
-    let dh = ch
-    if (iw && ih) {
-      const scale = Math.min(cw / iw, ch / ih)
-      dw = iw * scale
-      dh = ih * scale
-      ox = (cw - dw) / 2
-      oy = (ch - dh) / 2
-    }
-    const boxes = detections[camera.id] || []
-    for (const box of boxes) {
-      const x1 = ox + box.x1 * dw
-      const y1 = oy + box.y1 * dh
-      const x2 = ox + box.x2 * dw
-      const y2 = oy + box.y2 * dh
-      const color = classColor(box.className)
-      ctx.strokeStyle = color
-      ctx.lineWidth = 2
-      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
-      ctx.fillStyle = color
-      ctx.fillRect(x1, Math.max(0, y1 - 20), Math.min(cw, x2 - x1), 18)
-      ctx.fillStyle = '#0a0a0a'
-      ctx.font = 'bold 12px sans-serif'
-      ctx.fillText(`${ptLabel(box.className)} ${Math.round(box.confidence * 100)}%`, x1 + 4, Math.max(0, y1 - 6))
-    }
-  }, [camera, detections])
+  // Último frame (bytes JPEG) do preview MJPEG — o pump de detecção reusa
+  // este frame local.
+  const lastFrameRef = useRef<Uint8Array | null>(null)
+
+  // Parser de preview em Web Worker (thread separada); null = fallback inline.
+  const parserWorkerRef = useRef<ParserWorker | null>(null)
+
+  // Redraw de boxes apenas quando as detecções DESTA câmera mudam.
+  const myDetections = camera ? detections[camera.id] || EMPTY_DETECTIONS : EMPTY_DETECTIONS
 
   const streamUrl = useMemo(() => {
     if (!camera) return ''
@@ -1562,36 +2204,78 @@ function ExpandedCameraModal({
     return `${base}/media/camera/stream/${encodeURIComponent(deviceId)}?ext=${EXT_ID}&token=${encodeURIComponent(token)}`
   }, [camera])
 
-  // Pump detection frames for expanded camera — busca Base64 direto do node-core
+  // Pump detection frames for expanded camera. PERFORMANCE: reusa o último
+  // frame (bytes) do preview (lastFrameRef) em vez de baixar outro do
+  // node-core (fetchDirectFrame re-encoda o JPEG em base64 no thread único do
+  // host); fetchDirectFrame é só o fallback de cold start.
   useEffect(() => {
     if (!camera) return
+    // Último estado de detecção desenhado (persiste entre ciclos do pump): se o
+    // frame_pump falhar/timeout, redesenha este estado em vez de limpar o canvas.
+    let lastBoxes: Detection[] = []
     const run = async () => {
       if (document.hidden || pumpingRef.current) return
       pumpingRef.current = true
       try {
-        const jpegBase64 = await fetchDirectFrame(camera.id)
+        let jpegBase64: string | null = null
+        const parser = parserWorkerRef.current
+        if (parser) {
+          const buf = await parser.getFrame()
+          if (buf && buf.length > 0) {
+            jpegBase64 = await blobToBase64(
+              new Blob([buf as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' })
+            )
+          }
+        } else {
+          const localFrame = lastFrameRef.current
+          if (localFrame && localFrame.length > 0) {
+            // Blob sob demanda (1 cópia por pump), encode via FileReader
+            // (background) — nunca por frame do stream.
+            jpegBase64 = await blobToBase64(
+              new Blob([localFrame as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' })
+            )
+          }
+        }
+        if (!jpegBase64) {
+          jpegBase64 = await fetchDirectFrame(camera.id)
+        }
+        if (!jpegBase64) {
+          const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
+          jpegBase64 = res?.jpegBase64 || null
+        }
         if (!jpegBase64) return
-        const res = await command<{ detections?: Detection[] }>('frame_pump', { cameraId: camera.id, jpegBase64 })
+        const res = await command<{ detections?: Detection[]; stale?: boolean }>('frame_pump', { cameraId: camera.id, jpegBase64 })
         if (res?.detections && Array.isArray(res.detections)) {
+          lastBoxes = res.detections
+          // Atualiza o state via onDetections (React redesenha o SVG).
           onDetections?.(camera.id, res.detections)
+        } else if (lastBoxes.length > 0) {
+          // Timeout/falha: mantém o último estado de detecção.
+          onDetections?.(camera.id, lastBoxes)
         }
       } catch {
-        // transient — keep pumping
+        // transient — keep pumping; mantém o último estado de detecção
+        if (lastBoxes.length > 0) {
+          onDetections?.(camera.id, lastBoxes)
+        }
       } finally {
         pumpingRef.current = false
       }
     }
     void run()
+    const stagger = (hashCode(camera.id) % 3) * ((PUMP_INTERVALS[mode] || 1000) / 3)
+    const t0 = setTimeout(() => void run(), stagger)
     const timer = window.setInterval(() => void run(), PUMP_INTERVALS[mode] || 1000)
-    return () => clearInterval(timer)
+    return () => {
+      clearTimeout(t0)
+      clearInterval(timer)
+    }
   }, [camera, onDetections, mode])
 
-  useEffect(() => {
-    drawBoxes()
-  }, [detections, drawBoxes])
-
   // Preview ao vivo via leitor MJPEG em JS (mesma lógica do card), sem o
-  // <img multipart/x-mixed-replace> que congela no Chromium.
+  // <img multipart/x-mixed-replace> que congela no Chromium. O draw é direto
+  // com "latest-wins" (drawing/queued), sem fila de decodes; o parse roda em
+  // Web Worker quando disponível (fallback inline se não).
   useEffect(() => {
     if (!camera) return
     let cancelled = false
@@ -1600,76 +2284,178 @@ function ExpandedCameraModal({
     const ctx = frameCanvas?.getContext('2d')
     if (!frameCanvas || !ctx) return
 
-    const draw = async (blob: Blob) => {
+    let drawing = false
+    let queued: Uint8Array | null = null
+
+    // Tamanho do canvas cacheado (sem layout read por frame).
+    let canvasW = frameCanvas.clientWidth || frameCanvas.width
+    let canvasH = frameCanvas.clientHeight || frameCanvas.height
+    const ro =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => {
+            canvasW = frameCanvas.clientWidth || frameCanvas.width
+            canvasH = frameCanvas.clientHeight || frameCanvas.height
+          })
+        : null
+    ro?.observe(frameCanvas)
+
+    const drawToCanvas = (bitmap: ImageBitmap | HTMLImageElement): void => {
+      const cw = canvasW
+      const ch = canvasH
+      if (frameCanvas.width !== cw) frameCanvas.width = cw
+      if (frameCanvas.height !== ch) frameCanvas.height = ch
+      ctx.clearRect(0, 0, cw, ch)
+      // object-contain: imagem inteira visível.
+      const scale = Math.min(cw / bitmap.width, ch / bitmap.height)
+      const dw = bitmap.width * scale
+      const dh = bitmap.height * scale
+      ctx.drawImage(bitmap, (cw - dw) / 2, (ch - dh) / 2, dw, dh)
+      frameDimsRef.current = { w: bitmap.width, h: bitmap.height }
+      if (!readyRef.current) {
+        readyRef.current = true
+        setReady(true)
+      }
+      if (errorRef.current !== null) {
+        errorRef.current = null
+        setError(null)
+      }
+    }
+
+    const drawFallback = (frame: Uint8Array): Promise<void> =>
+      new Promise((resolve) => {
+        const img = new Image()
+        const url = URL.createObjectURL(new Blob([frame as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' }))
+        img.onload = () => {
+          try {
+            if (!cancelled) drawToCanvas(img)
+          } catch {
+            // ignora frame inválido
+          } finally {
+            URL.revokeObjectURL(url)
+            resolve()
+          }
+        }
+        img.onerror = () => {
+          URL.revokeObjectURL(url)
+          resolve()
+        }
+        img.src = url
+      })
+
+    const drawFrame = async (frame: Uint8Array): Promise<void> => {
       if (cancelled) return
       try {
         if (typeof createImageBitmap === 'function') {
-          const bitmap = await createImageBitmap(blob)
+          // Decodifica direto dos BYTES do frame — sem Blob/cópia; decode em
+          // thread de background.
+          const bitmap = await createImageBitmap(frame as unknown as ImageBitmapSource)
           if (cancelled) {
             bitmap.close()
             return
           }
-          const cw = frameCanvas.clientWidth || frameCanvas.width
-          const ch = frameCanvas.clientHeight || frameCanvas.height
-          if (frameCanvas.width !== cw) frameCanvas.width = cw
-          if (frameCanvas.height !== ch) frameCanvas.height = ch
-          ctx.clearRect(0, 0, cw, ch)
-          // object-contain: imagem inteira visível.
-          const scale = Math.min(cw / bitmap.width, ch / bitmap.height)
-          const dw = bitmap.width * scale
-          const dh = bitmap.height * scale
-          ctx.drawImage(bitmap, (cw - dw) / 2, (ch - dh) / 2, dw, dh)
-          frameDimsRef.current = { w: bitmap.width, h: bitmap.height }
+          drawToCanvas(bitmap)
           bitmap.close()
-          setReady(true)
-          setError(null)
-          drawBoxes()
           return
         }
       } catch {
         // fallback
       }
-      const img = new Image()
-      const url = URL.createObjectURL(blob)
-      img.onload = () => {
-        try {
-          if (cancelled) return
-          const cw = frameCanvas.clientWidth || frameCanvas.width
-          const ch = frameCanvas.clientHeight || frameCanvas.height
-          if (frameCanvas.width !== cw) frameCanvas.width = cw
-          if (frameCanvas.height !== ch) frameCanvas.height = ch
-          ctx.clearRect(0, 0, cw, ch)
-          // object-contain: imagem inteira visível.
-          const scale = Math.min(cw / img.naturalWidth, ch / img.naturalHeight)
-          const dw = img.naturalWidth * scale
-          const dh = img.naturalHeight * scale
-          ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh)
-          frameDimsRef.current = { w: img.naturalWidth, h: img.naturalHeight }
-          setReady(true)
-          setError(null)
-          drawBoxes()
-        } catch {
-          // ignora frame inválido
-        } finally {
-          URL.revokeObjectURL(url)
-        }
-      }
-      img.onerror = () => {
-        URL.revokeObjectURL(url)
-      }
-      img.src = url
+      await drawFallback(frame)
     }
 
+    const drawNext = (frame: Uint8Array): void => {
+      if (cancelled) return
+      if (drawing) {
+        queued = frame
+        return
+      }
+      drawing = true
+      void drawFrame(frame).finally(() => {
+        drawing = false
+        if (queued && !cancelled) {
+          const q = queued
+          queued = null
+          drawNext(q)
+        }
+      })
+    }
+
+    // Fonte dos frames: parser em Web Worker (thread separada) quando
+    // disponível; senão o parser inline. O canvas nunca é transferido — se o
+    // worker falhar, o inline assume na hora.
+    const parser = createParserWorker({
+      onFrame: (frame) => {
+        if (cancelled) return
+        lastFrameRef.current = frame
+        drawNext(frame)
+      },
+      onError: () => {
+        if (cancelled) return
+        if (errorRef.current === null) {
+          errorRef.current = 'Perda de conexão com a câmera. Feche e reabra para reconectar.'
+          setError(errorRef.current)
+        }
+      },
+      onFps: () => {}
+    })
+    if (parser) {
+      parserWorkerRef.current = parser
+      parser.start(streamUrl)
+      // Fallback automático (mesma lógica do card): ack 'ready' ou inline.
+      let inlineStarted = false
+      const startInline = () => {
+        if (cancelled || inlineStarted) return
+        inlineStarted = true
+        createMjpegReader(
+          streamUrl,
+          {
+            onFrame: (frame) => {
+              if (cancelled) return
+              lastFrameRef.current = frame
+              drawNext(frame)
+            },
+            onError: () => {
+              if (cancelled) return
+              if (errorRef.current === null) {
+                errorRef.current = 'Perda de conexão com a câmera. Feche e reabra para reconectar.'
+                setError(errorRef.current)
+              }
+            }
+          },
+          ac.signal
+        )
+      }
+      const fallbackTimer = setTimeout(() => {
+        if (parser.isReady()) return
+        parser.dispose()
+        parserWorkerRef.current = null
+        startInline()
+      }, 500)
+      return () => {
+        clearTimeout(fallbackTimer)
+        cancelled = true
+        ac.abort()
+        ro?.disconnect()
+        parser.dispose()
+        parserWorkerRef.current = null
+      }
+    }
+
+    // Fallback direto (jsdom / Worker indisponível).
     createMjpegReader(
       streamUrl,
       {
-        onFrame: (blob) => {
+        onFrame: (frame) => {
           if (cancelled) return
-          draw(blob)
+          lastFrameRef.current = frame
+          drawNext(frame)
         },
         onError: () => {
           if (cancelled) return
-          setError('Perda de conexão com a câmera. Feche e reabra para reconectar.')
+          if (errorRef.current === null) {
+            errorRef.current = 'Perda de conexão com a câmera. Feche e reabra para reconectar.'
+            setError(errorRef.current)
+          }
         }
       },
       ac.signal
@@ -1678,6 +2464,7 @@ function ExpandedCameraModal({
     return () => {
       cancelled = true
       ac.abort()
+      ro?.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [camera, streamUrl])
@@ -1759,7 +2546,9 @@ function ExpandedCameraModal({
             ref={frameCanvasRef}
             className="absolute inset-0 w-full h-full"
           />
-          <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+
+          {/* Bounding boxes — SVG overlay with object-contain letterbox */}
+          <SvgBoxOverlay boxes={myDetections} frameDims={frameDimsRef.current} fit="contain" />
 
           {/* Shutter Flash Effect */}
           {flashing ? (
@@ -2993,9 +3782,59 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   })
   const [detections, setDetections] = useState<Record<string, Detection[]>>({})
 
-  const handleDetections = useCallback((cameraId: string, boxes: Detection[]) => {
-    setDetections((prev) => ({ ...prev, [cameraId]: boxes }))
+  // Smoothing temporal (anti-pisca): o YOLO é instável entre frames — um
+  // objeto perto do threshold pode sumir num frame e voltar no seguinte.
+  // Mantemos a última detecção por um curto intervalo (HOLD_MS) antes de
+  // apagá-la, então um frame vazio não faz o box piscar. Dois produtores
+  // (pump da página + monitor via vision_detections) escrevem aqui; o hold
+  // estabiliza ambos. Sem tracking real (Ids), é a forma barata e estável de
+  // suavizar boxes independentes.
+  // HOLD_MS DEVE ser MAIOR que o intervalo do ticker do monitor (~1000ms):
+  // o ticker emite a cada ~1s e frames vazios intercalados (objeto borderline
+  // de confiança) chegariam com now - prevTs >= HOLD_MS e LIMPARIAM os boxes
+  // antes do próximo frame com detecção — fazendo os quadrados sumirem.
+  const HOLD_MS = 1500
+  const detLastTs = useRef<Record<string, number>>({})
+  const detHoldRef = useRef<Record<string, Detection[]>>({})
+  // DIAG: throttle de logs de applyDetections (máx 1 por 2s por câmera)
+  const applyDiagTs = useRef<Record<string, number>>({})
+  // DIAG: throttle de log do SSE vision_detections
+  const sseDiagTs = useRef(0)
+
+  const applyDetections = useCallback((cameraId: string, boxes: Detection[]) => {
+    const now = Date.now()
+    const prevTs = detLastTs.current[cameraId] || 0
+    // DIAG: registrar toda chegada de detecção (fonte SSE/pump) para saber se
+    // o problema é "não chega" vs "chega mas não desenha".
+    if (cameraId && boxes.length >= 0) {
+      const diagKey = `diag:${cameraId}`
+      const last = applyDiagTs.current[diagKey] || 0
+      if (now - last >= 2000) {
+        applyDiagTs.current[diagKey] = now
+        console.log(
+          `[vision-diag][${cameraId}] applyDetections boxes=${boxes.length}${boxes.length > 0 ? ` ${boxes.map((b) => `${b.className}:${Math.round(b.confidence * 100)}%`).join(', ')}` : ''}`
+        )
+      }
+    }
+    if (boxes.length > 0) {
+      // Resultado novo (não vazio): atualiza imediatamente e rearma o hold.
+      detHoldRef.current[cameraId] = [...boxes]
+      detLastTs.current[cameraId] = now
+      setDetections((prev) => ({ ...prev, [cameraId]: [...boxes] }))
+    } else if (now - prevTs < HOLD_MS) {
+      // Frame vazio dentro do hold: mantém a última detecção visível.
+      const held = detHoldRef.current[cameraId]
+      if (held && held.length > 0) {
+        setDetections((prev) => ({ ...prev, [cameraId]: [...held] }))
+      }
+    } else {
+      // Fora do hold: apaga.
+      detHoldRef.current[cameraId] = []
+      setDetections((prev) => ({ ...prev, [cameraId]: [] }))
+    }
   }, [])
+
+  const handleDetections = applyDetections
   const [activeTab, setActiveTab] = useState<'cameras' | 'alerts' | 'gallery' | 'settings'>('cameras')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -3080,8 +3919,15 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     return []
   }, [])
 
-  // Silent poll — only updates camera/monitor data, no card reset or animation
+  // Silent poll — only updates camera/monitor data, no card reset or animation.
+  // Guarda de reentrância (M6): o poll dispara 4 comandos e roda no interval de
+  // 5s + no vision_status; sob carga um poll anterior ainda em voo faria outro
+  // poll empilhar comandos no worker. Se um poll está em andamento, o novo é
+  // pulado (o próximo ciclo cobre).
+  const pollInFlightRef = useRef(false)
   const poll = useCallback(async () => {
+    if (pollInFlightRef.current) return
+    pollInFlightRef.current = true
     try {
       const [camRes, statusRes, alertsRes, activeTriggersRes] = await Promise.all([
         command<{ cameras: CameraInfo[]; selectedCameras?: string[] | null }>('list_cameras'),
@@ -3147,6 +3993,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      pollInFlightRef.current = false
     }
   }, [])
 
@@ -3228,8 +4076,16 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       cameraId: string
       detections: Detection[]
     }>('vision_detections', (data: { cameraId: string; detections: Detection[] }) => {
+      // DIAG: o SSE vision_detections está chegando ao renderer?
+      const nowDiag = Date.now()
+      if (nowDiag - (sseDiagTs.current || 0) >= 2000) {
+        sseDiagTs.current = nowDiag
+        console.log(
+          `[vision-diag] SSE vision_detections camera=${data?.cameraId ?? '?'} boxes=${Array.isArray(data?.detections) ? data.detections.length : '?'}`
+        )
+      }
       if (data?.cameraId && Array.isArray(data.detections)) {
-        setDetections((prev) => ({ ...prev, [data.cameraId]: data.detections }))
+        applyDetections(data.cameraId, data.detections)
       }
     })
     const unsubStatus = sdk.events.subscribe('vision_status', () => {
@@ -3242,7 +4098,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       unsubDetections()
       unsubStatus()
     }
-  }, [poll])
+  }, [poll, applyDetections])
 
   const takeSnapshot = useCallback(
     async (cameraId: string) => {
@@ -3315,47 +4171,96 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
 
   // Applies the whole pending selection in one configure call: registers new
   // IP cameras and selects webcams/IPs together. Only called on confirm.
+  //
+  // Confirmação OTIMISTA: o modal fecha IMEDIATAMENTE ao confirmar e a
+  // persistência (configure) + ativação do monitor rodam em BACKGROUND. Sob
+  // carga (várias câmeras / reaquisição de webcam USB), o round-trip do
+  // configure no node-core pode ser lento — o usuário não deve ficar preso em
+  // "Adicionando...". A câmera já entra na grade otimisticamente e o status
+  // "Conectado" converge via poll (5s) / waitForWebcamOnline (background). Em
+  // caso de erro na persistência, um banner claro é exibido e o usuário pode
+  // reabrir o modal e tentar de novo.
   const confirmAddCameras = useCallback(
     async (webcamIds: string[], ipDrafts: Array<{ name: string; url: string }>) => {
       setBusy(true)
-      try {
-        const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string }> } }>(
-          'configure',
-          {}
-        )
-        const current = configRes.config || {}
-        const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
-        const existingIpIds = new Set(ipCamerasList.map((c) => c.id))
+      setIsModalOpen(false)
 
-        const newIpCameras: Array<{ id: string; name: string; url: string }> = []
-        for (const draft of ipDrafts) {
-          const id = `ip:${draft.url}`
-          if (existingIpIds.has(id)) continue
-          existingIpIds.add(id)
-          newIpCameras.push({ id, name: draft.name || 'Câmera IP', url: draft.url })
+      // 1) OTIMISTA — a câmera entra na grade AGORA, sem esperar o round-trip
+      //    do configure (que, sob carga com várias câmeras, pode demorar e
+      //    fazer o configure/list_cameras estourar o timeout). Assim a câmera
+      //    aparece imediatamente; a persistência roda em background e o status
+      //    "Conectado" converge via poll (5s).
+      const currentSelected = config.selectedCameras ?? []
+      const ipIds = ipDrafts.map((d) => `ip:${d.url}`)
+      const nextSelected = [...new Set([...currentSelected, ...webcamIds, ...ipIds])]
+
+      setConfig((prev) => {
+        const next = { ...prev, selectedCameras: nextSelected }
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
         }
+        return next
+      })
+      setCameras((prev) => {
+        const existing = new Set(prev.map((c) => c.id))
+        const toAdd = webcamIds
+          .filter((id) => !existing.has(id))
+          .map(
+            (id) =>
+              knownCamerasRef.current[id] ?? {
+                id,
+                name: id.replace(/^webcam:/, '') || 'Webcam',
+                source: 'webcam',
+                online: false,
+                monitors: 0
+              }
+          )
+        return toAdd.length ? [...prev, ...toAdd] : prev
+      })
 
-        const updatedIp = [...ipCamerasList, ...newIpCameras]
-        const toAdd = new Set<string>(webcamIds)
-        for (const cam of newIpCameras) toAdd.add(cam.id)
-        const currentSelected = config.selectedCameras ?? []
-        const nextSelected = [...new Set([...currentSelected, ...toAdd])]
+      // 2) Persistência em background; erros vão para o banner (não travam a UI).
+      void (async () => {
+        try {
+          const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string }> } }>(
+            'configure',
+            {}
+          )
+          const current = configRes.config || {}
+          const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
+          const existingIpIds = new Set(ipCamerasList.map((c) => c.id))
 
-        await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
-        setConfig((prev) => {
-          const next = { ...prev, selectedCameras: nextSelected }
-          if (typeof localStorage !== 'undefined') {
-            localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+          const newIpCameras: Array<{ id: string; name: string; url: string }> = []
+          for (const draft of ipDrafts) {
+            const id = `ip:${draft.url}`
+            if (existingIpIds.has(id)) continue
+            existingIpIds.add(id)
+            newIpCameras.push({ id, name: draft.name || 'Câmera IP', url: draft.url })
           }
-          return next
-        })
-        await refresh()
-        setIsModalOpen(false)
-      } catch (err) {
-        throw err instanceof Error ? err : new Error(String(err))
-      } finally {
-        setBusy(false)
-      }
+
+          const updatedIp = [...ipCamerasList, ...newIpCameras]
+          await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
+          void (async () => {
+            try {
+              // Refresh (atualiza a grade) em paralelo com a espera pelo status:
+              // a webcam recém-adicionada vira "Conectado" assim que o watch
+              // subir, sem esperar o poll de 5s (que sob carga demora).
+              const refreshP = refresh().catch(() => {})
+              if (webcamIds.length > 0) {
+                await waitForWebcamOnline(webcamIds, (cams) => {
+                  setCameras((prev) =>
+                    prev.map((c) => (c.id in cams ? { ...c, online: !!cams[c.id]?.online } : c))
+                  )
+                }).catch(() => {})
+              }
+              await refreshP
+            } catch {}
+          })()
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err))
+        } finally {
+          setBusy(false)
+        }
+      })()
     },
     [config.selectedCameras, refresh]
   )
@@ -3455,7 +4360,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         return next
       })
 
-      void command('configure', { selectedCameras: nextSelectedIds })
+      void command('configure', { selectedCameras: nextSelectedIds }).catch((err) => {
+        setError(err instanceof Error ? err.message : String(err))
+      })
 
       setDraggedIndex(null)
       setDragOverIndex(null)
@@ -3537,14 +4444,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         </button>
       </nav>
 
-      {error ? (
-        <div className="mb-4 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300 flex items-center justify-between">
-          <span>{error}</span>
-          <button className="text-xs underline text-red-400 hover:text-red-200" onClick={() => setError(null)}>
-            dispensar
-          </button>
-        </div>
-      ) : null}
+      {/* Avisos de erro são redirecionados silenciosamente para o console (logs do dev) */}
 
       {/* Tab: Cameras Grid */}
       {activeTab === 'cameras' ? (
@@ -3571,7 +4471,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 onDrop={handleDrop}
                 onDragEnd={handleDragEnd}
                 mode={config.trackingMode || 'balanced'}
-                hasMonitor={monitors.some((m) => m.cameraId === camera.id)}
+                hasMonitor={monitors.some((m) => m.cameraId === camera.id && !m.paused)}
+                suppressPump={expandedCamera?.id === camera.id}
               />
             ))}
             <AddCameraCard onClick={() => setIsModalOpen(true)} />
@@ -3665,8 +4566,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                         </button>
                         <button
                           onClick={async () => {
-                            await command('pause_monitoring', { monitorId: m.id })
-                            void refresh()
+                            try {
+                              await command('pause_monitoring', { monitorId: m.id })
+                              void refresh()
+                            } catch (err) {
+                              setError(err instanceof Error ? err.message : String(err))
+                            }
                           }}
                           className="text-xs font-medium text-amber-400 hover:text-amber-300 px-2.5 py-1 rounded-md hover:bg-amber-500/10 transition-all"
                         >
@@ -3674,8 +4579,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                         </button>
                         <button
                           onClick={async () => {
-                            await command('stop_monitoring', { monitorId: m.id })
-                            void refresh()
+                            try {
+                              await command('stop_monitoring', { monitorId: m.id })
+                              void refresh()
+                            } catch (err) {
+                              setError(err instanceof Error ? err.message : String(err))
+                            }
                           }}
                           title="Excluir monitoramento"
                           aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}
@@ -3716,8 +4625,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                           <div className="flex items-center gap-2 shrink-0">
                             <button
                               onClick={async () => {
-                                await command('resume_monitoring', { monitorId: m.id })
-                                void refresh()
+                                try {
+                                  await command('resume_monitoring', { monitorId: m.id })
+                                  void refresh()
+                                } catch (err) {
+                                  setError(err instanceof Error ? err.message : String(err))
+                                }
                               }}
                               className="text-xs font-medium text-emerald-400 hover:text-emerald-300 px-2.5 py-1 rounded-md hover:bg-emerald-500/10 transition-all"
                             >
@@ -3734,8 +4647,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                             </button>
                             <button
                               onClick={async () => {
-                                await command('stop_monitoring', { monitorId: m.id })
-                                void refresh()
+                                try {
+                                  await command('stop_monitoring', { monitorId: m.id })
+                                  void refresh()
+                                } catch (err) {
+                                  setError(err instanceof Error ? err.message : String(err))
+                                }
                               }}
                               title="Excluir monitoramento"
                               aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}

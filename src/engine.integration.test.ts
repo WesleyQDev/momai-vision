@@ -53,7 +53,9 @@ describe('CV engine (YOLO11n headless)', () => {
       }
     })
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('engine ready timeout')), 30000)
+      // O 'ready' só é enviado APÓS o load do WASM+modelo (ver src/engine.ts) —
+      // pode levar ~10-60s em máquinas lentas.
+      const timer = setTimeout(() => reject(new Error('engine ready timeout')), 90000)
       child.on('message', (msg: unknown) => {
         if ((msg as { type?: string }).type === 'ready') {
           clearTimeout(timer)
@@ -61,7 +63,7 @@ describe('CV engine (YOLO11n headless)', () => {
         }
       })
     })
-  }, 40000)
+  }, 120000)
 
   afterAll(() => {
     try {

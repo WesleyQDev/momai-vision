@@ -62,6 +62,18 @@ describe('inSchedule', () => {
     const noon = Date.parse('2026-08-05T12:00:00Z')
     expect(inSchedule({ start: '22:00', end: '06:00' }, noon)).toBe(false)
   })
+
+  it('returns false for invalid HH:MM formats instead of silently disabling the schedule', () => {
+    // Datas construídas em HORA LOCAL (new Date(y,m,d,h,min)) — o getHours()
+    // de inSchedule é local, um timestamp Z sofreria fuso no CI.
+    const noon = new Date(2026, 7, 5, 12, 0).getTime()
+    expect(inSchedule({ start: '25:00', end: '06:00' }, noon)).toBe(false)
+    expect(inSchedule({ start: '22:00', end: '9:00' }, noon)).toBe(false)
+    expect(inSchedule({ start: '22:00', end: '06:60' }, noon)).toBe(false)
+    expect(inSchedule({ start: '22:00', end: 'onze' }, noon)).toBe(false)
+    // Formatos válidos continuam funcionando.
+    expect(inSchedule({ start: '10:00', end: '14:00' }, noon)).toBe(true)
+  })
 })
 
 describe('evaluateMonitor — motion', () => {

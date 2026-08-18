@@ -118,11 +118,23 @@ process.on('message', async (msg: unknown) => {
   const message = msg as { type?: string; requestId?: string; payload?: Record<string, unknown> }
   if (message.type === 'execute') {
     const { requestId, payload } = message
+    const t0 = Date.now()
     try {
+      const isFramePump = payload?.toolName === 'frame_pump'
+      if (isFramePump) {
+        process.send?.({ type: 'log', message: `[vision-diag] frame_pump recebido id=${String(requestId)}` })
+      }
       const result = await runtimeModule.execute({
         ...(payload || {}),
         momai
       })
+      const dt = Date.now() - t0
+      if (isFramePump || dt > 1000) {
+        process.send?.({
+          type: 'log',
+          message: `[vision] execute ${String(payload?.toolName)} took ${dt}ms`
+        })
+      }
       process.send?.({ type: 'response', requestId, result })
     } catch (err) {
       process.send?.({
@@ -147,7 +159,5 @@ setInterval(() => {
 
 // Stop the CV engine subprocess when this worker exits.
 process.on('exit', () => {
-  try {
-    stopEngine()
-  } catch {}
+  try { stopEngine() } catch {}
 })

@@ -16,12 +16,11 @@ import path from 'node:path'
 import { encode } from 'jpeg-js'
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const hostDir = process.env.MOMAI_HOST_DIR || 'C:/Users/wesle/dev/momai/apps/momai'
+// NOTA: este teste é uma integração sandbox que só roda com o monorepo do host
+// presente; se precisar de um caminho do host, use a env MOMAI_HOST_DIR.
 const SKILL_ID = 'momai-vision-test'
 
-function makeFixtureJpeg(): string {
-  const width = 320
-  const height = 240
+function makeFixtureJpeg(width = 320, height = 240): string {
   const data = Buffer.alloc(width * height * 4)
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
@@ -45,6 +44,12 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   const events: Array<{ eventType: string; data: unknown }> = []
   const cameraPostLog: string[] = []
+  // Mock state: simulates the hidden host window starting to deliver frames
+  // for a webcam only after start-watch is called (matching the real contract).
+  let webcamWarm = false
+  const WEB_FRAME = makeFixtureJpeg()
+  // Frames are delivered as binary image/jpeg by the host mock.
+  const WEB_FRAME_BUF = Buffer.from(WEB_FRAME, 'base64')
 
   function spawnWorker(): Promise<void> {
     events.length = 0
@@ -97,6 +102,19 @@ describe('runtime.js as a persistent worker (host contract)', () => {
     })
   }
 
+  // Aguarda um evento do worker (ex.: vision_detections) aparecer no array
+  // `events`, com teto de tempo. O frame_pump responde IMEDIATAMENTE (cache ou
+  // grace), mas a detecção roda em background — o SSE chega quando ela
+  // completar (pode demorar no primeiro boot, com o engine carregando WASM).
+  async function waitForEvent(eventType: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (events.some((e) => e.eventType === eventType)) return true
+      await new Promise((r) => setTimeout(r, 250))
+    }
+    return events.some((e) => e.eventType === eventType)
+  }
+
   beforeAll(async () => {
     skillDir = mkdtempSync(path.join(tmpdir(), 'momai-vision-skill-'))
     dataDir = mkdtempSync(path.join(tmpdir(), 'momai-vision-data-'))
@@ -106,7 +124,7 @@ describe('runtime.js as a persistent worker (host contract)', () => {
     cpSync(path.join(root, 'dist', 'cv', 'engine.cjs'), path.join(skillDir, 'cv', 'engine.cjs'))
     cpSync(path.join(root, 'dist', 'cv', 'ort-wasm-simd-threaded.wasm'), path.join(skillDir, 'cv', 'ort-wasm-simd-threaded.wasm'))
     cpSync(path.join(root, 'dist', 'cv', 'ort-wasm-simd-threaded.mjs'), path.join(skillDir, 'cv', 'ort-wasm-simd-threaded.mjs'))
-    cpSync(path.join(root, 'dist', 'models', 'yolo11n.onnx'), path.join(skillDir, 'models', 'yolo11n.onnx'))
+    cpSync(path.join(root, 'dist', 'models', 'yolo11s.onnx'), path.join(skillDir, 'models', 'yolo11s.onnx'))
 
     // Minimal host API mock: one webcam, vision unavailable.
     mockApi = createServer((req, res) => {
@@ -118,8 +136,29 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       }
       if (url.startsWith('/media/camera/') && req.method === 'POST') {
         cameraPostLog.push(url)
+        // start-watch "warms" the mock device: from here on the frame endpoint
+        // serves a fresh JPEG, mimicking the real hidden window posting frames.
+        if (url.includes('/start-watch')) webcamWarm = true
+        if (url.includes('/stop-watch')) webcamWarm = false
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
+        return
+      }
+      // GET /media/camera/frame/:id — binary image/jpeg with fresh X-Frame-Ts.
+      // Before start-watch it 404s (no frame yet) — the "Sem sinal" case.
+      if (url.startsWith('/media/camera/frame/') && req.method === 'GET') {
+        if (webcamWarm) {
+          res.writeHead(200, {
+            'Content-Type': 'image/jpeg',
+            'Content-Length': String(WEB_FRAME_BUF.length),
+            'Cache-Control': 'no-store',
+            'X-Frame-Ts': String(Date.now())
+          })
+          res.end(WEB_FRAME_BUF)
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: 'no frame available' }))
+        }
         return
       }
       if (url === '/extensions/llm/vision') {
@@ -163,6 +202,29 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       rmSync(dataDir, { recursive: true, force: true })
     } catch {}
   })
+
+  it(
+    'accepts the first frame_pump immediately after ready while startup is still warming',
+    async () => {
+      // O worker persistente anuncia ready antes de o YOLO terminar de carregar.
+      // O primeiro card não pode ficar aguardando restore + warmup, pois a UI
+      // abandona o request após 8s e só voltaria a tentar ao remontar a aba.
+      const t0 = Date.now()
+      const result = (await execute({
+        toolName: 'frame_pump',
+        args: { cameraId: 'webcam:first-mount', jpegBase64: WEB_FRAME }
+      })) as { ok: boolean; detections?: unknown[] }
+      const elapsed = Date.now() - t0
+
+      expect(result.ok).toBe(true)
+      expect(Array.isArray(result.detections)).toBe(true)
+      // O limite de produção é 8s; 5s deixa margem para IPC e ainda falha no
+      // comportamento antigo, que esperava o restore (6s) antes do warmup.
+      expect(elapsed).toBeLessThan(5000)
+      expect(await waitForEvent('vision_detections', 120000)).toBe(true)
+    },
+    150000
+  )
 
   it(
     'starts and stops monitoring via tool calls, surviving tool calls',
@@ -394,10 +456,113 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       })) as { ok: boolean; detections?: unknown[]; error?: string }
       expect(result.ok).toBe(true)
       expect(Array.isArray(result.detections)).toBe(true)
-      const detectionEvent = events.find((e) => e.eventType === 'vision_detections')
-      expect(detectionEvent).toBeTruthy()
+      // O frame_pump respondeu imediato/grace (nunca espera o engine); o SSE
+      // vision_detections chega quando a detecção em background completar — no
+      // primeiro boot o engine ainda pode estar carregando o WASM (10-60s).
+      expect(await waitForEvent('vision_detections', 120000)).toBe(true)
+    },
+    150000
+  )
+
+  it(
+    'frame_pump with cache responds immediately (never awaits the engine), even with an idle slot',
+    async () => {
+      // Primeiro pump da câmera: aquece o cache (realmente roda o YOLO).
+      const first = (await execute({
+        toolName: 'frame_pump',
+        args: { cameraId: 'webcam:busy', jpegBase64: makeFixtureJpeg(1280, 720) }
+      })) as { ok: boolean; detections?: unknown[] }
+      expect(first.ok).toBe(true)
+      expect(Array.isArray(first.detections)).toBe(true)
+      expect(await waitForEvent('vision_detections', 60000)).toBe(true)
+
+      // Dispara pumps CONCORRENTES para a MESMA câmera: o cache já existe, então
+      // TODOS respondem imediatamente com o último resultado — mesmo que o slot
+      // esteja livre e o mutex global esteja ocupado por outra câmera (RTSP/
+      // FFmpeg). Nunca ficam presos esperando o YOLO (era a causa do timeout de
+      // 8s no pump do card, que deixava os quadrados sumirem até trocar de aba).
+      const t0 = Date.now()
+      const results = await Promise.all(
+        [1, 2, 3, 4].map(() =>
+          execute({
+            toolName: 'frame_pump',
+            args: { cameraId: 'webcam:busy', jpegBase64: makeFixtureJpeg(1280, 720) }
+          })
+        )
+      )
+      const elapsed = Date.now() - t0
+      for (const r of results) {
+        expect((r as { ok?: boolean }).ok).toBe(true)
+        expect(Array.isArray((r as { detections?: unknown[] }).detections)).toBe(true)
+      }
+      // Com cache, a resposta é instantânea (sem round-trip ao engine). Sem a
+      // correção, ao menos um pump aguardava a detecção em fila — podendo
+      // estourar os 8s. Folga para IPC em máquinas lentas.
+      expect(elapsed).toBeLessThan(1000)
     },
     120000
+  )
+
+  it(
+    'frame_pump without cache never blocks beyond the first-frame grace even with a busy global mutex',
+    async () => {
+      // Ocupa o mutex GLOBAL com detecções grandes de VÁRIAS câmeras diferentes
+      // (cada uma serializa no engine). Não aguarda: dispara e segue.
+      const big = makeFixtureJpeg(1920, 1080)
+      const holders = ['hold-a', 'hold-b', 'hold-c', 'hold-d', 'hold-e'].map((id) =>
+        execute({ toolName: 'frame_pump', args: { cameraId: `webcam:${id}`, jpegBase64: big } })
+      )
+
+      // Nova câmera SEM cache: o slot dela está livre, mas o mutex global está
+      // ocupado pelas detecções acima. Com a correção, o frame_pump responde em
+      // até FRAME_PUMP_FIRST_GRACE_MS (~2.5s) com [] (primeiro frame desenha o
+      // vídeo sem boxes); sem a correção, aguardava a fila do mutex e podia
+      // estourar o timeout de 8s do pump do card.
+      const t0 = Date.now()
+      const res = (await execute({
+        toolName: 'frame_pump',
+        args: { cameraId: 'webcam:novacache', jpegBase64: makeFixtureJpeg(320, 240) }
+      })) as { ok?: boolean; detections?: unknown[] }
+      const elapsed = Date.now() - t0
+      expect(res.ok).toBe(true)
+      expect(Array.isArray(res.detections)).toBe(true)
+      // Bem abaixo dos 8s do pump (grace 2.5s + folga de IPC).
+      expect(elapsed).toBeLessThan(6000)
+
+      await Promise.all(holders)
+    },
+    120000
+  )
+
+  it(
+    'reports the webcam online (Conectado) once the host delivers frames (mock)',
+    async () => {
+      // Isola a lógica da extensão do hardware: o mock simula a janela oculta
+      // do host — start-watch "aquece" o device e o endpoint de frame passa a
+      // entregar JPEG fresco. Se a extensão virar online aqui, o "Sem sinal"
+      // real é do getUserMedia do host, não da extensão.
+      await execute({ toolName: 'configure', args: { selectedCameras: ['webcam:test-cam'] } })
+      const warm = (await execute({
+        toolName: 'warm_webcam',
+        args: { cameraId: 'webcam:test-cam' }
+      })) as { ok: boolean; error?: string }
+      expect(warm.ok).toBe(true)
+      // Give the fire-and-forget start-watch a moment to hit the mock.
+      await new Promise((r) => setTimeout(r, 400))
+      expect(webcamWarm).toBe(true)
+
+      const status = (await execute({ toolName: 'get_status', args: {} })) as {
+        cameras?: Record<string, { online?: boolean }>
+      }
+      expect(status.cameras?.['webcam:test-cam']?.online).toBe(true)
+
+      // list_cameras also reflects online via getStatusData.
+      const list = (await execute({ toolName: 'list_cameras', args: {} })) as {
+        cameras?: Array<{ id: string; online?: boolean }>
+      }
+      expect(list.cameras?.find((c) => c.id === 'webcam:test-cam')?.online).toBe(true)
+    },
+    60000
   )
 
   it(

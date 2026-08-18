@@ -5,9 +5,10 @@
  * overlay window (open_overlay) and chat cards (structuredResponse).
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
 import { ptLabel, triggerLabel } from './vision/labels'
+import { classColor } from './vision/theme-color'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
@@ -37,17 +38,11 @@ interface AlertData {
   onClose?: () => void
 }
 
-const CLASS_COLORS = [
-  '#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899',
-  '#14b8a6', '#f97316', '#84cc16', '#06b6d4'
-]
-
-function classColor(className: string): string {
-  let hash = 0
-  for (const ch of className) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
-  return CLASS_COLORS[hash % CLASS_COLORS.length]
-}
-
+/**
+ * SVG-based bounding box overlay for alert snapshots.
+ * Replaces the old Canvas 2D approach — React handles the redraw
+ * automatically when `boxes` changes.
+ */
 export function AlertCanvasOverlay({
   imageDataUri,
   boxes,
@@ -60,78 +55,23 @@ export function AlertCanvasOverlay({
   className?: string
 }): JSX.Element {
   const containerRef = useRef<HTMLDivElement | null>(null)
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
-
-  const draw = useCallback(() => {
-    const container = containerRef.current
-    const canvas = canvasRef.current
-    const img = imgRef.current
-    if (!container || !canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const cw = container.clientWidth || container.offsetWidth
-    const ch = container.clientHeight || container.offsetHeight
-    if (!cw || !ch) return
-
-    canvas.width = cw
-    canvas.height = ch
-    ctx.clearRect(0, 0, cw, ch)
-
-    if (!boxes || boxes.length === 0) return
-
-    const iw = img?.naturalWidth || 0
-    const ih = img?.naturalHeight || 0
-
-    let ox = 0
-    let oy = 0
-    let dw = cw
-    let dh = ch
-
-    if (iw && ih) {
-      if (objectFit === 'object-contain') {
-        const scale = Math.min(cw / iw, ch / ih)
-        dw = iw * scale
-        dh = ih * scale
-        ox = (cw - dw) / 2
-        oy = (ch - dh) / 2
-      } else {
-        const scale = Math.max(cw / iw, ch / ih)
-        dw = iw * scale
-        dh = ih * scale
-        ox = (cw - dw) / 2
-        oy = (ch - dh) / 2
-      }
-    }
-
-    for (const box of boxes) {
-      const x1 = ox + box.x1 * dw
-      const y1 = oy + box.y1 * dh
-      const x2 = ox + box.x2 * dw
-      const y2 = oy + box.y2 * dh
-      const color = classColor(box.className)
-      ctx.strokeStyle = color
-      ctx.lineWidth = 2
-      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
-      ctx.fillStyle = color
-      ctx.fillRect(x1, Math.max(0, y1 - 20), Math.min(cw - x1, x2 - x1), 18)
-      ctx.fillStyle = '#0a0a0a'
-      ctx.font = 'bold 12px sans-serif'
-      ctx.fillText(
-        `${ptLabel(box.className)} ${Math.round(box.confidence * 100)}%`,
-        x1 + 4,
-        Math.max(0, y1 - 6)
-      )
-    }
-  }, [boxes, objectFit])
+  const [frameDims, setFrameDims] = useState<{ w: number; h: number } | null>(null)
 
   useEffect(() => {
-    draw()
-    const handleResize = () => draw()
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
-  }, [draw])
+    const img = imgRef.current
+    if (!img) return
+    const onLoad = () => {
+      if (img.naturalWidth && img.naturalHeight) {
+        setFrameDims({ w: img.naturalWidth, h: img.naturalHeight })
+      }
+    }
+    if (img.complete && img.naturalWidth) onLoad()
+    img.addEventListener('load', onLoad)
+    return () => img.removeEventListener('load', onLoad)
+  }, [imageDataUri])
+
+  const isContain = objectFit === 'object-contain'
 
   return (
     <div ref={containerRef} className={`relative w-full h-full bg-black overflow-hidden ${className}`}>
@@ -140,11 +80,42 @@ export function AlertCanvasOverlay({
           ref={imgRef}
           src={imageDataUri}
           alt="Snapshot"
-          onLoad={draw}
           className={`absolute inset-0 w-full h-full ${objectFit}`}
         />
       ) : null}
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none z-10" />
+      {boxes && boxes.length > 0 ? (
+        <svg
+          className="absolute inset-0 w-full h-full pointer-events-none z-10"
+          viewBox={isContain && frameDims ? `0 0 ${frameDims.w} ${frameDims.h}` : undefined}
+          preserveAspectRatio={isContain ? 'xMidYMid meet' : undefined}
+        >
+          {boxes.map((box, i) => {
+            const color = classColor(box.className)
+            const x1 = box.x1 * 100
+            const y1 = box.y1 * 100
+            const w = (box.x2 - box.x1) * 100
+            const h = (box.y2 - box.y1) * 100
+            return (
+              <g key={`${box.className}-${i}`}>
+                <rect
+                  x={`${x1}%`} y={`${y1}%`} width={`${w}%`} height={`${h}%`}
+                  stroke={color} strokeWidth="2" fill="none"
+                />
+                <rect
+                  x={`${x1}%`} y={`${Math.max(0, y1 - 3)}%`} width={`${w}%`} height="3%"
+                  fill={color}
+                />
+                <text
+                  x={`${x1 + 0.5}%`} y={`${Math.max(1.5, y1 - 0.5)}%`}
+                  fill="#0a0a0a" fontSize="12" fontFamily="sans-serif" fontWeight="bold"
+                >
+                  {ptLabel(box.className)} {Math.round(box.confidence * 100)}%
+                </text>
+              </g>
+            )
+          })}
+        </svg>
+      ) : null}
     </div>
   )
 }

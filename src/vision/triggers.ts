@@ -111,6 +111,10 @@ export function inSchedule(schedule: Schedule | undefined, now: number): boolean
     return false
   }
   if (schedule.start && schedule.end) {
+    // Formato HH:MM — horário inválido não pode "derrubar" o schedule inteiro
+    // (start/end ruins fariam o monitor nunca disparar, em silêncio).
+    const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/
+    if (!HHMM.test(schedule.start) || !HHMM.test(schedule.end)) return false
     const minutes = date.getHours() * 60 + date.getMinutes()
     const [sh, sm] = schedule.start.split(':').map(Number)
     const [eh, em] = schedule.end.split(':').map(Number)
@@ -206,9 +210,9 @@ export function evaluateMonitor(
 
     if (trigger.type === 'object') {
       const className = trigger.className || 'person'
-      // Default 0.25: mesmo limite do engine YOLO, para que toda detecção
+      // Default 0.20: mesmo limite do engine YOLO, para que toda detecção
       // visível na página (frame_pump) também possa disparar o monitor.
-      const minConf = trigger.minConfidence ?? 0.25
+      const minConf = trigger.minConfidence ?? 0.20
       const found = findDetections(ctx.detections, className, minConf).length > 0
       const wantPresent = trigger.present !== false
       if (found === wantPresent && !inCooldown(state, monitor, now)) {
@@ -229,9 +233,9 @@ export function evaluateMonitor(
 
     if (trigger.type === 'presence' || trigger.type === 'absence') {
       const className = trigger.className || 'person'
-      // Mesmo limite do engine YOLO (0.25): detecções visíveis na página
+      // Mesmo limite do engine YOLO (0.20): detecções visíveis na página
       // também contam para presença/ausência.
-      const minConf = 0.25
+      const minConf = 0.20
       const key = presenceKey(className)
       const present = findDetections(ctx.detections, className, minConf).length > 0
       const entry = state.presence[key] || { present: false, since: now, lastSeen: now }

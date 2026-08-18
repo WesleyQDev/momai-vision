@@ -18,15 +18,15 @@ import path from 'node:path'
 import fs from 'node:fs'
 
 const ENGINE_DIR = __dirname
-const MODEL_PATH = path.join(ENGINE_DIR, '..', 'models', 'yolo11n.onnx')
+const MODEL_PATH = path.join(ENGINE_DIR, '..', 'models', 'yolo11s.onnx')
 const WASM_PATH = path.join(ENGINE_DIR, 'ort-wasm-simd-threaded.wasm')
 
-// Entrada reduzida (320x320 em vez de 640x640): a inferência YOLO roda na CPU
-// (WASM, sem acesso a GPU no sidecar Node). Reduzir a entrada deixa o YOLO
-// ~4x mais rápido com queda pequena de precisão para vigilância (as caixas são
-// normalizadas em 0..1, então a UI desenha igual).
-const INPUT_W = 320
-const INPUT_H = 320
+// Entrada 640x640 (resolução padrão do YOLO11s): maximiza detecção de
+// objetos pequenos/distantes (câmeras IP com campo amplo). YOLO11s tem
+// 9.5M parâmetros (vs 2.6M do nano), ~2-3x mais lento mas muito melhor
+// para objetos pequenos (~16px). Custo: ~300-600ms em CPU WASM.
+const INPUT_W = 640
+const INPUT_H = 640
 
 const COCO_CLASSES = [
   'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
@@ -44,13 +44,23 @@ const COCO_CLASSES = [
 let session: ort.InferenceSession | null = null
 let sessionPromise: Promise<ort.InferenceSession> | null = null
 
+// Single-threaded WASM. Com 640x640 e YOLO11s (9.5M params), a inferência
+// leva ~300-600ms por frame. Para 1-2 câmeras com pump a 1s é aceitável.
+// Multithreading adiciona custo de sincronização sem ganho significativo.
+const NUM_THREADS = 1
+
 function ensureSession(): Promise<ort.InferenceSession> {
   if (session) return Promise.resolve(session)
   if (!sessionPromise) {
-    ort.env.wasm.numThreads = 1
+    ort.env.wasm.numThreads = NUM_THREADS
     ort.env.wasm.wasmBinary = fs.readFileSync(WASM_PATH)
-    sessionPromise = ort.InferenceSession.create(fs.readFileSync(MODEL_PATH), {
-      executionProviders: ['wasm']
+    const create = () =>
+      ort.InferenceSession.create(fs.readFileSync(MODEL_PATH), {
+        executionProviders: ['wasm']
+      })
+    sessionPromise = create().catch((err: unknown) => {
+      console.error(`[engine] WASM init failed (${String(err)})`)
+      throw err
     }).then((s) => {
       session = s
       return s
@@ -154,7 +164,7 @@ function parseOutput(
       classId: bestClass
     })
   }
-  return nms(boxes, 0.45)
+  return nms(boxes, 0.7)
 }
 
 async function detect(pixels: Uint8Array, width: number, height: number, confThreshold: number) {
@@ -180,7 +190,10 @@ async function detect(pixels: Uint8Array, width: number, height: number, confThr
 }
 
 function decodeJpeg(jpegBase64: string): { pixels: Buffer; width: number; height: number } {
-  const jpeg = Buffer.from(jpegBase64, 'base64')
+  const cleanBase64 = typeof jpegBase64 === 'string' && jpegBase64.includes(',')
+    ? jpegBase64.split(',')[1]
+    : jpegBase64
+  const jpeg = Buffer.from(cleanBase64, 'base64')
   const raw = decode(new Uint8Array(jpeg.buffer, jpeg.byteOffset, jpeg.byteLength), { useTArray: true, maxMemoryUsageInMB: 256 })
   return { pixels: Buffer.from(raw.data), width: raw.width, height: raw.height }
 }
@@ -188,13 +201,36 @@ function decodeJpeg(jpegBase64: string): { pixels: Buffer; width: number; height
 process.on('message', async (msg: unknown) => {
   if (!msg || typeof msg !== 'object') return
   const message = msg as { type?: string; id?: string }
+  if (message.type === 'warmup') {
+    // Pré-carrega o session YOLO (WASM 13MB + ONNX 10MB via readFileSync
+    // síncrono, que BLOQUEIA o event loop por ~10-60s na primeira vez). O
+    // runtime chama isso no boot do worker, ANTES do primeiro frame_pump,
+    // para que a detecção não espere a carga no meio do uso.
+    try {
+      await ensureSession()
+      process.send?.({ type: 'warmup-result', ok: true })
+    } catch (err) {
+      process.send?.({ type: 'warmup-result', ok: false, error: err instanceof Error ? err.message : String(err) })
+    }
+    return
+  }
   if (message.type === 'detect') {
     const m = message as { type: 'detect'; id: string; jpegBase64: string; confThreshold?: number }
     const id = m.id
     try {
       const { pixels, width, height } = decodeJpeg(m.jpegBase64)
       const t0 = Date.now()
-      const boxes = await detect(pixels, width, height, Number(m.confThreshold) || 0.25)
+      // Timeout de segurança: se o WASM trava (CPU contended, bug interno),
+      // o child nunca responderia e o runtime manteria o mesmo child para
+      // sempre (só respawna em exit/error). Com o watchdog, o processo morre
+      // e o runtime pode respawná-lo. 30s é generoso (inferência típica = 77ms)
+      // mas seguro para máquinas carregadas (3 câmeras + ffmpeg + WASM).
+      const DETECT_TIMEOUT_MS = 30_000
+      const detectPromise = detect(pixels, width, height, Number(m.confThreshold) || 0.20)
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('CV engine detect timed out (watchdog)')), DETECT_TIMEOUT_MS)
+      })
+      const boxes = await Promise.race([detectPromise, timeoutPromise])
       process.send?.({ type: 'detect-result', id, boxes, ms: Date.now() - t0 })
     } catch (err) {
       process.send?.({ type: 'detect-result', id, error: err instanceof Error ? err.message : String(err) })
@@ -212,4 +248,26 @@ process.on('disconnect', () => {
   process.exit(0)
 })
 
-process.send?.({ type: 'ready' })
+// Notifica o worker runtime que o processo engine está ativo. O 'ready' é
+// enviado SOMENTE após ensureSession() carregar o WASM (~13MB) + modelo ONNX
+// (~10MB) via readFileSync síncrono (que BLOQUEIA o event loop por ~10-60s).
+// Antes o ack era precoce (top-level do módulo): o runtime enviava 'detect'
+// para um child ainda carregando, o IPC ficava enfileirado e o primeiro
+// frame_pump dava timeout (era a causa dos boxes só aparecerem "depois de
+// muito tempo"). Mensagens de detect/warmup que chegarem durante o load ficam
+// na fila do event loop e são processadas assim que o load termina —
+// ensureSession() guarda o sessionPromise, então elas esperam a session.
+ensureSession()
+  .then(() => {
+    if (typeof process.send === 'function') {
+      process.send({ type: 'ready' })
+    }
+  })
+  .catch((err: unknown) => {
+    console.error(`[engine] init failed: ${err instanceof Error ? err.message : String(err)}`)
+    if (typeof process.send === 'function') {
+      process.send({ type: 'error', error: err instanceof Error ? err.message : String(err) })
+    }
+    // Derruba com código 1 para o runtime reaproveitar/restartar o child.
+    setTimeout(() => process.exit(1), 100)
+  })
