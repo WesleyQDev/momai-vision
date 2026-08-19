@@ -109,6 +109,31 @@ beforeEach(() => {
 })
 
 describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => {
+  it('renderiza o dropdown de webcams via portal no body (não é cortado pelo card do modal)', async () => {
+    setupServer({ cameras: [WEB_A, WEB_B] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    await screen.findByText('Selecione uma webcam...')
+
+    fireEvent.click(screen.getByText('Selecione uma webcam...'))
+
+    // O popover (lista de opções) deve viver direto no document.body — fora do
+    // modal com overflow-y-auto — para nunca ser limitado/cortado pelo card.
+    // ("Webcam A" também existe no card do grid, então filtramos pelo role).
+    const options = await screen.findAllByRole('option')
+    expect(options).toHaveLength(2)
+    const optionWebcamB = options.find((o) => o.textContent?.includes('Webcam B'))!
+    const optionWebcamA = options.find((o) => o.textContent?.includes('Webcam A'))!
+
+    expect(document.body.contains(optionWebcamB)).toBe(true)
+    // O pai imediato do botão de opção é o popover, que é filho direto do body.
+    const popover = optionWebcamB.parentElement
+    expect(popover).toBeTruthy()
+    expect(popover!.parentElement).toBe(document.body)
+    expect(optionWebcamA.parentElement).toBe(popover)
+  })
+
   it('bloqueia confirmar sem seleção e cancelar/fechar não adiciona nada', async () => {
     const { calls } = setupServer({ cameras: [WEB_A, WEB_B] })
     render(<VisionPage />)

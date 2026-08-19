@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { getSDK } from 'momai:sdk'
 import { ptLabel, PT_CLASS, triggerLabel } from './vision/labels'
 import { AlertCanvasOverlay } from './panel'
@@ -646,37 +647,68 @@ function CustomSelect<T extends string = string>({
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ top: number; left: number; width: number; maxH: number } | null>(null)
+
+  const close = useCallback(() => setOpen(false), [])
+
+  // Posiciona o popover via portal no body, calculado pela posição real do
+  // trigger na viewport. Isso escapa de qualquer clipping por overflow dos
+  // ancestrais (ex.: o modal de adicionar câmeras tem overflow-y-auto e
+  // cortava a lista de webcams na borda do card).
+  const openWithPosition = useCallback(() => {
+    const el = ref.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    const gap = 6
+    const vh = window.innerHeight || document.documentElement.clientHeight || 0
+    const maxBelow = vh - rect.bottom - gap
+    const maxAbove = rect.top - gap
+    const maxH = Math.max(96, Math.min(224, direction === 'up' ? maxAbove : maxBelow))
+    // Abre para cima quando o espaço abaixo não comporta a lista.
+    const openUp = direction === 'up' ? maxAbove >= maxH : maxBelow < maxH && maxAbove >= maxH
+    if (openUp) {
+      setPos({ top: rect.top - maxH - gap, left: rect.left, width: rect.width, maxH })
+    } else {
+      setPos({ top: rect.bottom + gap, left: rect.left, width: rect.width, maxH })
+    }
+    setOpen(true)
+  }, [direction])
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false)
-      }
+      const t = e.target as Node
+      const insideTrigger = ref.current?.contains(t)
+      const insidePopover = popoverRef.current?.contains(t)
+      if (!insideTrigger && !insidePopover) close()
     }
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') close()
     }
+    // Fecha ao rolar/redimensionar para nunca exibir o dropdown desalinhado
+    // (a posição fixed não acompanha o scroll do modal).
+    const handleScroll = () => close()
     if (open) {
       document.addEventListener('mousedown', handleClickOutside)
       document.addEventListener('keydown', handleKeyDown)
+      window.addEventListener('scroll', handleScroll, true)
+      window.addEventListener('resize', handleScroll)
     }
     return () => {
       document.removeEventListener('mousedown', handleClickOutside)
       document.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('scroll', handleScroll, true)
+      window.removeEventListener('resize', handleScroll)
     }
-  }, [open])
+  }, [open, close])
 
   const selectedOption = options.find((o) => o.value === value)
-
-  const popoverPositionClass = direction === 'up'
-    ? 'bottom-full mb-1.5'
-    : 'top-full mt-1.5'
 
   return (
     <div className={`relative inline-block text-left ${open ? 'z-40' : 'z-10'} ${className}`} ref={ref}>
       <button
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={() => (open ? close() : openWithPosition())}
         className={`w-full flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-zinc-900/90 text-gray-200 hover:bg-white/10 hover:border-white/20 transition-all font-medium select-none shadow-md backdrop-blur-md active:scale-[0.99] ${size === 'sm' ? 'px-2.5 py-1.5 text-[11px]' : 'px-3.5 py-2.5 text-xs'
           }`}
       >
@@ -695,8 +727,13 @@ function CustomSelect<T extends string = string>({
         </svg>
       </button>
 
-      {open && (
-        <div className={`absolute left-0 right-0 z-50 rounded-xl border border-white/15 bg-zinc-900/95 backdrop-blur-xl shadow-2xl overflow-hidden py-1 animate-fadeIn max-h-56 overflow-y-auto ${popoverPositionClass}`}>
+      {open && pos && createPortal(
+        <div
+          ref={popoverRef}
+          role="listbox"
+          style={{ top: pos.top, left: pos.left, width: pos.width, maxHeight: pos.maxH }}
+          className="fixed z-[100] rounded-xl border border-white/15 bg-zinc-900/95 backdrop-blur-xl shadow-2xl overflow-y-auto py-1 animate-fadeIn"
+        >
           {options.map((opt) => {
             const isSelected = opt.value === value
             const isDisabled = !!opt.disabled
@@ -704,11 +741,13 @@ function CustomSelect<T extends string = string>({
               <button
                 key={opt.value}
                 type="button"
+                role="option"
+                aria-selected={isSelected}
                 disabled={isDisabled}
                 onClick={() => {
                   if (isDisabled) return
                   onChange(opt.value)
-                  setOpen(false)
+                  close()
                 }}
                 className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-xs transition-colors ${isDisabled
                   ? 'opacity-40 cursor-not-allowed text-gray-500 bg-transparent'
@@ -734,7 +773,8 @@ function CustomSelect<T extends string = string>({
               </button>
             )
           })}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   )
