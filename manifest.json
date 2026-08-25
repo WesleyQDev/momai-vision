@@ -19,12 +19,45 @@
   "eventTypes": {
     "vision_alert": {
       "label": "Alerta de Detecção da Câmera",
+      "priority": 100,
       "fields": {
-        "monitorId": { "label": "ID do Monitoramento", "type": "string" },
-        "cameraName": { "label": "Câmera", "type": "string" },
-        "monitorLabel": { "label": "Monitor", "type": "string" },
-        "triggeredBy": { "label": "Gatilho", "type": "string" },
-        "className": { "label": "Objeto", "type": "string" },
+        "cameraName": {
+          "label": "Câmera Monitorada",
+          "type": "string",
+          "description": "Câmera que gerou o alerta",
+          "x-options-source": { "tool": "list_cameras" }
+        },
+        "className": {
+          "label": "Objeto / Detecção Alvo",
+          "type": "string",
+          "description": "Dispara quando este objeto for detectado",
+          "enum": [
+            { "label": "👤 Pessoa (person)", "value": "person" },
+            { "label": "🚗 Carro (car)", "value": "car" },
+            { "label": "🏍️ Moto (motorcycle)", "value": "motorcycle" },
+            { "label": "🚲 Bicicleta (bicycle)", "value": "bicycle" },
+            { "label": "🚌 Ônibus (bus)", "value": "bus" },
+            { "label": "🚚 Caminhão (truck)", "value": "truck" },
+            { "label": "🐱 Gato (cat)", "value": "cat" },
+            { "label": "🐶 Cachorro (dog)", "value": "dog" },
+            { "label": "🎒 Mochila (backpack)", "value": "backpack" },
+            { "label": "📦 Pacote / Caixa", "value": "package" },
+            { "label": "📱 Celular (cell phone)", "value": "cell phone" },
+            { "label": "💻 Notebook (laptop)", "value": "laptop" }
+          ]
+        },
+        "triggeredBy": {
+          "label": "Tipo de Disparo",
+          "type": "string",
+          "description": "Modo de detecção que disparou o evento",
+          "enum": [
+            { "label": "Qualquer Movimento / Objeto", "value": "" },
+            { "label": "Movimento", "value": "motion" },
+            { "label": "Objeto Detectado", "value": "object" },
+            { "label": "Entrada / Presença", "value": "presence" },
+            { "label": "Saída / Ausência", "value": "absence" }
+          ]
+        },
         "description": { "label": "Descrição", "type": "string" },
         "ts": { "label": "Horário", "type": "number" },
         "imageDataUri": { "label": "Imagem", "type": "image" }

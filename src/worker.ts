@@ -120,16 +120,12 @@ process.on('message', async (msg: unknown) => {
     const { requestId, payload } = message
     const t0 = Date.now()
     try {
-      const isFramePump = payload?.toolName === 'frame_pump'
-      if (isFramePump) {
-        process.send?.({ type: 'log', message: `[vision-diag] frame_pump recebido id=${String(requestId)}` })
-      }
       const result = await runtimeModule.execute({
         ...(payload || {}),
         momai
       })
       const dt = Date.now() - t0
-      if (isFramePump || dt > 1000) {
+      if (dt > 1000) {
         process.send?.({
           type: 'log',
           message: `[vision] execute ${String(payload?.toolName)} took ${dt}ms`

@@ -44,7 +44,7 @@ interface WorkerScope {
 
 const scope = self as unknown as WorkerScope
 
-const MAX_EMIT_INTERVAL = 42 // ~24fps (teto, não piso)
+const MAX_EMIT_INTERVAL = 32 // ~30fps (teto para suavidade)
 const BOUNDARY = new TextEncoder().encode('--frame\r\n')
 const HEADER_END = new TextEncoder().encode('\r\n\r\n')
 const DECODER = new TextDecoder('latin1')

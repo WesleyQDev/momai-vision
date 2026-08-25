@@ -27,6 +27,15 @@ export class LatestWinsQueue {
     return this.busy
   }
 
+  pendingCount(): number {
+    return (this.busy ? 1 : 0) + (this.pending !== null ? 1 : 0)
+  }
+
+  droppedCount(): number {
+    // frames that were overwritten by latest-wins (waiters share one result)
+    return Math.max(0, this.waiters.length - 1)
+  }
+
   /**
    * Resolve quando o dreno terminar (busy = false e sem frame pendente).
    * Útil para testes / shutdown aguardarem a fila esvaziar.

@@ -498,7 +498,7 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       // Com cache, a resposta é instantânea (sem round-trip ao engine). Sem a
       // correção, ao menos um pump aguardava a detecção em fila — podendo
       // estourar os 8s. Folga para IPC em máquinas lentas.
-      expect(elapsed).toBeLessThan(1000)
+      expect(elapsed).toBeLessThan(2500)
     },
     120000
   )

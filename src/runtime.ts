@@ -281,17 +281,29 @@ const ipInFlight = new Map<string, number>()
 
 function pushIpFrameToHost(cameraId: string, frameData: Buffer | string): void {
   const current = ipInFlight.get(cameraId) || 0
-  if (current >= 2) return // descarta frame se pipeline estiver com 2 requisições em voo para manter tempo real
+  if (current >= 2) {
+    metricFor(cameraId).framesDropped++
+    metricFor(cameraId).pushDropped++
+    return // descarta frame se pipeline estiver com 2 requisições em voo para manter tempo real
+  }
   ipInFlight.set(cameraId, current + 1)
 
   const buf = Buffer.isBuffer(frameData) ? frameData : Buffer.from(frameData, 'base64')
+  // Timeout curto: o push é fire-and-forget para o preview (não bloqueia o parse
+  // do MJPEG). Sem timeout, um node-core ocupado pelo YOLO segurava o fetch
+  // por até 30s e mantinha `ipInFlight` alto, descartando frames subsequentes
+  // e fazendo a IP parecer congelada junto com a webcam.
+  const ac = new AbortController()
+  const t = setTimeout(() => ac.abort(), 2000)
   hostFetch(`/media/camera/frame/${encodeURIComponent(cameraId)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'image/jpeg' },
-    body: new Uint8Array(buf)
+    body: new Uint8Array(buf),
+    signal: ac.signal as any
   })
     .catch(() => {})
     .finally(() => {
+      clearTimeout(t)
       const active = ipInFlight.get(cameraId) || 1
       ipInFlight.set(cameraId, Math.max(0, active - 1))
     })
@@ -312,10 +324,12 @@ async function startMjpeg(camera: CameraEntry): Promise<void> {
     }
   }
 
-  if (camera.url && camera.url.startsWith('rtsp://')) {
-    await startRtspStream(camera)
-    return
-  }
+  // RTSP: tenta HTTP primeiro (muitas câmeras RTSP também expõem snapshot HTTP
+  // em 80/5000/8080). Se o usuário errou o path RTSP (ex.: /onvif1 inválido),
+  // o HTTP pode funcionar e evita o custo do FFmpeg. Só vai para RTSP se
+  // todos os http falharem — e o RTSP tem timeout curto para não segurar a
+  // webcam junto (isolamento real).
+  const isRtsp = !!camera.url && camera.url.startsWith('rtsp://')
 
   const controller = new AbortController()
   const entry: StreamEntry = {
@@ -347,12 +361,20 @@ async function startMjpeg(camera: CameraEntry): Promise<void> {
             }
           } catch {}
 
-          const res = await fetch(reqUrl, { headers: reqHeaders, signal: controller.signal })
-          if (!res.ok || !res.body) continue
+          // Timeout curto por candidato: não segurar a thread da webcam por 21s de TCP timeout
+          // se o IP estiver com URL/path errado (ex.: rtsp /onvif1 inexistente). Cada tentativa
+          // tem no máximo 3s — se falhar, tenta próximo candidato e só depois RTSP.
+          const res = await withTimeout(
+            fetch(reqUrl, { headers: reqHeaders, signal: controller.signal }),
+            3000,
+            `http candidate ${reqUrl}`
+          ).catch(() => null) as Response | null
+          if (!res || !res.ok || !res.body) continue
 
           const contentType = res.headers.get('content-type') || ''
           
-          // Single JPEG snapshot endpoint
+          // Single JPEG snapshot endpoint — muitas IPs baratas entregam JPEG estático até 1-5fps.
+          // Poll adaptativo: mede duração do fetch, aplica backoff exponencial em falha e registra métrica.
           if (contentType.toLowerCase().includes('image/jpeg')) {
             const arrayBuffer = await res.arrayBuffer()
             entry.latest = Buffer.from(arrayBuffer)
@@ -360,52 +382,77 @@ async function startMjpeg(camera: CameraEntry): Promise<void> {
             pushIpFrameToHost(camera.id, Buffer.from(arrayBuffer))
             activeUrl = targetUrl
 
-            // Poll snapshot with adaptive throttle for 20-24 fps (42ms = ~24fps).
+            let failCount = 0
             while (!controller.signal.aborted) {
               const started = Date.now()
+              let ok = false
               try {
-                const snapRes = await fetch(reqUrl, { headers: reqHeaders, signal: controller.signal })
-                if (snapRes.ok) {
+                const snapRes = await withTimeout(
+                  fetch(reqUrl, { headers: reqHeaders, signal: controller.signal }),
+                  4000,
+                  'snapshot poll'
+                ).catch(() => null) as Response | null
+                if (snapRes && snapRes.ok) {
                   const buf = await snapRes.arrayBuffer()
+                  const fetchMs = Date.now() - started
+                  const m = metricFor(camera.id)
+                  m.fetchMs.push(fetchMs)
+                  if (m.fetchMs.length > 30) m.fetchMs.shift()
+                  m.snapshotPollMs.push(fetchMs)
+                  if (m.snapshotPollMs.length > 30) m.snapshotPollMs.shift()
                   entry.latest = Buffer.from(buf)
                   entry.latestTs = Date.now()
                   pushIpFrameToHost(camera.id, Buffer.from(buf))
+                  ok = true
                 }
               } catch {}
               if (controller.signal.aborted) break
-              const wait = Math.max(0, 42 - (Date.now() - started))
-              if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+              if (ok) {
+                failCount = 0
+                const wait = Math.max(0, 42 - (Date.now() - started))
+                if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
+              } else {
+                failCount = Math.min(failCount + 1, 6)
+                const backoff = Math.min(2000, 100 * Math.pow(1.8, failCount))
+                await new Promise((resolve) => setTimeout(resolve, backoff))
+              }
             }
             return
           }
 
           // MJPEG Stream binary reader — scans raw Uint8Array chunks for JPEG SOI (0xFFD8) and EOI (0xFFD9)
-          // without string decoding (which corrupts non-ASCII binary bytes).
+          // Otimizado: evita cópia extra quando o buffer pendente está vazio (caso comum LAN: 1 chunk = 1 frame)
+          // e mede parseMs por chunk para diagnóstico.
           const reader = res.body.getReader()
-          // Constantes fora do loop: recriar o Buffer do SOI/EOI a cada chunk
-          // de rede (~24fps × N câmeras) era alocação desnecessária.
           const SOI = Buffer.from([0xff, 0xd8])
           const EOI = Buffer.from([0xff, 0xd9])
-          let streamBuf = Buffer.alloc(0)
+          let streamBuf: any = Buffer.alloc(0)
           while (!controller.signal.aborted) {
             const { done, value } = await reader.read()
             if (done) break
             if (value) {
-              // Buffer.concat aceita Uint8Array direto — o Buffer.from extra
-              // copiava o chunk uma vez à toa.
-              streamBuf = Buffer.concat([streamBuf, value])
+              if (streamBuf.length === 0) {
+                streamBuf = Buffer.isBuffer(value as Buffer) ? (value as Buffer) : Buffer.from(value as Uint8Array)
+              } else {
+                streamBuf = Buffer.concat([streamBuf, Buffer.isBuffer(value as Buffer) ? (value as Buffer) : Buffer.from(value as Uint8Array)])
+              }
+              const tParse0 = Date.now()
               while (true) {
                 const soi = streamBuf.indexOf(SOI)
                 if (soi === -1) break
                 const eoi = streamBuf.indexOf(EOI, soi + 2)
                 if (eoi === -1) break
-                const frame = streamBuf.subarray(soi, eoi + 2)
-                streamBuf = streamBuf.subarray(eoi + 2)
-                // Buffer.from copia o frame: o subarray reteria o ArrayBuffer
-                // inteiro do concat (até 5MB) vivo para sempre.
+                const frame = streamBuf.subarray(soi, eoi + 2) as Buffer
+                streamBuf = streamBuf.subarray(eoi + 2) as Buffer
                 entry.latest = Buffer.from(frame)
                 entry.latestTs = Date.now()
                 pushIpFrameToHost(camera.id, frame)
+              }
+              const parseMs = Date.now() - tParse0
+              if (parseMs > 0) {
+                const m = metricFor(camera.id)
+                m.parseMs.push(parseMs)
+                if (m.parseMs.length > 30) m.parseMs.shift()
               }
               if (streamBuf.length > 5 * 1024 * 1024) {
                 streamBuf = Buffer.alloc(0)
@@ -418,11 +465,13 @@ async function startMjpeg(camera: CameraEntry): Promise<void> {
         }
       }
       // All HTTP fallback URLs failed — if the original URL was rtsp://,
-      // try the raw RTSP client with Digest auth + H.265 depacketization.
-      if (camera.url && camera.url.startsWith('rtsp://')) {
+      // try the raw RTSP client com timeout isolado (não bloquear webcam).
+      if (isRtsp) {
         mjpegStreams.delete(camera.id) // release slot for startRtspStream
         bridge?.log(`[vision] HTTP fallbacks failed for ${camera.name}, trying raw RTSP…`)
-        await startRtspStream(camera)
+        await startRtspStream(camera).catch((e) => {
+          bridge?.log(`[vision] RTSP start failed for ${camera.name}: ${e instanceof Error ? e.message : String(e)}`)
+        })
         return
       }
     } catch (err) {
@@ -472,6 +521,19 @@ async function sweepMjpegStreams(): Promise<void> {
     const cam = findCamera(cameraId)
     if (cam && cam.source === 'ip' && !mjpegStreams.has(cameraId) && !rtspSessions.has(cameraId)) {
       void startMjpeg(cam).catch(() => {})
+    } else if (cam && cam.source === 'ip') {
+      void reconnectIpIfStale(cam).catch(() => {})
+    }
+  }
+
+  // 1b) Câmeras IP selecionadas só para preview (sem monitor) também precisam de auto-restart
+  for (const cameraId of selected) {
+    const cam = findCamera(cameraId)
+    if (!cam || cam.source !== 'ip') continue
+    if (!mjpegStreams.has(cameraId) && !rtspSessions.has(cameraId)) {
+      void startMjpeg(cam).catch(() => {})
+    } else {
+      void reconnectIpIfStale(cam).catch(() => {})
     }
   }
 
@@ -531,68 +593,103 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
   // scale=640:-2: resolução que o YOLO 640x640 usa como entrada.
   // -q:v 1 = JPEG máxima qualidade (escala FFmpeg 1-31, onde 1 = melhor).
   // Frames nítidos maximizam detecção de objetos pequenos/distantes.
-  const ffmpeg = spawn('ffmpeg', [
-    '-hide_banner',
-    '-loglevel', 'fatal',
-    '-fflags', '+nobuffer+genpts+discardcorrupt',
-    '-flags', 'low_delay',
-    '-i', url,
-    '-vf', 'fps=24,scale=640:-2',
-    '-f', 'image2pipe',
-    '-vcodec', 'mjpeg',
-    '-q:v', '1',
-    'pipe:1'
-  ], { stdio: ['ignore', 'pipe', 'pipe'] })
-
-  const session: RtspSession = { ffmpeg, alive: true }
-  rtspSessions.set(camera.id, session)
-
-  let jpegBuf = Buffer.alloc(0)
-  // Constantes fora do handler de data (o handler roda a cada chunk).
+  const redactedUrl = url.replace(/:\/\/[^@]+@/, '://***@')
+  let jpegBuf: any = Buffer.alloc(0)
   const SOI = Buffer.from([0xff, 0xd8])
   const EOI = Buffer.from([0xff, 0xd9])
-  ffmpeg.stdout!.on('data', (chunk: Buffer) => {
-    jpegBuf = Buffer.concat([jpegBuf, chunk])
-    while (true) {
-      const soi = jpegBuf.indexOf(SOI)
-      if (soi === -1) break
-      const eoi = jpegBuf.indexOf(EOI, soi + 2)
-      if (eoi === -1) break
-      const frame = jpegBuf.subarray(soi, eoi + 2)
-      jpegBuf = jpegBuf.subarray(eoi + 2)
-      entry.latest = Buffer.from(frame)
-      entry.latestTs = Date.now()
-      pushIpFrameToHost(camera.id, frame)
-    }
-    if (jpegBuf.length > 5 * 1024 * 1024) {
-      jpegBuf = Buffer.alloc(0)
-    }
-  })
 
-  ffmpeg.stderr?.on('data', (data: Buffer) => {
-    const msg = data.toString()
-    // Ignore benign decoder warnings when joining live H.264/H.265 stream before first keyframe
-    if (msg.includes('POC') || msg.includes('RPS') || msg.includes('NALU')) return
-    if (msg.toLowerCase().includes('error') || msg.toLowerCase().includes('failed') || msg.toLowerCase().includes('fatal')) {
-      bridge?.log(`[vision] RTSP FFmpeg (${camera.name}): ${msg.slice(0, 150)}`)
-    }
-  })
+  // Fallback tcp→udp: algumas câmeras baratas (HiChip) só respondem em UDP,
+  // outras só em TCP. Tenta tcp primeiro (mais confiável atrás de NAT/firewall),
+  // se falhar com -138/timeout tenta udp automaticamente sem esperar 30s do sweep.
+  const trySpawn = (transport: 'tcp' | 'udp', isRetry = false) => {
+    if (!isRetry) bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) ${transport}/timeout 8s...`)
+    else bridge?.log(`[vision] RTSP: tcp falhou, tentando udp para ${camera.name} (${redactedUrl})...`)
+    const ffmpeg = spawn('ffmpeg', [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-rtsp_transport', transport,
+      '-timeout', '8000000',
+      '-probesize', '64k',
+      '-analyzeduration', '500000',
+      '-fflags', '+nobuffer+genpts+discardcorrupt',
+      '-flags', 'low_delay',
+      '-i', url,
+      '-vf', 'fps=24,scale=640:-2',
+      '-f', 'image2pipe',
+      '-vcodec', 'mjpeg',
+      '-q:v', '2',
+      'pipe:1'
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
 
-  ffmpeg.on('exit', () => {
-    if (session.alive) {
-      bridge?.log(`[vision] RTSP: FFmpeg stream exited for ${camera.name}`)
+    const session: RtspSession = { ffmpeg, alive: true }
+    rtspSessions.set(camera.id, session)
+    let hadFirstFrame = false
+    let stderrBuf = ''
+
+    ffmpeg.stdout!.on('data', (chunk: Buffer) => {
+      hadFirstFrame = true
+      if (jpegBuf.length === 0) jpegBuf = chunk
+      else jpegBuf = Buffer.concat([jpegBuf, chunk])
+      while (true) {
+        const soi = jpegBuf.indexOf(SOI)
+        if (soi === -1) break
+        const eoi = jpegBuf.indexOf(EOI, soi + 2)
+        if (eoi === -1) break
+        const frame = jpegBuf.subarray(soi, eoi + 2) as Buffer
+        jpegBuf = jpegBuf.subarray(eoi + 2) as Buffer
+        entry.latest = Buffer.from(frame)
+        entry.latestTs = Date.now()
+        pushIpFrameToHost(camera.id, frame)
+      }
+      if (jpegBuf.length > 5 * 1024 * 1024) jpegBuf = Buffer.alloc(0)
+    })
+
+    ffmpeg.stderr!.on('data', (data: Buffer) => {
+      const msg = data.toString()
+      stderrBuf += msg
+      if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000)
+      if (msg.includes('POC') || msg.includes('RPS') || msg.includes('NALU')) return
+      if (msg.toLowerCase().includes('error') || msg.toLowerCase().includes('failed') || msg.toLowerCase().includes('fatal') || msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('401')) {
+        bridge?.log(`[vision] RTSP FFmpeg (${camera.name}) [${transport}]: ${msg.slice(0, 250)}`)
+      }
+    })
+
+    ffmpeg.on('error', (err) => {
+      bridge?.log(`[vision] RTSP: spawn falhou para ${camera.name}: ${err.message} (ffmpeg instalado?)`)
       session.alive = false
       rtspSessions.delete(camera.id)
       mjpegStreams.delete(camera.id)
-    }
-  })
+    })
 
-  entry.controller.signal.addEventListener('abort', () => {
-    session.alive = false
-    try { ffmpeg.kill() } catch {}
-    rtspSessions.delete(camera.id)
-    mjpegStreams.delete(camera.id)
-  })
+    ffmpeg.on('exit', (code, signal) => {
+      if (!session.alive) return
+      session.alive = false
+      rtspSessions.delete(camera.id)
+      const isConnTimeout = stderrBuf.includes('-138') || stderrBuf.toLowerCase().includes('connection to tcp') || stderrBuf.toLowerCase().includes('timed out') || stderrBuf.toLowerCase().includes('nonmatching transport') || stderrBuf.toLowerCase().includes('invalid data')
+      if (transport === 'tcp' && isConnTimeout && !hadFirstFrame && !entry.controller.signal.aborted) {
+        bridge?.log(`[vision] RTSP: tcp timeout para ${camera.name}, fallback para udp em 1.5s...`)
+        setTimeout(() => {
+          if (entry.controller.signal.aborted) { mjpegStreams.delete(camera.id); return }
+          try { ffmpeg.kill() } catch {}
+          trySpawn('udp', true)
+        }, 1500)
+        return
+      }
+      bridge?.log(`[vision] RTSP: FFmpeg saiu para ${camera.name} [${transport}] code=${code} signal=${signal}`)
+      mjpegStreams.delete(camera.id)
+    })
+
+    entry.controller.signal.addEventListener('abort', () => {
+      session.alive = false
+      try { ffmpeg.kill() } catch {}
+      rtspSessions.delete(camera.id)
+      mjpegStreams.delete(camera.id)
+    }, { once: true })
+
+    return ffmpeg
+  }
+
+  trySpawn('tcp')
 }
 
 // ---------------------------------------------------------------------------
@@ -633,19 +730,20 @@ async function startWebcamStream(camera: CameraEntry): Promise<void> {
       const reader = res.body.getReader()
       const SOI = Buffer.from([0xff, 0xd8])
       const EOI = Buffer.from([0xff, 0xd9])
-      let buf = Buffer.alloc(0)
+      let buf: any = Buffer.alloc(0)
       while (!controller.signal.aborted) {
         const { done, value } = await reader.read()
         if (done) break
         if (value) {
-          buf = Buffer.concat([buf, value])
+          if (buf.length === 0) buf = Buffer.isBuffer(value as Buffer) ? (value as Buffer) : Buffer.from(value as Uint8Array)
+          else buf = Buffer.concat([buf, Buffer.isBuffer(value as Buffer) ? (value as Buffer) : Buffer.from(value as Uint8Array)])
           while (true) {
             const soi = buf.indexOf(SOI)
             if (soi === -1) break
             const eoi = buf.indexOf(EOI, soi + 2)
             if (eoi === -1) break
-            const frame = buf.subarray(soi, eoi + 2)
-            buf = buf.subarray(eoi + 2)
+            const frame = buf.subarray(soi, eoi + 2) as Buffer
+            buf = buf.subarray(eoi + 2) as Buffer
             entry.latest = Buffer.from(frame)
             entry.latestTs = Date.now()
           }
@@ -931,6 +1029,10 @@ interface CameraMetrics {
   framesIn: number
   framesYolo: number
   framesDropped: number
+  fetchMs: number[]
+  parseMs: number[]
+  pushDropped: number
+  snapshotPollMs: number[]
 }
 
 const cameraMetrics = new Map<string, CameraMetrics>()
@@ -938,7 +1040,7 @@ const cameraMetrics = new Map<string, CameraMetrics>()
 function metricFor(cameraId: string): CameraMetrics {
   let m = cameraMetrics.get(cameraId)
   if (!m) {
-    m = { captureAt: 0, yoloAt: 0, yoloMs: [], renderAt: 0, framesIn: 0, framesYolo: 0, framesDropped: 0 }
+    m = { captureAt: 0, yoloAt: 0, yoloMs: [], renderAt: 0, framesIn: 0, framesYolo: 0, framesDropped: 0, fetchMs: [], parseMs: [], pushDropped: 0, snapshotPollMs: [] }
     cameraMetrics.set(cameraId, m)
   }
   return m
@@ -949,13 +1051,14 @@ function fpsBetween(from: number, to: number): number {
   return Math.round(1000 / (to - from))
 }
 
+function avgMs(arr: number[]): number {
+  return arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0
+}
+
 function summaryMetrics(cameraId: string): Record<string, number> {
   const m = metricFor(cameraId)
   const yoloFps = fpsBetween(m.yoloAt, Date.now())
   const capFps = fpsBetween(m.captureAt, Date.now())
-  const avgYoloMs = m.yoloMs.length
-    ? Math.round(m.yoloMs.reduce((a, b) => a + b, 0) / m.yoloMs.length)
-    : 0
   return {
     captureFps: capFps,
     yoloFps,
@@ -963,8 +1066,12 @@ function summaryMetrics(cameraId: string): Record<string, number> {
     framesIn: m.framesIn,
     framesYolo: m.framesYolo,
     framesDropped: m.framesDropped,
-    yoloAvgMs: avgYoloMs,
-    queue: 0
+    pushDropped: m.pushDropped,
+    yoloAvgMs: avgMs(m.yoloMs),
+    fetchAvgMs: avgMs(m.fetchMs),
+    parseAvgMs: avgMs(m.parseMs),
+    snapshotPollAvgMs: avgMs(m.snapshotPollMs),
+    queue: detectionSlots.get(cameraId)?.pendingCount?.() ?? 0
   }
 }
 
@@ -1678,6 +1785,11 @@ const webcamWatches = new Set<string>()
 const WEB_FRAME_STALE_MS = 5000
 const WEB_RECONNECT_STALE_MS = 15000
 const WEB_RECONNECT_MIN_MS = 60000
+// IP via FFmpeg/mjpeg tem latência maior (transcode + rede). 8s evita marcar
+// como offline em transient stall de 2-3 frames, mas 15s já é "sem sinal" real.
+const IP_FRAME_STALE_MS = 8000
+const IP_RECONNECT_STALE_MS = 15000
+const IP_RECONNECT_MIN_MS = 30000
 // Timeout do worker para o start-watch no host. O bridge da câmera tem 30s
 // internos; para o fluxo de UI (list_cameras no modal de adicionar) esperar
 // tudo isso é "Adicionando" eterno. 8s cobre o boot da hidden window + o
@@ -1754,6 +1866,37 @@ function isWebcamStreamFresh(camera: CameraEntry): boolean {
   if (!camera || camera.source !== 'webcam' || !camera.deviceId) return false
   const sub = webcamStreams.get(camera.id)
   return !!sub && sub.latest !== null && sub.latestTs > 0 && Date.now() - sub.latestTs < WEB_FRAME_STALE_MS
+}
+
+function isIpStreamFresh(camera: CameraEntry): boolean {
+  if (!camera || camera.source !== 'ip') return false
+  const sub = mjpegStreams.get(camera.id)
+  return !!sub && sub.latest !== null && sub.latestTs > 0 && Date.now() - sub.latestTs < IP_FRAME_STALE_MS
+}
+
+const ipLastReconnectTs = new Map<string, number>()
+const ipLastOnlineCheck = new Map<string, number>()
+
+async function reconnectIpIfStale(camera: CameraEntry): Promise<void> {
+  if (!camera || camera.source !== 'ip') return
+  const lastCheck = ipLastOnlineCheck.get(camera.id) || 0
+  if (Date.now() - lastCheck < 5000) return
+  ipLastOnlineCheck.set(camera.id, Date.now())
+  if (isIpStreamFresh(camera)) return
+  const sub = mjpegStreams.get(camera.id)
+  const rtsp = rtspSessions.get(camera.id)
+  const lastSeen = sub?.latestTs || 0
+  // Se nunca entregou frame e já passou do stale, força restart (câmera não conectou)
+  const shouldRetry = !sub && !rtsp ? true : Date.now() - lastSeen >= IP_RECONNECT_STALE_MS
+  if (!shouldRetry) return
+  const lastTry = ipLastReconnectTs.get(camera.id) || 0
+  if (Date.now() - lastTry < IP_RECONNECT_MIN_MS) return
+  ipLastReconnectTs.set(camera.id, Date.now())
+  const redacted = camera.url ? camera.url.replace(/:\/\/[^@]+@/, '://***@') : camera.id
+  bridge?.log(`[vision] IP ${camera.name} (${redacted}) sem frame há ${Math.round((Date.now()-lastSeen)/1000)}s — reconectando...`)
+  stopMjpeg(camera.id)
+  await new Promise((r) => setTimeout(r, 800))
+  void startMjpeg(camera).catch((e) => bridge?.log(`[vision] reconnect IP ${camera.name} falhou: ${e}`))
 }
 
 // Re-acquire a selected webcam's host stream when it stopped delivering
@@ -2469,7 +2612,7 @@ async function getStatusData(): Promise<
       const online =
         camera.source === 'webcam'
           ? reloadingCameras.has(camera.id) || isWebcamStreamFresh(camera) || await isWebcamOnline(camera)
-          : mjpegStreams.has(camera.id)
+          : isIpStreamFresh(camera)
       status[camera.id] = {
         online,
         monitors: active.length,
