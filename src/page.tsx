@@ -7,7 +7,7 @@
  * extension command routes and SSE events.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { getSDK } from 'momai:sdk'
 import { ptLabel, PT_CLASS, triggerLabel } from './vision/labels'
@@ -171,6 +171,49 @@ export function VisionIcon({ className = 'w-6 h-6' }: { className?: string }): J
       <path d="M17.6 4.9v3.2M16 6.5h3.2" />
     </svg>
   )
+}
+
+// Olho piscando + status amigável: mantém o olho em movimento (blink) mas
+// nunca mostra "Sem sinal" durante a fase de conexão — só quando há erro real.
+// O CSS é injetado uma vez e a animação é aplicada ao wrapper do ícone.
+const VISION_EYE_BLINK_CSS = `
+@keyframes vision-eye-blink {
+  0%, 88%, 92%, 100% { transform: scaleY(1); }
+  90% { transform: scaleY(0.12); }
+}
+.vision-eye-blink { animation: vision-eye-blink 3.2s ease-in-out infinite; transform-origin: center; display: inline-flex; }
+`
+
+function VisionBlinkStyleTag(): JSX.Element {
+  return <style>{VISION_EYE_BLINK_CSS}</style>
+}
+
+function cameraPlaceholderStatus(
+  camera: CameraInfo,
+  reloading: boolean,
+  error: string | null,
+  isSlow: boolean,
+  isUnavailable: boolean
+): string {
+  if (isUnavailable) return 'Sem sinal'
+  if (error) return 'Sem sinal'
+  if (isSlow) return 'Conectando...'
+  if (reloading) return 'Conectando...'
+  if (camera.online) return 'Iniciando...'
+  return 'Conectando...'
+}
+
+function cameraPlaceholderSubtitle(
+  camera: CameraInfo,
+  reloading: boolean,
+  error: string | null,
+  isSlow: boolean,
+  isUnavailable: boolean
+): string | null {
+  if (isUnavailable) return null
+  if (error) return null
+  if (isSlow || reloading || !camera.online) return null
+  return null
 }
 
 function formatTime(ts?: number): string {
@@ -352,12 +395,8 @@ async function fetchDirectFrame(cameraId: string): Promise<string | null> {
   }
 }
 
-// Taxa de detecção na página. Com o YOLO11s 640x640 a ~300-600ms por
-// inferência e um mutex global (1 inferência por vez), 2 câmeras precisam
-// ~600-1200ms por ciclo. fluid=500 dá ~2 detecções/s por câmera;
-// balanced=1000 é um bom equilíbrio; economy=1500 poupa CPU sem perder
-// carros em movimento.
-const PUMP_INTERVALS: Record<string, number> = { fluid: 500, balanced: 1000, economy: 1500 }
+// Taxa de detecção da página no engine YOLO (~1 inferência/s por câmera).
+const PUMP_INTERVAL_MS = 1000
 
 // Leitor MJPEG em JS (via fetch + ReadableStream) — alternativa confiável ao
 // <img src="multipart/x-mixed-replace">, que no Chromium congela no mesmo frame
@@ -562,7 +601,8 @@ interface ParserWorker {
 }
 
 function createParserWorker(opts: {
-  onFrame: (frame: Uint8Array) => void
+  onBitmap?: (bitmap: ImageBitmap, origW: number, origH: number) => void
+  onFrame?: (frame: Uint8Array) => void
   onError?: () => void
   onFps?: (fps: number) => void
 }): ParserWorker | null {
@@ -571,9 +611,7 @@ function createParserWorker(opts: {
   try {
     // Em prod o worker está em dist/mjpeg-worker.js; em dev (symlink) o
     // electron.vite.config.ts agora serve o raw de src/mjpeg-worker.ts para
-    // este path, garantindo que o parse saia do main thread. Se falhar, o
-    // caller cai no inline com fallback estendido (1500ms) — preview não congela
-    // a webcam porque o inline é latest-wins + yield por setTimeout.
+    // este path, garantindo que o parse e o decode saiam do main thread.
     worker = new Worker(new URL('./mjpeg-worker.js', import.meta.url), { type: 'module' })
   } catch {
     return null
@@ -591,8 +629,11 @@ function createParserWorker(opts: {
         // Ack de carregamento: o script avaliou e o worker está vivo.
         ready = true
         break
+      case 'bitmap':
+        if (msg.bitmap) opts.onBitmap?.(msg.bitmap, Number(msg.origW) || 0, Number(msg.origH) || 0)
+        break
       case 'frame':
-        if (msg.buffer) opts.onFrame(new Uint8Array(msg.buffer))
+        if (msg.buffer) opts.onFrame?.(new Uint8Array(msg.buffer))
         break
       case 'get_frame_response':
         if (pendingFrame) {
@@ -904,9 +945,9 @@ function SvgBoxOverlay({
 // Camera Card with Live Preview & Top Header Bar (Name, Expand & Close)
 // ---------------------------------------------------------------------------
 
-function CameraCard({
+const CameraCard = memo(function CameraCard({
   camera,
-  detections,
+  boxes = EMPTY_DETECTIONS,
   onSnapshot,
   onRemove,
   onExpand,
@@ -922,12 +963,11 @@ function CameraCard({
   onDrop,
   onDragEnd,
   onDetections,
-  mode = 'balanced',
   hasMonitor = false,
   suppressPump = false
 }: {
   camera: CameraInfo
-  detections: Record<string, Detection[]>
+  boxes?: Detection[]
   onSnapshot: (cameraId: string) => Promise<void> | void
   onRemove?: (cameraId: string) => void
   onExpand?: (camera: CameraInfo) => void
@@ -943,7 +983,6 @@ function CameraCard({
   onDrop?: (e: React.DragEvent, index: number) => void
   onDragEnd?: (e: React.DragEvent) => void
   onDetections?: (cameraId: string, boxes: Detection[]) => void
-  mode?: 'fluid' | 'balanced' | 'economy'
   hasMonitor?: boolean
   // Quando o ExpandedCameraModal está aberto para esta câmera, o modal já
   // bombeia frames de detecção para ela — o card por trás não precisa
@@ -962,6 +1001,9 @@ function CameraCard({
   const [printStatus, setPrintStatus] = useState<'idle' | 'capturing' | 'success'>('idle')
   const [reloading, setReloading] = useState(false)
   const [fps, setFps] = useState(0)
+  // Fase de conexão lenta/indisponível: se demorar demais sem frame, mostra feedback amigável
+  const [isSlow, setIsSlow] = useState(false)
+  const [isUnavailable, setIsUnavailable] = useState(false)
   const framesRef = useRef(0)
   const fpsTsRef = useRef(0)
   const frameDimsRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 })
@@ -986,11 +1028,8 @@ function CameraCard({
   // thread; null = fallback inline (jsdom / worker indisponível).
   const parserWorkerRef = useRef<ParserWorker | null>(null)
 
-  // Redraw de boxes apenas quando as detecções DESTA câmera mudam. Usar o
-  // objeto `detections` inteiro nas deps fazia TODOS os cards redesenharem o
-  // canvas quando QUALQUER câmera recebia detecções novas (o state é um novo
-  // Record a cada applyDetections).
-  const myDetections = detections[camera.id] || EMPTY_DETECTIONS
+  // Redraw de boxes apenas quando as detecções DESTA câmera mudam.
+  const myDetections = boxes
 
   const fetchingRef = useRef(false)
   // A corrida visual de 8 s abaixo não cancela o POST do SDK. Sem este ref, o
@@ -1024,6 +1063,28 @@ function CameraCard({
   useEffect(() => {
     setError(null)
   }, [refreshKey])
+
+  // Feedback de conexão demorada: se ficar muito tempo sem frame, mostra
+  // estados progressivos "Ainda conectando..." (12s) e "Câmera indisponível" (22s)
+  // em vez de deixar "Conectando..." para sempre. Reseta ao receber frame, erro ou reload.
+  useEffect(() => {
+    if (hasFrame || error) {
+      setIsSlow(false)
+      setIsUnavailable(false)
+      return
+    }
+    setIsSlow(false)
+    setIsUnavailable(false)
+    const slowTimer = setTimeout(() => setIsSlow(true), 12000)
+    const unavailableTimer = setTimeout(() => {
+      setIsSlow(true)
+      setIsUnavailable(true)
+    }, 22000)
+    return () => {
+      clearTimeout(slowTimer)
+      clearTimeout(unavailableTimer)
+    }
+  }, [hasFrame, error, camera.id, reloading, refreshKey])
 
   // Warmup: dispara um get_frame único na montagem do card (mesmo com a view
   // oculta na pré-montagem em background). Isso inicia o stream da câmera
@@ -1099,40 +1160,14 @@ function CameraCard({
     let drawing = false
     let queued: Uint8Array | null = null
 
-    // Tamanho do canvas CACHEADO: ler clientWidth/Height a cada frame (72/s
-    // com 3 câmeras) é layout read no main thread. O ResizeObserver atualiza
-    // o ref apenas quando o card realmente muda de tamanho (raro).
-    let canvasW = frameCanvas.clientWidth || frameCanvas.width
-    let canvasH = frameCanvas.clientHeight || frameCanvas.height
-    const ro =
-      typeof ResizeObserver !== 'undefined'
-        ? new ResizeObserver(() => {
-            canvasW = frameCanvas.clientWidth || frameCanvas.width
-            canvasH = frameCanvas.clientHeight || frameCanvas.height
-          })
-        : null
-    ro?.observe(frameCanvas)
-
     const drawToCanvas = (
       bitmap: ImageBitmap | HTMLImageElement,
       origW = 0,
       origH = 0
     ): void => {
-      const cw = canvasW
-      const ch = canvasH
-      if (frameCanvas.width !== cw) frameCanvas.width = cw
-      if (frameCanvas.height !== ch) frameCanvas.height = ch
-      // object-cover SEM clearRect: com scale = max(...) o drawImage cobre
-      // 100% do canvas (corta o excesso), então limpar antes era redundante —
-      // e o clearRect por frame (72/s com 3 câmeras) é trabalho no main thread
-      // à toa.
-      const scale = Math.max(cw / bitmap.width, ch / bitmap.height)
-      const dw = bitmap.width * scale
-      const dh = bitmap.height * scale
-      ctx.drawImage(bitmap, (cw - dw) / 2, (ch - dh) / 2, dw, dh)
-      // frameDimsRef usa as dims ORIGINAIS do frame (não as do bitmap se foi
-      // decodificado em escala reduzida) — os boxes são normalizados 0-1 ao
-      // frame original.
+      if (frameCanvas.width !== bitmap.width) frameCanvas.width = bitmap.width
+      if (frameCanvas.height !== bitmap.height) frameCanvas.height = bitmap.height
+      ctx.drawImage(bitmap, 0, 0)
       frameDimsRef.current = {
         w: origW || bitmap.width,
         h: origH || bitmap.height
@@ -1144,8 +1179,6 @@ function CameraCard({
         framesRef.current = 0
         fpsTsRef.current = now
       }
-      // setState apenas na transição (primeiro frame / erro → ok), nunca por
-      // frame — senão o React agenda render do card a 24fps × N câmeras.
       if (!hasFrameRef.current) {
         hasFrameRef.current = true
         setHasFrame(true)
@@ -1185,12 +1218,6 @@ function CameraCard({
       if (cancelled) return
       try {
         if (typeof createImageBitmap === 'function') {
-          // Decodifica direto dos BYTES do frame (BufferSource) — sem Blob,
-          // sem cópia intermediária; o decode roda em thread de background.
-          //
-          // HD DECODE: para câmeras de altíssima resolução (>1280px), o
-          // createImageBitmap com resizeWidth/Height usa o decode em escala
-          // reduzida do libjpeg-turbo mantendo alta nitidez e fluidez a 30fps.
           const dims = jpegDims(frame)
           if (dims && dims.w > 1280) {
             let scale = 0.5
@@ -1241,15 +1268,18 @@ function CameraCard({
       })
     }
 
-    // Fonte dos frames: parser em Web Worker (thread separada) quando
-    // disponível; senão o parser inline. O canvas NUNCA é transferido — se o
-    // worker falhar ao carregar (URL não resolvida em dev), o inline assume na
-    // hora e o preview continua.
+    // Fonte dos frames: Web Worker com decodificação ImageBitmap em thread separada.
     const parser = createParserWorker({
+      onBitmap: (bitmap, origW, origH) => {
+        if (cancelled) {
+          bitmap.close()
+          return
+        }
+        drawToCanvas(bitmap, origW, origH)
+        bitmap.close()
+      },
       onFrame: (frame) => {
         if (cancelled) return
-        // Guarda os bytes do frame mais recente: o pump de detecção reusa este
-        // frame local (zero round-trip ao node-core).
         lastFrameRef.current = frame
         drawNext(frame)
       },
@@ -1265,10 +1295,6 @@ function CameraCard({
     if (parser) {
       parserWorkerRef.current = parser
       parser.start(streamUrl)
-      // Fallback automático: o `new Worker` não lança quando a URL não resolve
-      // (erro assíncrono). Se o ack 'ready' não chegar, descarta o worker e
-      // inicia o parser inline — o preview NUNCA fica em "iniciando câmera"
-      // por causa de um worker mudo.
       let inlineStarted = false
       const startInline = () => {
         if (cancelled || inlineStarted) return
@@ -1297,12 +1323,11 @@ function CameraCard({
         parser.dispose()
         parserWorkerRef.current = null
         startInline()
-      }, 1500)
+      }, 8000)
       return () => {
         clearTimeout(fallbackTimer)
         cancelled = true
         ac.abort()
-        ro?.disconnect()
         parser.dispose()
         parserWorkerRef.current = null
       }
@@ -1331,7 +1356,6 @@ function CameraCard({
     return () => {
       cancelled = true
       ac.abort()
-      ro?.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamUrl, isActive])
@@ -1351,7 +1375,7 @@ function CameraCard({
   useEffect(() => {
     if (!isActive) return
     let cancelled = false
-    const interval = PUMP_INTERVALS[mode] || 1000
+    const interval = PUMP_INTERVAL_MS
     // Último resultado de detecção recebido por esta câmera (persiste entre os
     // ciclos do pump dentro deste effect). Quando um frame_pump não responde a
     // tempo (timeout de PUMP_COMMAND_TIMEOUT_MS — engine ocupado / fila do
@@ -1523,7 +1547,7 @@ function CameraCard({
     // NÃO devem reiniciar o loop do pump (causava descarte de detections + POSTs
     // órfãos). A condição é lida via ref a cada ciclo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [camera.id, mode, isActive])
+  }, [camera.id, isActive])
 
   const handleTakeSnapshot = async () => {
     setFlashing(true)
@@ -1589,12 +1613,15 @@ function CameraCard({
       <div className="relative w-full aspect-video bg-black rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
         <canvas
           ref={frameCanvasRef}
-          className={`absolute inset-0 w-full h-full ${hasFrame ? 'block' : 'opacity-0'}`}
+          className={`absolute inset-0 w-full h-full object-cover ${hasFrame ? 'block' : 'opacity-0'}`}
         />
         {!hasFrame && (
-          <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-gray-400 bg-black p-4 text-center">
-            <VisionIcon className="w-6 h-6 text-gray-400 mb-2 animate-pulse" />
-            <span>{reloading ? 'Conectando à sua câmera...' : camera.online ? 'Iniciando câmera...' : 'Sem sinal'}</span>
+          <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-gray-400 bg-black p-3 text-center gap-1">
+            <VisionBlinkStyleTag />
+            <span className="vision-eye-blink">
+              <VisionIcon className="w-5 h-5 text-gray-400" />
+            </span>
+            <span className="font-medium leading-none">{cameraPlaceholderStatus(camera, reloading, error, isSlow, isUnavailable)}</span>
           </div>
         )}
         {/* Bounding boxes — SVG overlay (React gerencia o redesenho) */}
@@ -1746,7 +1773,7 @@ function CameraCard({
       </div>
     </div>
   )
-}
+})
 
 // ---------------------------------------------------------------------------
 // Add Camera Card (Striped border button) & Selection Modal
@@ -1757,18 +1784,18 @@ function AddCameraCard({ onClick }: { onClick: () => void }): JSX.Element {
     <button
       onClick={onClick}
       type="button"
-      className="relative group rounded-2xl border-2 border-dashed border-white/10 hover:border-emerald-500/40 bg-white/[0.02] hover:bg-white/[0.05] transition-all duration-200 flex flex-col items-center justify-center p-4 text-center overflow-hidden focus:outline-none focus:ring-1 focus:ring-white/20 h-full min-h-[160px] cursor-pointer min-w-0"
+      className="group relative rounded-2xl border border-dashed border-white/12 hover:border-white/20 bg-zinc-900/40 hover:bg-zinc-800/50 transition-all duration-200 flex flex-col items-center justify-center p-6 text-center overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/30 h-full min-h-[168px] cursor-pointer min-w-0"
     >
-      <div className="w-10 h-10 rounded-full bg-white/5 group-hover:scale-110 group-hover:bg-white/10 text-gray-300 flex items-center justify-center mb-2 transition-all duration-200 shadow-md">
-        <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <div className="w-9 h-9 rounded-xl bg-white/[0.06] group-hover:bg-white/[0.10] border border-white/10 text-zinc-300 group-hover:text-white flex items-center justify-center mb-3 transition-all duration-200">
+        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
       </div>
-      <span className="text-xs font-semibold text-gray-200 group-hover:text-white transition-colors">
+      <span className="text-[13px] font-semibold text-zinc-100 tracking-tight">
         Adicionar Câmera
       </span>
-      <span className="text-[11px] text-gray-400 mt-0.5">
-        Selecionar webcam ou adicionar IP
+      <span className="text-[11px] text-zinc-500 mt-1 leading-snug">
+        Webcam ou IP
       </span>
     </button>
   )
@@ -1787,6 +1814,7 @@ function AddCameraModal({
   selectedCameraIds: string[]
   onConfirm: (webcamIds: string[], ipDrafts: Array<{ name: string; url: string }>) => Promise<void>
 }): JSX.Element | null {
+  const isMaximized = useWindowMaximized()
   const [activeTab, setActiveTab] = useState<'webcam' | 'ip'>('webcam')
   const [selectedWebcamId, setSelectedWebcamId] = useState<string>('')
   const [pendingWebcamIds, setPendingWebcamIds] = useState<string[]>([])
@@ -1856,20 +1884,27 @@ function AddCameraModal({
   const pendingCount = pendingWebcamIds.length + pendingIpDrafts.length
   const hasUnsavedIpInput = ipUrl.trim() !== '' || ipName.trim() !== ''
 
-  const doConfirm = async () => {
-    if (pendingCount === 0) return
+  const isValidIpUrl = (url: string): boolean => {
+    const u = url.trim()
+    if (!u) return false
+    return /^(https?:\/\/|rtsp:\/\/).+/i.test(u)
+  }
+
+  const hasUnsavedValidIp = hasUnsavedIpInput && isValidIpUrl(ipUrl)
+  // Contagem efetiva: inclui o draft ainda não clicado em "Adicionar à seleção"
+  // para que 1 clique no rodapé já adicione uma única IP sem passo extra.
+  const effectivePendingCount = pendingCount + (hasUnsavedValidIp ? 1 : 0)
+
+  const doConfirm = async (overrideWebcams?: string[], overrideIps?: Array<{ name: string; url: string }>) => {
+    const webcamsToAdd = overrideWebcams ?? pendingWebcamIds
+    const ipsToAdd = overrideIps ?? pendingIpDrafts
+    if (webcamsToAdd.length + ipsToAdd.length === 0) return
     setConfirmUnsaved(false)
     setSubmitting(true)
     setModalError(null)
     try {
-      // Rede de segurança absoluta: o modal NUNCA pode ficar preso em
-      // "Adicionando..." para sempre. Cada comando já tem timeout (COMMAND_TIMEOUT_MS)
-      // e o onConfirm já fecha o modal logo após a persistência; este race garante
-      // que, mesmo que algo pendure por um motivo não coberto (ex.: resposta que
-      // nunca chega sem rejeitar), o fluxo finaliza com erro claro e permite tentar
-      // de novo — em vez de congelar a UI.
       await Promise.race([
-        onConfirm(pendingWebcamIds, pendingIpDrafts),
+        onConfirm(webcamsToAdd, ipsToAdd),
         new Promise<never>((_, reject) => {
           const timer = setTimeout(
             () =>
@@ -1889,11 +1924,29 @@ function AddCameraModal({
   }
 
   const handleConfirm = async () => {
-    if (pendingCount === 0) return
-    // Warn when the user typed IP fields but never staged that camera, so the
-    // confirm action never silently discards what is on the screen.
-    if (hasUnsavedIpInput) {
-      setConfirmUnsaved(true)
+    // Se há um IP válido digitado mas ainda não "Adicionado à seleção",
+    // inclui automaticamente no confirm — evita o 2º clique + prompt.
+    if (hasUnsavedValidIp) {
+      const url = ipUrl.trim()
+      const id = `ip:${url}`
+      if (ipCameras.some((c) => c.id === id)) {
+        setModalError('Esta câmera IP já está cadastrada.')
+        return
+      }
+      if (pendingIpDrafts.some((d) => `ip:${d.url}` === id)) {
+        setModalError('Esta câmera IP já está na lista de seleção.')
+        return
+      }
+      const nextIps = [...pendingIpDrafts, { name: ipName.trim(), url }]
+      await doConfirm(pendingWebcamIds, nextIps)
+      return
+    }
+    if (pendingCount === 0) {
+      // Se há texto inválido/incompleto, avisa em vez de silenciar
+      if (hasUnsavedIpInput) {
+        setModalError('Preencha uma URL válida (http://, https:// ou rtsp://) ou clique em Adicionar à seleção.')
+        return
+      }
       return
     }
     await doConfirm()
@@ -1903,102 +1956,112 @@ function AddCameraModal({
     .filter((cam) => !selectedCameraIds.includes(cam.id) && !pendingWebcamIds.includes(cam.id))
     .map((cam) => ({ value: cam.id, label: cam.name, badge: 'Disponível' }))
 
-  return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-black/80 backdrop-blur-md animate-fadeIn">
-      <div className="min-h-full flex items-start sm:items-center [@media(max-height:720px)]:items-start justify-center p-4">
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="vision-camera-dialog-title"
-          className="w-full max-w-2xl max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-2xl border border-white/10 bg-zinc-900 shadow-2xl relative"
-        >
+  return createPortal(
+    <div
+      className={`fixed inset-0 top-8 z-[100] animate-fadeIn overflow-y-auto ${
+        isMaximized ? 'grid place-items-center p-6 bg-black/70 backdrop-blur-sm' : 'flex flex-col bg-zinc-900'
+      }`}
+      style={{ top: '32px' }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="vision-camera-dialog-title"
+        className={`flex flex-col bg-zinc-900 shadow-2xl overflow-hidden ${
+          isMaximized
+            ? 'w-full max-w-[720px] max-h-[min(88dvh,680px)] my-6 rounded-2xl border border-white/10'
+            : 'w-full h-full max-w-none max-h-none rounded-none border-0 flex-1 min-h-0'
+        }`}
+      >
           {/* Modal Header */}
-          <div className="sticky top-0 z-20 flex items-start justify-between gap-4 px-6 pt-6 pb-5 bg-zinc-900/95 backdrop-blur-sm">
-            <div>
-              <div className="flex items-center gap-2.5">
-                <VisionIcon className="w-5 h-5 text-emerald-400" />
-                <h2 id="vision-camera-dialog-title" className="text-base font-bold text-white">
-                  Adicionar Câmeras
-                </h2>
-              </div>
-            </div>
+          <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-white/5 shrink-0">
             <button
               onClick={onClose}
-              aria-label="Fechar"
-              className="text-gray-500 hover:text-white rounded-lg p-1.5 -mr-1 hover:bg-white/5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
+              aria-label="Voltar"
+              className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-white flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/15"
             >
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M18 6L6 18M6 6l12 12" />
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M19 12H5M12 19l-7-7 7-7" />
               </svg>
             </button>
+            <div className="flex-1 flex items-center justify-center gap-2.5 min-w-0">
+              <span className="w-7 h-7 rounded-lg bg-emerald-500/12 border border-emerald-500/15 flex items-center justify-center shrink-0">
+                <VisionIcon className="w-3.5 h-3.5 text-emerald-400" />
+              </span>
+              <h2 id="vision-camera-dialog-title" className="text-[14px] font-semibold text-white tracking-tight">
+                Adicionar Câmeras
+              </h2>
+            </div>
+            <span className="w-8 h-8 shrink-0" aria-hidden="true" />
           </div>
 
           {/* Segmented Control / Tab Switcher */}
-          <div role="tablist" className="mx-6 grid grid-cols-2 gap-1 p-1 rounded-lg border border-white/10 bg-black/20 text-xs font-medium">
+          <div role="tablist" className="mx-4 sm:mx-6 p-1 rounded-full bg-zinc-800/80 border border-white/10 flex gap-1">
             <button
               type="button"
               role="tab"
               onClick={() => setActiveTab('webcam')}
               aria-selected={activeTab === 'webcam'}
-              className={`py-2.5 px-3 rounded-md flex items-center justify-center gap-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 ${activeTab === 'webcam'
-                ? 'bg-zinc-800 text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
+              className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${activeTab === 'webcam'
+                ? 'bg-white text-zinc-950 shadow-sm font-semibold'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
                 }`}
             >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                <circle cx="12" cy="13" r="4" />
+                <circle cx="12" cy="13" r="3.5" />
               </svg>
-              Webcam USB ({webcamCameras.length})
+              Webcam USB
+              <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'webcam' ? 'bg-zinc-900 text-white' : 'bg-white/10 text-zinc-300'}`}>{webcamCameras.length}</span>
             </button>
             <button
               type="button"
               role="tab"
               onClick={() => setActiveTab('ip')}
               aria-selected={activeTab === 'ip'}
-              className={`py-2.5 px-3 rounded-md flex items-center justify-center gap-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50 ${activeTab === 'ip'
-                ? 'bg-zinc-800 text-white'
-                : 'text-gray-400 hover:text-gray-200 hover:bg-white/5'
+              className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${activeTab === 'ip'
+                ? 'bg-white text-zinc-950 shadow-sm font-semibold'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
                 }`}
             >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="10" />
-                <line x1="2" y1="12" x2="22" y2="12" />
-                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="8.5" />
+                <path d="M12 3.5a15 15 0 0 1 3.8 8.5A15 15 0 0 1 12 20.5A15 15 0 0 1 8.2 12 15 15 0 0 1 12 3.5z" />
+                <path d="M3.5 12h17" />
               </svg>
-              Câmeras IP ({ipCameras.length})
+              Câmeras IP
+              <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'ip' ? 'bg-zinc-900 text-white' : 'bg-white/10 text-zinc-300'}`}>{ipCameras.length}</span>
             </button>
           </div>
 
-          <div className={`grid grid-cols-1 gap-5 px-6 pt-5 ${pendingCount > 0 ? 'md:grid-cols-[minmax(0,1fr)_15rem]' : ''}`}>
-            <div className="min-w-0">
-              <div className="min-w-0">
+          <div className={`flex-1 overflow-y-auto custom-scrollbar min-h-0 ${isMaximized ? 'px-6 pt-5 pb-3 grid grid-cols-1 sm:grid-cols-[1.15fr_300px] gap-6' : 'px-6 pt-6 pb-4 space-y-6 max-w-[640px] mx-auto w-full'}`}>
                 {/* Tab 1: Webcams USB */}
                 {activeTab === 'webcam' && (
                   <div className="animate-fadeIn overflow-visible">
-                    <label className="text-[11px] font-medium text-gray-300 block mb-2">
+                    <label className="text-[11px] font-medium text-zinc-400 block mb-2">
                       Webcam disponível
                     </label>
 
                     {webcamCameras.length === 0 ? (
-                      <div className="text-xs text-gray-400 border border-dashed border-white/10 rounded-lg px-3 py-4 text-center">
-                        Nenhuma webcam USB detectada no sistema.
+                      <div className="text-xs text-zinc-500 border border-dashed border-white/10 rounded-xl px-4 py-6 text-center bg-white/[0.02]">
+                        Nenhuma webcam USB detectada.
                       </div>
                     ) : webcamOptions.length === 0 ? (
-                      <div className="text-xs text-gray-400 border border-dashed border-white/10 rounded-lg px-3 py-4 text-center">
-                        Todas as webcams já estão selecionadas ou na lista de seleção.
+                      <div className="text-xs text-zinc-500 border border-dashed border-white/10 rounded-xl px-4 py-6 text-center bg-white/[0.02]">
+                        Todas já estão na seleção.
                       </div>
                     ) : (
-                      <div className="space-y-3 relative overflow-visible z-30">
+                      <div className="relative overflow-visible z-30 max-w-[360px]">
                         <CustomSelect
                           value={selectedWebcamId}
                           onChange={handleSelectWebcam}
                           options={webcamOptions}
                           placeholder="Selecione uma webcam..."
-                          size="md"
+                          size="sm"
                           direction="down"
                           className="w-full"
                         />
+                        <p className="text-[11px] text-zinc-500 mt-2">Selecione para adicionar.</p>
                       </div>
                     )}
                   </div>
@@ -2007,58 +2070,67 @@ function AddCameraModal({
                 {/* Tab 2: Câmeras IP */}
                 {activeTab === 'ip' && (
                   <div className="animate-fadeIn">
-                    {/* Form to stage a new IP camera into the pending selection */}
-                    <div>
-                      <h3 className="text-[11px] font-semibold text-gray-300">
-                        Nova câmera IP / MJPEG
-                      </h3>
-                      <div className="mt-3 space-y-3">
+                    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 sm:p-4 space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.7fr] gap-3">
                         <div>
-                          <label htmlFor="vision-ip-name" className="block text-[11px] font-medium text-gray-400 mb-1.5">
-                            Nome <span className="text-gray-600">(opcional)</span>
+                          <label htmlFor="vision-ip-name" className="block text-[11px] font-medium text-zinc-400 mb-1.5">
+                            Nome <span className="text-zinc-600 font-normal">— opcional</span>
                           </label>
-                          <input
-                            id="vision-ip-name"
-                            value={ipName}
-                            onChange={(e) => setIpName(e.target.value)}
-                            placeholder="Nome da câmera (ex.: Garagem, Entrada)"
-                            className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-emerald-500/70 focus-visible:ring-2 focus-visible:ring-emerald-500/10 transition-colors"
-                          />
-                        </div>
-                        <div>
-                          <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-gray-400 mb-1.5">
-                            URL da câmera
-                          </label>
-                          <input
-                            id="vision-ip-url"
-                            value={ipUrl}
-                            onChange={(e) => setIpUrl(e.target.value)}
-                            placeholder="URL (http://ip:porta/video ou rtsp://user:pass@ip)"
-                            className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-emerald-500/70 focus-visible:ring-2 focus-visible:ring-emerald-500/10 transition-colors"
-                          />
-                        </div>
+                        <input
+                          id="vision-ip-name"
+                          value={ipName}
+                          onChange={(e) => setIpName(e.target.value)}
+                          placeholder="Nome da câmera (ex.: Garagem, Entrada)"
+                          className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-700 focus:ring-1 focus:ring-white/5 transition-colors"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-zinc-400 mb-1.5">
+                          URL da câmera
+                        </label>
+                        <input
+                          id="vision-ip-url"
+                          value={ipUrl}
+                          onChange={(e) => setIpUrl(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && ipUrl.trim()) {
+                              e.preventDefault()
+                              handleStageIp()
+                            }
+                          }}
+                          placeholder="URL (http://ip:porta/video ou rtsp://user:pass@ip)"
+                          className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-700 focus:ring-1 focus:ring-white/5 transition-colors"
+                        />
+                      </div>
+                      </div>
+                      <div className="flex justify-end">
                         <button
                           type="button"
                           disabled={!ipUrl.trim()}
                           onClick={handleStageIp}
-                          className="w-full rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:hover:bg-emerald-600 text-xs font-semibold py-2.5 text-white transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
+                          className="inline-flex items-center gap-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-zinc-200 hover:text-white text-[11px] font-medium px-3.5 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/10"
                         >
+                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M12 5v14M5 12h14" />
+                          </svg>
                           Adicionar à seleção
                         </button>
                       </div>
+                      {hasUnsavedValidIp ? (
+                        <p className="text-[11px] text-zinc-500 text-center">Vai entrar ao confirmar — pode adicionar mais.</p>
+                      ) : null}
                     </div>
                   </div>
                 )}
-              </div>
-            </div>
 
             {pendingCount > 0 && (
-              <aside className="min-w-0 self-start md:border-l md:border-white/10 md:pl-4">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-400/80 mb-2">
-                  Revisão
-                </p>
-                <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] overflow-hidden">
-                  <ul className="divide-y divide-emerald-500/15">
+              <div className="rounded-xl border border-white/10 bg-white/[0.03] overflow-hidden">
+                <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-white/5">
+                  <span className="text-[11px] font-semibold text-zinc-200">Revisão</span>
+                  <span className="text-[10px] text-zinc-500">{pendingCount} {pendingCount === 1 ? 'câmera' : 'câmeras'} · confirmação única</span>
+                </div>
+                <div className="max-h-[160px] overflow-y-auto custom-scrollbar">
+                  <ul className="divide-y divide-white/5">
                     {pendingWebcamIds.map((id) => {
                       const cam = webcamCameras.find((c) => c.id === id)
                       return (
@@ -2066,20 +2138,22 @@ function AddCameraModal({
                           key={id}
                           className="flex items-center justify-between gap-2 px-2.5 py-1.5"
                         >
-                          <span className="text-[11px] text-gray-200 truncate flex items-center gap-1.5 min-w-0">
-                            <svg className="w-3 h-3 text-emerald-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                              <circle cx="12" cy="13" r="4" />
-                            </svg>
+                          <span className="text-[11px] text-zinc-200 truncate flex items-center gap-2 min-w-0">
+                            <span className="w-6 h-6 rounded-full bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
+                              <svg className="w-3 h-3 text-zinc-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                                <circle cx="12" cy="13" r="3" />
+                              </svg>
+                            </span>
                             <span className="truncate">{cam?.name || id}</span>
                           </span>
                           <button
                             type="button"
                             onClick={() => removePendingWebcam(id)}
                             aria-label={`Remover ${cam?.name || id} da seleção`}
-                            className="text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded p-0.5 shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40"
+                            className="w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-white flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                           >
-                            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                               <path d="M18 6L6 18M6 6l12 12" />
                             </svg>
                           </button>
@@ -2089,96 +2163,71 @@ function AddCameraModal({
                     {pendingIpDrafts.map((draft, i) => (
                       <li
                         key={`ip-${draft.url}-${i}`}
-                        className="flex items-center justify-between gap-2 px-2.5 py-1.5"
+                        className="flex items-center justify-between gap-2 px-3 py-2"
                       >
-                        <span className="text-[11px] text-gray-200 truncate flex items-center gap-1.5 min-w-0">
-                          <svg className="w-3 h-3 text-emerald-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <circle cx="12" cy="12" r="10" />
-                            <line x1="2" y1="12" x2="22" y2="12" />
-                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-                          </svg>
+                        <span className="text-[11px] text-zinc-200 truncate flex items-center gap-2 min-w-0">
+                          <span className="w-6 h-6 rounded-full bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
+                            <svg className="w-3 h-3 text-zinc-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                              <circle cx="12" cy="12" r="7.5" />
+                              <path d="M12 4a15 15 0 0 1 3.2 8A15 15 0 0 1 12 20A15 15 0 0 1 8.8 12 15 15 0 0 1 12 4z" />
+                              <path d="M4.5 12h15" />
+                            </svg>
+                          </span>
                           <span className="truncate">{draft.name || draft.url}</span>
                         </span>
                         <button
                           type="button"
                           onClick={() => removePendingIp(i)}
                           aria-label={`Remover ${draft.name || draft.url} da seleção`}
-                          className="text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded p-0.5 shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40"
+                          className="w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-white flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                         >
-                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                             <path d="M18 6L6 18M6 6l12 12" />
                           </svg>
                         </button>
                       </li>
                     ))}
                   </ul>
+                  </div>
                 </div>
-                <p className="text-[11px] leading-relaxed text-gray-600 mt-2">
-                  A seleção será aplicada de uma vez ao confirmar.
-                </p>
-              </aside>
             )}
           </div>
 
           {/* Modal Footer */}
-          <div className="sticky bottom-0 z-20 mx-6 mt-5 mb-0 pt-4 pb-6 border-t border-white/10 bg-zinc-900/95 backdrop-blur-sm flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
+          <div className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 border-t border-white/10 bg-zinc-900 flex flex-col gap-2 sm:gap-3">
             {modalError ? (
-              <p className="w-full sm:max-w-[60%] text-xs text-red-400 bg-red-500/10 border border-red-500/25 rounded-lg px-3 py-2 sm:mr-auto text-left">
+              <p className="w-full text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2.5 text-left leading-relaxed">
                 {modalError}
               </p>
-            ) : confirmUnsaved ? (
-              <p className="w-full sm:max-w-[60%] text-xs text-amber-300 bg-amber-500/10 border border-amber-500/25 rounded-lg px-3 py-2 sm:mr-auto text-left">
-                Você preencheu os campos de uma câmera IP sem adicioná-la à lista de seleção. Confirmar mesmo assim?
-              </p>
             ) : null}
-            {confirmUnsaved ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setConfirmUnsaved(false)}
-                  className="w-full sm:w-auto rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 px-4 py-2 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => void doConfirm()}
-                  className="w-full sm:w-auto rounded-xl bg-amber-500 hover:bg-amber-400 text-black px-5 py-2 text-xs font-semibold transition-colors shadow-md active:scale-95 disabled:opacity-60 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70"
-                >
-                  {submitting ? 'Adicionando...' : 'Sim, adicionar mesmo assim'}
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="w-full sm:w-auto rounded-xl bg-white/5 hover:bg-white/10 text-gray-300 px-4 py-2 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/50"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting || pendingCount === 0}
-                  onClick={() => void handleConfirm()}
-                  className={`w-full sm:w-auto rounded-xl text-white px-5 py-2 text-xs font-semibold transition-colors shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 ${pendingCount === 0
-                    ? 'bg-zinc-800 text-gray-500 cursor-not-allowed'
-                    : 'bg-emerald-600 hover:bg-emerald-500 active:scale-95'
-                    }`}
-                >
-                  {submitting
-                    ? 'Adicionando...'
-                    : pendingCount === 0
-                      ? 'Nenhuma câmera selecionada'
-                      : `Adicionar ${pendingCount} ${pendingCount === 1 ? 'câmera' : 'câmeras'}`}
-                </button>
-              </>
-            )}
+            <div className="flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-zinc-200 px-4 py-2 text-[11px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/10"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={submitting || effectivePendingCount === 0}
+                onClick={() => void handleConfirm()}
+                className={`rounded-full px-4 py-2 text-[11px] font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white/10 border ${effectivePendingCount === 0
+                  ? 'bg-white/[0.03] border-white/5 text-zinc-600 cursor-not-allowed'
+                  : 'bg-zinc-800 hover:bg-zinc-700 border-white/10 text-zinc-100 hover:text-white'
+                  }`}
+              >
+                {submitting
+                  ? 'Adicionando...'
+                  : effectivePendingCount === 0
+                    ? 'Nenhuma câmera selecionada'
+                    : `Adicionar ${effectivePendingCount === 1 ? '1 câmera' : `${effectivePendingCount} câmeras`}`}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
@@ -2328,14 +2377,14 @@ function ExpandedCameraModal({
       }
     }
     void run()
-    const stagger = (hashCode(camera.id) % 3) * ((PUMP_INTERVALS[mode] || 1000) / 3)
+    const stagger = (hashCode(camera.id) % 3) * (PUMP_INTERVAL_MS / 3)
     const t0 = setTimeout(() => void run(), stagger)
-    const timer = window.setInterval(() => void run(), PUMP_INTERVALS[mode] || 1000)
+    const timer = window.setInterval(() => void run(), PUMP_INTERVAL_MS)
     return () => {
       clearTimeout(t0)
       clearInterval(timer)
     }
-  }, [camera, onDetections, mode])
+  }, [camera, onDetections])
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const isWebcam = Boolean(camera?.source === 'webcam' || camera?.id.startsWith('webcam:'))
@@ -2438,6 +2487,14 @@ function ExpandedCameraModal({
     }
 
     const parser = createParserWorker({
+      onBitmap: (bitmap) => {
+        if (cancelled) {
+          bitmap.close()
+          return
+        }
+        drawToCanvas(bitmap)
+        bitmap.close()
+      },
       onFrame: (frame) => {
         if (cancelled) return
         lastFrameRef.current = frame
@@ -2483,12 +2540,11 @@ function ExpandedCameraModal({
         parser.dispose()
         parserWorkerRef.current = null
         startInline()
-      }, 1500)
+      }, 8000)
       return () => {
         clearTimeout(fallbackTimer)
         cancelled = true
         ac.abort()
-        ro?.disconnect()
         parser.dispose()
         parserWorkerRef.current = null
       }
@@ -3848,25 +3904,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   const detLastTs = useRef<Record<string, number>>({})
   const detHoldRef = useRef<Record<string, Detection[]>>({})
   // DIAG: throttle de logs de applyDetections (máx 1 por 2s por câmera)
-  const applyDiagTs = useRef<Record<string, number>>({})
-  // DIAG: throttle de log do SSE vision_detections
-  const sseDiagTs = useRef(0)
-
   const applyDetections = useCallback((cameraId: string, boxes: Detection[]) => {
     const now = Date.now()
     const prevTs = detLastTs.current[cameraId] || 0
-    // DIAG: registrar toda chegada de detecção (fonte SSE/pump) para saber se
-    // o problema é "não chega" vs "chega mas não desenha".
-    if (cameraId && boxes.length >= 0) {
-      const diagKey = `diag:${cameraId}`
-      const last = applyDiagTs.current[diagKey] || 0
-      if (now - last >= 2000) {
-        applyDiagTs.current[diagKey] = now
-        console.log(
-          `[vision-diag][${cameraId}] applyDetections boxes=${boxes.length}${boxes.length > 0 ? ` ${boxes.map((b) => `${b.className}:${Math.round(b.confidence * 100)}%`).join(', ')}` : ''}`
-        )
-      }
-    }
     if (boxes.length > 0) {
       // Resultado novo (não vazio): atualiza imediatamente e rearma o hold.
       detHoldRef.current[cameraId] = [...boxes]
@@ -4131,14 +4171,6 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       cameraId: string
       detections: Detection[]
     }>('vision_detections', (data: { cameraId: string; detections: Detection[] }) => {
-      // DIAG: o SSE vision_detections está chegando ao renderer?
-      const nowDiag = Date.now()
-      if (nowDiag - (sseDiagTs.current || 0) >= 2000) {
-        sseDiagTs.current = nowDiag
-        console.log(
-          `[vision-diag] SSE vision_detections camera=${data?.cameraId ?? '?'} boxes=${Array.isArray(data?.detections) ? data.detections.length : '?'}`
-        )
-      }
       if (data?.cameraId && Array.isArray(data.detections)) {
         applyDetections(data.cameraId, data.detections)
       }
@@ -4227,6 +4259,21 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     },
     [config.selectedCameras]
   )
+
+  const handleRemoveCamera = useCallback(
+    (id: string) => {
+      void toggleCameraSelection(id)
+    },
+    [toggleCameraSelection]
+  )
+
+  const handleExpandCamera = useCallback((cam: CameraInfo) => {
+    setExpandedCamera(cam)
+  }, [])
+
+  const handleReloadCamera = useCallback(() => {
+    void poll()
+  }, [poll])
 
   // Applies the whole pending selection in one configure call: registers new
   // IP cameras and selects webcams/IPs together. Only called on confirm.
@@ -4508,12 +4555,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               <CameraCard
                 key={camera.id}
                 camera={camera}
-                detections={detections}
+                boxes={detections[camera.id] || EMPTY_DETECTIONS}
                 onDetections={handleDetections}
                 onSnapshot={takeSnapshot}
-                onRemove={(id) => void toggleCameraSelection(id)}
-                onExpand={(cam) => setExpandedCamera(cam)}
-                onReload={() => void poll()}
+                onRemove={handleRemoveCamera}
+                onExpand={handleExpandCamera}
+                onReload={handleReloadCamera}
                 refreshKey={refreshKey}
                 isActive={isActive}
                 index={idx}
@@ -4524,7 +4571,6 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
                 onDragEnd={handleDragEnd}
-                mode={config.trackingMode || 'balanced'}
                 hasMonitor={monitors.some((m) => m.cameraId === camera.id && !m.paused)}
                 suppressPump={expandedCamera?.id === camera.id}
               />

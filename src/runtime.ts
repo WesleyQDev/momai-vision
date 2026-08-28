@@ -572,6 +572,8 @@ function stopRtsp(cameraId: string): void {
   rtspSessions.delete(cameraId)
 }
 
+const preferredTransportMap = new Map<string, 'tcp' | 'udp'>()
+
 async function startRtspStream(camera: CameraEntry): Promise<void> {
   if (rtspSessions.has(camera.id)) return
   if (mjpegStreams.has(camera.id)) return
@@ -588,22 +590,16 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
   const { spawn } = await import('node:child_process')
   bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name}...`)
 
-  // FFmpeg handles RTSP demuxing directly (UDP, TCP, Digest/Basic auth, H.264/H.265)
-  // and pipes MJPEG frames continuously to stdout.
-  // scale=640:-2: resolução que o YOLO 640x640 usa como entrada.
-  // -q:v 1 = JPEG máxima qualidade (escala FFmpeg 1-31, onde 1 = melhor).
-  // Frames nítidos maximizam detecção de objetos pequenos/distantes.
   const redactedUrl = url.replace(/:\/\/[^@]+@/, '://***@')
   let jpegBuf: any = Buffer.alloc(0)
   const SOI = Buffer.from([0xff, 0xd8])
   const EOI = Buffer.from([0xff, 0xd9])
 
-  // Fallback tcp→udp: algumas câmeras baratas (HiChip) só respondem em UDP,
-  // outras só em TCP. Tenta tcp primeiro (mais confiável atrás de NAT/firewall),
-  // se falhar com -138/timeout tenta udp automaticamente sem esperar 30s do sweep.
+  const initialTransport = preferredTransportMap.get(camera.id) || 'tcp'
+
   const trySpawn = (transport: 'tcp' | 'udp', isRetry = false) => {
     if (!isRetry) bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) ${transport}/timeout 8s...`)
-    else bridge?.log(`[vision] RTSP: tcp falhou, tentando udp para ${camera.name} (${redactedUrl})...`)
+    else bridge?.log(`[vision] RTSP: ${transport === 'udp' ? 'tcp' : 'udp'} falhou, tentando ${transport} para ${camera.name} (${redactedUrl})...`)
     const ffmpeg = spawn('ffmpeg', [
       '-hide_banner',
       '-loglevel', 'error',
@@ -627,7 +623,10 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
     let stderrBuf = ''
 
     ffmpeg.stdout!.on('data', (chunk: Buffer) => {
-      hadFirstFrame = true
+      if (!hadFirstFrame) {
+        hadFirstFrame = true
+        preferredTransportMap.set(camera.id, transport)
+      }
       if (jpegBuf.length === 0) jpegBuf = chunk
       else jpegBuf = Buffer.concat([jpegBuf, chunk])
       while (true) {
@@ -667,12 +666,12 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       rtspSessions.delete(camera.id)
       const isConnTimeout = stderrBuf.includes('-138') || stderrBuf.toLowerCase().includes('connection to tcp') || stderrBuf.toLowerCase().includes('timed out') || stderrBuf.toLowerCase().includes('nonmatching transport') || stderrBuf.toLowerCase().includes('invalid data')
       if (transport === 'tcp' && isConnTimeout && !hadFirstFrame && !entry.controller.signal.aborted) {
-        bridge?.log(`[vision] RTSP: tcp timeout para ${camera.name}, fallback para udp em 1.5s...`)
+        bridge?.log(`[vision] RTSP: tcp falhou para ${camera.name}, alternando imediatamente para udp...`)
         setTimeout(() => {
           if (entry.controller.signal.aborted) { mjpegStreams.delete(camera.id); return }
           try { ffmpeg.kill() } catch {}
           trySpawn('udp', true)
-        }, 1500)
+        }, 50)
         return
       }
       bridge?.log(`[vision] RTSP: FFmpeg saiu para ${camera.name} [${transport}] code=${code} signal=${signal}`)
@@ -689,7 +688,7 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
     return ffmpeg
   }
 
-  trySpawn('tcp')
+  trySpawn(initialTransport)
 }
 
 // ---------------------------------------------------------------------------

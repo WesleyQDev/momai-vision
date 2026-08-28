@@ -333,7 +333,7 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
     await waitFor(() => expect(screen.queryByText('falha simulada')).toBeNull())
   })
 
-  it('alerta quando há campos IP preenchidos sem adicionar à seleção', async () => {
+  it('inclui automaticamente IP válido digitado sem precisar clicar em Adicionar à seleção', async () => {
     const { calls } = setupServer({ cameras: [WEB_A] })
     render(<VisionPage />)
     await screen.findByText('MomAI Vision')
@@ -341,29 +341,21 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
     await screen.findByText('Selecione uma webcam...')
 
     await stageWebcam('Webcam A')
-    // Fill the IP fields but do NOT stage the camera
+    // Fill the IP fields but do NOT click "Adicionar à seleção" — o rodapé deve
+    // contar o draft válido (+1) e incluir ao confirmar em 1 clique.
     fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
     fireEvent.change(screen.getByPlaceholderText(/URL \(http/), { target: { value: 'http://10.0.0.9:8080/video' } })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Adicionar 1 câmera' }))
+    // O botão agora mostra 2 (webcam + IP não-staged mas válido)
+    expect(screen.getByRole('button', { name: 'Adicionar 2 câmeras' })).toBeTruthy()
 
-    // Prompt appears and nothing was written yet
-    expect(screen.getByText(/Confirmar mesmo assim/)).toBeTruthy()
-    expect(calls.filter((c) => c.toolName === 'configure')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Adicionar 2 câmeras' }))
 
-    // Cancelar dismisses the prompt and keeps editing (fields stay filled)
-    fireEvent.click(screen.getByText('Cancelar'))
-    expect(screen.queryByText(/Confirmar mesmo assim/)).toBeNull()
-    expect(screen.getByRole('button', { name: 'Adicionar 1 câmera' })).toBeTruthy()
-
-    // Confirm again, then accept: only the staged webcam is added
-    fireEvent.click(screen.getByRole('button', { name: 'Adicionar 1 câmera' }))
-    fireEvent.click(screen.getByText('Sim, adicionar mesmo assim'))
     await waitFor(() => {
       const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
       expect(write).toBeTruthy()
-      expect(write!.args.selectedCameras).toEqual(['webcam:a'])
-      expect(write!.args.ipCameras).toEqual([])
+      expect(write!.args.selectedCameras).toEqual(['webcam:a', 'ip:http://10.0.0.9:8080/video'])
+      expect(write!.args.ipCameras).toEqual([{ id: 'ip:http://10.0.0.9:8080/video', name: 'Câmera IP', url: 'http://10.0.0.9:8080/video' }])
     })
   })
 })
