@@ -83,7 +83,7 @@ describe('VisionAlertCard', () => {
     )
     expect(screen.getByText('Garagem')).toBeTruthy()
     expect(screen.getByText('Movimento detectado')).toBeTruthy()
-    const img = screen.getByRole('img') as HTMLImageElement
+    const img = screen.getByAltText('Snapshot') as HTMLImageElement
     expect(img.src).toContain('data:image/jpeg;base64,abc')
   })
 

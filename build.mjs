@@ -77,6 +77,9 @@ for (const entry of ['src/page.tsx', 'src/panel.tsx']) {
       platform: 'browser',
       target: 'es2020',
       external,
+      loader: {
+        '.png': 'dataurl'
+      },
       sourcemap: false,
       logLevel: 'warning'
     })

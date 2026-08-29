@@ -14,6 +14,7 @@ import { ptLabel, PT_CLASS, triggerLabel } from './vision/labels'
 import { AlertCanvasOverlay } from './panel'
 import { classColor } from './vision/theme-color'
 import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
+import visionIconPng from '../icon.png'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
@@ -155,21 +156,12 @@ const EMPTY_DETECTIONS: Detection[] = []
 
 export function VisionIcon({ className = 'w-6 h-6' }: { className?: string }): JSX.Element {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M2.5 12c2.1-4.3 5.6-6.5 9.5-6.5s7.4 2.2 9.5 6.5c-2.1 4.3-5.6 6.5-9.5 6.5S4.6 16.3 2.5 12Z" />
-      <circle cx="12" cy="12" r="3" />
-      <circle cx="12" cy="12" r="1" fill="currentColor" />
-      <path d="M17.6 4.9v3.2M16 6.5h3.2" />
-    </svg>
+    <img
+      src={visionIconPng}
+      alt="MomAI Vision"
+      className={`${className} object-contain inline-block shrink-0`}
+      draggable={false}
+    />
   )
 }
 
@@ -783,7 +775,7 @@ function CustomSelect<T extends string = string>({
       <button
         type="button"
         onClick={() => (open ? close() : openWithPosition())}
-        className={`w-full flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-zinc-900/90 text-gray-200 hover:bg-white/10 hover:border-white/20 transition-all font-medium select-none shadow-md backdrop-blur-md active:scale-[0.99] ${size === 'sm' ? 'px-2.5 py-1.5 text-[11px]' : 'px-3.5 py-2.5 text-xs'
+        className={`w-full flex items-center justify-between gap-2 rounded-xl border border-border/40 bg-input text-text hover:bg-card hover:border-border transition-all font-medium select-none shadow-sm backdrop-blur-md active:scale-[0.99] ${size === 'sm' ? 'px-2.5 py-1.5 text-[11px]' : 'px-3.5 py-2.5 text-xs'
           }`}
       >
         <span className="flex items-center gap-2 truncate">
@@ -791,7 +783,7 @@ function CustomSelect<T extends string = string>({
           <span className="truncate">{selectedOption?.label || placeholder}</span>
         </span>
         <svg
-          className={`w-3.5 h-3.5 text-gray-400 shrink-0 transition-transform duration-200 ${open ? 'rotate-180 text-emerald-400' : ''}`}
+          className={`w-3.5 h-3.5 text-text-muted shrink-0 transition-transform duration-200 ${open ? 'rotate-180 text-emerald-400' : ''}`}
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -806,7 +798,7 @@ function CustomSelect<T extends string = string>({
           ref={popoverRef}
           role="listbox"
           style={{ top: pos.top, left: pos.left, width: pos.width, maxHeight: pos.maxH }}
-          className="fixed z-[100] rounded-xl border border-white/15 bg-zinc-900/95 backdrop-blur-xl shadow-2xl overflow-y-auto py-1 animate-fadeIn"
+          className="fixed z-[100] rounded-xl border border-border/40 bg-card/95 backdrop-blur-xl shadow-2xl overflow-y-auto py-1 animate-fadeIn"
         >
           {options.map((opt) => {
             const isSelected = opt.value === value
@@ -824,10 +816,10 @@ function CustomSelect<T extends string = string>({
                   close()
                 }}
                 className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-xs transition-colors ${isDisabled
-                  ? 'opacity-40 cursor-not-allowed text-gray-500 bg-transparent'
+                  ? 'opacity-40 cursor-not-allowed text-text-muted bg-transparent'
                   : isSelected
-                    ? 'bg-emerald-500/20 text-emerald-300 font-semibold'
-                    : 'text-gray-300 hover:bg-white/10 hover:text-white'
+                    ? 'bg-emerald-500/20 text-emerald-400 font-semibold'
+                    : 'text-text hover:bg-input'
                   }`}
               >
                 <span className="flex items-center gap-2 truncate">
@@ -836,7 +828,7 @@ function CustomSelect<T extends string = string>({
                 </span>
                 <span className="flex items-center gap-1.5 shrink-0">
                   {opt.badge && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/5 border border-white/10 text-gray-400 font-normal">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-input border border-border/30 text-text-muted font-normal">
                       {opt.badge}
                     </span>
                   )}
@@ -1603,23 +1595,23 @@ const CameraCard = memo(function CameraCard({
       onDragLeave={(e) => onDragLeave?.(e)}
       onDrop={(e) => onDrop?.(e, index)}
       onDragEnd={(e) => onDragEnd?.(e)}
-      className={`flex flex-col h-full rounded-2xl bg-zinc-900/80 border overflow-hidden shadow-xl transition-all ${isDragging
+      className={`flex flex-col h-full rounded-2xl bg-card border overflow-hidden shadow-md transition-all ${isDragging
         ? 'opacity-40 scale-95 border-emerald-500/50'
         : isDragOver
           ? 'border-2 border-emerald-400 bg-emerald-500/10 shadow-emerald-500/20 scale-[1.02]'
-          : 'border-white/10 hover:border-white/20'
+          : 'border-border/30 hover:border-border/60'
         }`}
     >
-      <div className="relative w-full aspect-video bg-black rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
+      <div className="relative w-full aspect-video bg-input/40 rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
         <canvas
           ref={frameCanvasRef}
           className={`absolute inset-0 w-full h-full object-cover ${hasFrame ? 'block' : 'opacity-0'}`}
         />
         {!hasFrame && (
-          <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-gray-400 bg-black p-3 text-center gap-1">
+          <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-text-muted bg-input/60 p-3 text-center gap-1">
             <VisionBlinkStyleTag />
             <span className="vision-eye-blink">
-              <VisionIcon className="w-5 h-5 text-gray-400" />
+              <VisionIcon className="w-5 h-5 text-text-muted" />
             </span>
             <span className="font-medium leading-none">{cameraPlaceholderStatus(camera, reloading, error, isSlow, isUnavailable)}</span>
           </div>
@@ -1646,11 +1638,11 @@ const CameraCard = memo(function CameraCard({
         ) : null}
 
         {/* Top Header Bar Inside Card: Drag Handle, Name & Controls */}
-        <div className="absolute top-0 inset-x-0 p-2.5 z-20 flex items-center justify-between bg-gradient-to-b from-black/80 via-black/40 to-transparent backdrop-blur-[2px]">
+        <div className="absolute top-0 inset-x-0 p-2.5 z-20 flex items-center justify-between">
           {/* Left: Drag Grip Handle + Camera Name + Monitors count */}
           <div className="flex items-center gap-2 max-w-[65%] truncate">
             <span
-              className="text-gray-400 hover:text-white cursor-grab active:cursor-grabbing p-0.5 rounded transition-colors shrink-0"
+              className="text-text-muted hover:text-text cursor-grab active:cursor-grabbing p-0.5 rounded transition-colors shrink-0"
               title="Clique e arraste para reordenar esta câmera"
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
@@ -1662,11 +1654,11 @@ const CameraCard = memo(function CameraCard({
                 <circle cx="15" cy="19" r="1.5" />
               </svg>
             </span>
-            <span className="text-xs font-semibold text-white drop-shadow truncate" title={camera.name}>
+            <span className="text-xs font-semibold text-text truncate" title={camera.name}>
               {camera.name}
             </span>
             {camera.monitors > 0 ? (
-              <span className="text-[10px] font-medium text-gray-300 bg-white/10 rounded-full px-2 py-0.5 backdrop-blur-sm shrink-0">
+              <span className="text-[10px] font-medium text-text-muted bg-input/80 rounded-full px-2 py-0.5 shrink-0">
                 {camera.monitors} mon
               </span>
             ) : null}
@@ -1677,7 +1669,7 @@ const CameraCard = memo(function CameraCard({
             {onExpand ? (
               <button
                 onClick={() => onExpand(camera)}
-                className="w-7 h-7 bg-black/50 hover:bg-zinc-800 text-white rounded-full flex items-center justify-center transition-all shadow backdrop-blur-sm hover:scale-105 active:scale-95"
+                className="w-7 h-7 bg-card/80 hover:bg-input text-text rounded-full flex items-center justify-center transition-all border border-border/30 hover:scale-105 active:scale-95"
                 title="Ampliar imagem"
               >
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -1688,7 +1680,7 @@ const CameraCard = memo(function CameraCard({
             {onRemove ? (
               <button
                 onClick={() => onRemove(camera.id)}
-                className="w-7 h-7 bg-black/50 hover:bg-red-600/90 text-white rounded-full flex items-center justify-center transition-all shadow backdrop-blur-sm hover:scale-105 active:scale-95"
+                className="w-7 h-7 bg-card/80 hover:bg-red-500 hover:text-white text-text-muted rounded-full flex items-center justify-center transition-all border border-border/30 hover:scale-105 active:scale-95"
                 title={
                   camera.source === 'ip'
                     ? 'Remover câmera IP (cadastro e exibição)'
@@ -1705,8 +1697,8 @@ const CameraCard = memo(function CameraCard({
         </div>
       </div>
 
-      <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/80 shrink-0 border-t border-white/5">
-        <span className="text-[11px] text-gray-400 font-medium px-1 flex items-center gap-1.5">
+      <div className="flex items-center justify-between px-3 py-2 bg-card/95 shrink-0 border-t border-border/30">
+        <span className="text-[11px] text-text-muted font-medium px-1 flex items-center gap-1.5">
           <span className={`w-1.5 h-1.5 rounded-full ${camera.online ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
           {camera.source === 'webcam' ? 'Webcam' : 'MJPEG / IP'}
         </span>
@@ -1716,7 +1708,7 @@ const CameraCard = memo(function CameraCard({
           <button
             disabled={reloading}
             onClick={() => void handleReloadCamera()}
-            className="w-7 h-7 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white transition-all flex items-center justify-center shadow-md active:scale-95 disabled:opacity-70 disabled:hover:bg-zinc-800"
+            className="w-7 h-7 rounded-lg bg-input hover:bg-card border border-border/40 text-text transition-all flex items-center justify-center shadow-md active:scale-95 disabled:opacity-70"
             title="Recarregar câmera"
             aria-label="Recarregar câmera"
           >
@@ -1737,11 +1729,11 @@ const CameraCard = memo(function CameraCard({
           <button
             disabled={printStatus === 'capturing'}
             onClick={handleTakeSnapshot}
-            className={`text-[11px] font-medium rounded-lg px-3 py-1.5 transition-all flex items-center gap-1.5 shadow-md active:scale-95 ${printStatus === 'success'
-              ? 'bg-zinc-700 text-white'
+            className={`text-[11px] font-medium rounded-lg px-3 py-1.5 transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-border/40 ${printStatus === 'success'
+              ? 'bg-emerald-600 text-white border-transparent'
               : printStatus === 'capturing'
-                ? 'bg-zinc-800 text-white opacity-80'
-                : 'bg-zinc-800 hover:bg-zinc-700 text-white'
+                ? 'bg-input text-text opacity-80'
+                : 'bg-input hover:bg-card text-text'
               }`}
           >
             {printStatus === 'success' ? (
@@ -1753,7 +1745,7 @@ const CameraCard = memo(function CameraCard({
               </>
             ) : printStatus === 'capturing' ? (
               <>
-                <svg className="w-3.5 h-3.5 animate-spin text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg className="w-3.5 h-3.5 animate-spin text-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
                   <path d="M12 2a10 10 0 0 1 10 10" />
                 </svg>
@@ -1784,17 +1776,17 @@ function AddCameraCard({ onClick }: { onClick: () => void }): JSX.Element {
     <button
       onClick={onClick}
       type="button"
-      className="group relative rounded-2xl border border-dashed border-white/12 hover:border-white/20 bg-zinc-900/40 hover:bg-zinc-800/50 transition-all duration-200 flex flex-col items-center justify-center p-6 text-center overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/30 h-full min-h-[168px] cursor-pointer min-w-0"
+      className="group relative rounded-2xl border border-dashed border-border/50 hover:border-border bg-input/40 hover:bg-input/80 transition-all duration-200 flex flex-col items-center justify-center p-6 text-center overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/30 h-full min-h-[168px] cursor-pointer min-w-0"
     >
-      <div className="w-9 h-9 rounded-xl bg-white/[0.06] group-hover:bg-white/[0.10] border border-white/10 text-zinc-300 group-hover:text-white flex items-center justify-center mb-3 transition-all duration-200">
+      <div className="w-9 h-9 rounded-xl bg-card border border-border/40 text-text-muted group-hover:text-text flex items-center justify-center mb-3 transition-all duration-200">
         <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
           <path d="M12 5v14M5 12h14" />
         </svg>
       </div>
-      <span className="text-[13px] font-semibold text-zinc-100 tracking-tight">
+      <span className="text-[13px] font-semibold text-text tracking-tight">
         Adicionar Câmera
       </span>
-      <span className="text-[11px] text-zinc-500 mt-1 leading-snug">
+      <span className="text-[11px] text-text-muted mt-1 leading-snug">
         Webcam ou IP
       </span>
     </button>
@@ -1959,7 +1951,7 @@ function AddCameraModal({
   return createPortal(
     <div
       className={`fixed inset-0 top-8 z-[100] animate-fadeIn overflow-y-auto ${
-        isMaximized ? 'grid place-items-center p-6 bg-black/70 backdrop-blur-sm' : 'flex flex-col bg-zinc-900'
+        isMaximized ? 'grid place-items-center p-6 bg-black/60 backdrop-blur-sm' : 'flex flex-col bg-bg'
       }`}
       style={{ top: '32px' }}
     >
@@ -1967,28 +1959,28 @@ function AddCameraModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="vision-camera-dialog-title"
-        className={`flex flex-col bg-zinc-900 shadow-2xl overflow-hidden ${
+        className={`flex flex-col bg-card shadow-2xl overflow-hidden ${
           isMaximized
-            ? 'w-full max-w-[720px] max-h-[min(88dvh,680px)] my-6 rounded-2xl border border-white/10'
+            ? 'w-full max-w-[720px] max-h-[min(88dvh,680px)] my-6 rounded-2xl border border-border/40'
             : 'w-full h-full max-w-none max-h-none rounded-none border-0 flex-1 min-h-0'
         }`}
       >
           {/* Modal Header */}
-          <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-white/5 shrink-0">
+          <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-border/30 shrink-0">
             <button
               onClick={onClose}
               aria-label="Voltar"
-              className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-white flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/15"
+              className="w-8 h-8 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
             >
               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M19 12H5M12 19l-7-7 7-7" />
               </svg>
             </button>
             <div className="flex-1 flex items-center justify-center gap-2.5 min-w-0">
-              <span className="w-7 h-7 rounded-lg bg-emerald-500/12 border border-emerald-500/15 flex items-center justify-center shrink-0">
+              <span className="w-7 h-7 rounded-lg bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center shrink-0">
                 <VisionIcon className="w-3.5 h-3.5 text-emerald-400" />
               </span>
-              <h2 id="vision-camera-dialog-title" className="text-[14px] font-semibold text-white tracking-tight">
+              <h2 id="vision-camera-dialog-title" className="text-[14px] font-semibold text-text tracking-tight">
                 Adicionar Câmeras
               </h2>
             </div>
@@ -1996,15 +1988,15 @@ function AddCameraModal({
           </div>
 
           {/* Segmented Control / Tab Switcher */}
-          <div role="tablist" className="mx-4 sm:mx-6 p-1 rounded-full bg-zinc-800/80 border border-white/10 flex gap-1">
+          <div role="tablist" className="mx-4 sm:mx-6 p-1 rounded-full bg-input border border-border/40 flex gap-1">
             <button
               type="button"
               role="tab"
               onClick={() => setActiveTab('webcam')}
               aria-selected={activeTab === 'webcam'}
-              className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${activeTab === 'webcam'
-                ? 'bg-white text-zinc-950 shadow-sm font-semibold'
-                : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
+              className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 ${activeTab === 'webcam'
+                ? 'bg-card text-text shadow-sm font-semibold border border-border/30'
+                : 'text-text-muted hover:text-text hover:bg-card/40'
                 }`}
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -2012,16 +2004,16 @@ function AddCameraModal({
                 <circle cx="12" cy="13" r="3.5" />
               </svg>
               Webcam USB
-              <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'webcam' ? 'bg-zinc-900 text-white' : 'bg-white/10 text-zinc-300'}`}>{webcamCameras.length}</span>
+              <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'webcam' ? 'bg-input text-text' : 'bg-input/60 text-text-muted'}`}>{webcamCameras.length}</span>
             </button>
             <button
               type="button"
               role="tab"
               onClick={() => setActiveTab('ip')}
               aria-selected={activeTab === 'ip'}
-              className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${activeTab === 'ip'
-                ? 'bg-white text-zinc-950 shadow-sm font-semibold'
-                : 'text-zinc-400 hover:text-zinc-200 hover:bg-white/5'
+              className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 ${activeTab === 'ip'
+                ? 'bg-card text-text shadow-sm font-semibold border border-border/30'
+                : 'text-text-muted hover:text-text hover:bg-card/40'
                 }`}
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -2030,7 +2022,7 @@ function AddCameraModal({
                 <path d="M3.5 12h17" />
               </svg>
               Câmeras IP
-              <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'ip' ? 'bg-zinc-900 text-white' : 'bg-white/10 text-zinc-300'}`}>{ipCameras.length}</span>
+              <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'ip' ? 'bg-input text-text' : 'bg-input/60 text-text-muted'}`}>{ipCameras.length}</span>
             </button>
           </div>
 
@@ -2038,16 +2030,16 @@ function AddCameraModal({
                 {/* Tab 1: Webcams USB */}
                 {activeTab === 'webcam' && (
                   <div className="animate-fadeIn overflow-visible">
-                    <label className="text-[11px] font-medium text-zinc-400 block mb-2">
+                    <label className="text-[11px] font-medium text-text-muted block mb-2">
                       Webcam disponível
                     </label>
 
                     {webcamCameras.length === 0 ? (
-                      <div className="text-xs text-zinc-500 border border-dashed border-white/10 rounded-xl px-4 py-6 text-center bg-white/[0.02]">
+                      <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-6 text-center bg-input/20">
                         Nenhuma webcam USB detectada.
                       </div>
                     ) : webcamOptions.length === 0 ? (
-                      <div className="text-xs text-zinc-500 border border-dashed border-white/10 rounded-xl px-4 py-6 text-center bg-white/[0.02]">
+                      <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-6 text-center bg-input/20">
                         Todas já estão na seleção.
                       </div>
                     ) : (
@@ -2061,7 +2053,7 @@ function AddCameraModal({
                           direction="down"
                           className="w-full"
                         />
-                        <p className="text-[11px] text-zinc-500 mt-2">Selecione para adicionar.</p>
+                        <p className="text-[11px] text-text-muted mt-2">Selecione para adicionar.</p>
                       </div>
                     )}
                   </div>
@@ -2070,22 +2062,22 @@ function AddCameraModal({
                 {/* Tab 2: Câmeras IP */}
                 {activeTab === 'ip' && (
                   <div className="animate-fadeIn">
-                    <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 sm:p-4 space-y-3">
+                    <div className="rounded-xl border border-border/40 bg-input/20 p-3 sm:p-4 space-y-3">
                       <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.7fr] gap-3">
                         <div>
-                          <label htmlFor="vision-ip-name" className="block text-[11px] font-medium text-zinc-400 mb-1.5">
-                            Nome <span className="text-zinc-600 font-normal">— opcional</span>
+                          <label htmlFor="vision-ip-name" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                            Nome <span className="text-text-muted/60 font-normal">— opcional</span>
                           </label>
                         <input
                           id="vision-ip-name"
                           value={ipName}
                           onChange={(e) => setIpName(e.target.value)}
                           placeholder="Nome da câmera (ex.: Garagem, Entrada)"
-                          className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-700 focus:ring-1 focus:ring-white/5 transition-colors"
+                          className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
                         />
                       </div>
                       <div>
-                        <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-zinc-400 mb-1.5">
+                        <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-text-muted mb-1.5">
                           URL da câmera
                         </label>
                         <input
@@ -2099,7 +2091,7 @@ function AddCameraModal({
                             }
                           }}
                           placeholder="URL (http://ip:porta/video ou rtsp://user:pass@ip)"
-                          className="w-full bg-zinc-900 border border-white/10 rounded-lg px-3 py-2 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-700 focus:ring-1 focus:ring-white/5 transition-colors"
+                          className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
                         />
                       </div>
                       </div>
@@ -2108,7 +2100,7 @@ function AddCameraModal({
                           type="button"
                           disabled={!ipUrl.trim()}
                           onClick={handleStageIp}
-                          className="inline-flex items-center gap-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-zinc-200 hover:text-white text-[11px] font-medium px-3.5 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/10"
+                          className="inline-flex items-center gap-1.5 rounded-full bg-input hover:bg-card disabled:opacity-40 disabled:cursor-not-allowed border border-border/40 text-text text-[11px] font-medium px-3.5 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
                         >
                           <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <path d="M12 5v14M5 12h14" />
@@ -2117,20 +2109,20 @@ function AddCameraModal({
                         </button>
                       </div>
                       {hasUnsavedValidIp ? (
-                        <p className="text-[11px] text-zinc-500 text-center">Vai entrar ao confirmar — pode adicionar mais.</p>
+                        <p className="text-[11px] text-text-muted text-center">Vai entrar ao confirmar — pode adicionar mais.</p>
                       ) : null}
                     </div>
                   </div>
                 )}
 
             {pendingCount > 0 && (
-              <div className="rounded-xl border border-white/10 bg-white/[0.03] overflow-hidden">
-                <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-white/5">
-                  <span className="text-[11px] font-semibold text-zinc-200">Revisão</span>
-                  <span className="text-[10px] text-zinc-500">{pendingCount} {pendingCount === 1 ? 'câmera' : 'câmeras'} · confirmação única</span>
+              <div className="rounded-xl border border-border/40 bg-input/30 overflow-hidden">
+                <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-border/30">
+                  <span className="text-[11px] font-semibold text-text">Revisão</span>
+                  <span className="text-[10px] text-text-muted">{pendingCount} {pendingCount === 1 ? 'câmera' : 'câmeras'} · confirmação única</span>
                 </div>
                 <div className="max-h-[160px] overflow-y-auto custom-scrollbar">
-                  <ul className="divide-y divide-white/5">
+                  <ul className="divide-y divide-border/20">
                     {pendingWebcamIds.map((id) => {
                       const cam = webcamCameras.find((c) => c.id === id)
                       return (
@@ -2138,9 +2130,9 @@ function AddCameraModal({
                           key={id}
                           className="flex items-center justify-between gap-2 px-2.5 py-1.5"
                         >
-                          <span className="text-[11px] text-zinc-200 truncate flex items-center gap-2 min-w-0">
-                            <span className="w-6 h-6 rounded-full bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
-                              <svg className="w-3 h-3 text-zinc-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                          <span className="text-[11px] text-text truncate flex items-center gap-2 min-w-0">
+                            <span className="w-6 h-6 rounded-full bg-input border border-border/30 flex items-center justify-center shrink-0">
+                              <svg className="w-3 h-3 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                                 <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                                 <circle cx="12" cy="13" r="3" />
                               </svg>
@@ -2151,7 +2143,7 @@ function AddCameraModal({
                             type="button"
                             onClick={() => removePendingWebcam(id)}
                             aria-label={`Remover ${cam?.name || id} da seleção`}
-                            className="w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-white flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+                            className="w-6 h-6 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-red-400 flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
                           >
                             <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                               <path d="M18 6L6 18M6 6l12 12" />
@@ -2165,9 +2157,9 @@ function AddCameraModal({
                         key={`ip-${draft.url}-${i}`}
                         className="flex items-center justify-between gap-2 px-3 py-2"
                       >
-                        <span className="text-[11px] text-zinc-200 truncate flex items-center gap-2 min-w-0">
-                          <span className="w-6 h-6 rounded-full bg-white/5 border border-white/10 flex items-center justify-center shrink-0">
-                            <svg className="w-3 h-3 text-zinc-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                        <span className="text-[11px] text-text truncate flex items-center gap-2 min-w-0">
+                          <span className="w-6 h-6 rounded-full bg-input border border-border/30 flex items-center justify-center shrink-0">
+                            <svg className="w-3 h-3 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
                               <circle cx="12" cy="12" r="7.5" />
                               <path d="M12 4a15 15 0 0 1 3.2 8A15 15 0 0 1 12 20A15 15 0 0 1 8.8 12 15 15 0 0 1 12 4z" />
                               <path d="M4.5 12h15" />
@@ -2179,7 +2171,7 @@ function AddCameraModal({
                           type="button"
                           onClick={() => removePendingIp(i)}
                           aria-label={`Remover ${draft.name || draft.url} da seleção`}
-                          className="w-6 h-6 rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-white flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+                          className="w-6 h-6 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-red-400 flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
                         >
                           <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                             <path d="M18 6L6 18M6 6l12 12" />
@@ -2194,7 +2186,7 @@ function AddCameraModal({
           </div>
 
           {/* Modal Footer */}
-          <div className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 border-t border-white/10 bg-zinc-900 flex flex-col gap-2 sm:gap-3">
+          <div className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 border-t border-border/30 bg-card flex flex-col gap-2 sm:gap-3">
             {modalError ? (
               <p className="w-full text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2.5 text-left leading-relaxed">
                 {modalError}
@@ -2204,7 +2196,7 @@ function AddCameraModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-full bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-400 hover:text-zinc-200 px-4 py-2 text-[11px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-white/10"
+                className="rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-4 py-2 text-[11px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
               >
                 Cancelar
               </button>
@@ -2212,9 +2204,9 @@ function AddCameraModal({
                 type="button"
                 disabled={submitting || effectivePendingCount === 0}
                 onClick={() => void handleConfirm()}
-                className={`rounded-full px-4 py-2 text-[11px] font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-white/10 border ${effectivePendingCount === 0
-                  ? 'bg-white/[0.03] border-white/5 text-zinc-600 cursor-not-allowed'
-                  : 'bg-zinc-800 hover:bg-zinc-700 border-white/10 text-zinc-100 hover:text-white'
+                className={`rounded-full px-4 py-2 text-[11px] font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 border ${effectivePendingCount === 0
+                  ? 'bg-input/40 border-border/20 text-text-muted/40 cursor-not-allowed'
+                  : 'bg-emerald-600 hover:bg-emerald-500 border-transparent text-white shadow-md'
                   }`}
               >
                 {submitting
@@ -2877,6 +2869,14 @@ function formatTriggerPortuguese(t: MonitorTriggerInfo): string {
     case 'periodic':
       return `Resumo a cada ${t.everySec || 300}s`
     default:
+      if (
+        !t.type ||
+        t.type === 'momai-vision.vision_alert' ||
+        t.type === 'vision_alert' ||
+        t.type === 'vision:detection'
+      ) {
+        return ''
+      }
       return t.type
   }
 }
@@ -4483,25 +4483,27 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   const orphanMonitors = activeCameras.filter((m) => !cameraIds.has(m.cameraId))
 
   const tabClass = (tab: string) =>
-    `px-3.5 py-1.5 text-xs font-medium rounded-full transition-all ${activeTab === tab ? 'bg-emerald-600 text-white shadow-md' : 'bg-white/5 text-gray-300 hover:bg-white/10'
+    `px-3.5 py-1.5 text-xs font-medium rounded-full transition-all ${activeTab === tab
+      ? 'bg-emerald-600 text-white shadow-md'
+      : 'bg-input text-text-muted hover:text-text hover:bg-card border border-border/30'
     }`
 
   return (
-    <div className="relative w-full h-full min-h-screen max-h-screen overflow-y-auto p-4 md:p-6 text-gray-100 space-y-5 custom-scrollbar">
+    <div className="relative w-full h-full min-h-screen max-h-screen overflow-y-auto p-4 md:p-6 text-text space-y-5 custom-scrollbar">
       <header className="flex items-center justify-between mb-5">
         <div>
-          <h1 className="text-xl font-bold flex items-center gap-2">
+          <h1 className="text-xl font-bold flex items-center gap-2 text-text">
             <span className="text-emerald-400">
               <VisionIcon />
             </span>{' '}
             MomAI Vision
           </h1>
-          <p className="text-xs text-gray-300 mt-0.5">
+          <p className="text-xs text-text-muted mt-0.5">
             Visão e monitoramento 100% locais — nada sai da sua máquina.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-text-muted">
             {activeMonitors.length} monitor{activeMonitors.length !== 1 ? 'es' : ''} ativo{activeMonitors.length !== 1 ? 's' : ''}
             {pausedMonitors.length > 0
               ? ` · ${pausedMonitors.length} pausado${pausedMonitors.length !== 1 ? 's' : ''}`
@@ -4510,7 +4512,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           <button
             disabled={isRefreshing}
             onClick={() => void refresh()}
-            className="text-xs rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-1.5 transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-60"
+            className="text-xs rounded-lg bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-3 py-1.5 transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-60"
             title="Atualizar lista e conexão das câmeras"
           >
             <svg
@@ -4579,193 +4581,220 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           </div>
 
           <div className="mt-8 pt-4">
-            <div className="flex items-center justify-between gap-3 mb-4">
-              <div className="flex items-center gap-2.5">
-                <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(52,211,153,0.5)]" />
-                <h3 className="text-lg font-bold text-white tracking-tight">
-                  Monitoramento Ativo
-                </h3>
-                {monitors.length > 0 && (
-                  <span className="text-xs text-gray-400 font-medium">
-                    ({activeCameras.length + orphanMonitors.length})
-                  </span>
-                )}
-              </div>
-              <button
-                onClick={() => {
-                  const evt = new CustomEvent('momai:open_automation_modal', {
-                    detail: { triggerProvider: 'momai-vision' }
-                  })
-                  window.dispatchEvent(evt)
-                  if (window.parent && window.parent !== window) {
-                    window.parent.dispatchEvent(evt)
-                  }
-                }}
-                className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg px-3.5 py-2 transition-all shadow-md flex items-center gap-2 active:scale-95 cursor-pointer"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <line x1="12" y1="5" x2="12" y2="19" />
-                  <line x1="5" y1="12" x2="19" y2="12" />
-                </svg>
-                <span>Adicionar Monitoramento</span>
-              </button>
+            <div className="flex items-center gap-2.5 mb-4">
+              <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(52,211,153,0.5)]" />
+              <h3 className="text-lg font-bold text-text tracking-tight">
+                Monitoramento Ativo
+              </h3>
+              {monitors.length > 0 && (
+                <span className="text-xs text-text-muted font-medium">
+                  ({activeCameras.length + orphanMonitors.length})
+                </span>
+              )}
             </div>
 
             {monitors.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-7 flex flex-col items-center justify-center text-center gap-2">
-                <svg
-                  className="w-7 h-7 text-gray-500"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.7"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
+              <div className="rounded-2xl border border-dashed border-border/50 bg-card p-8 flex flex-col items-center justify-center text-center gap-3 shadow-sm">
+                <div className="w-12 h-12 rounded-2xl bg-input/60 border border-border/40 flex items-center justify-center text-emerald-400">
+                  <VisionIcon className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <h4 className="text-sm font-semibold text-text">Nenhum monitoramento configurado</h4>
+                  <p className="text-xs text-text-muted max-w-sm">
+                    Configure monitoramentos inteligentes para receber alertas de movimento, pessoas ou objetos.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const evt = new CustomEvent('momai:open_automation_modal', {
+                      detail: { triggerProvider: 'momai-vision' }
+                    })
+                    window.dispatchEvent(evt)
+                    if (window.parent && window.parent !== window) {
+                      window.parent.dispatchEvent(evt)
+                    }
+                  }}
+                  className="mt-2 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl px-4 py-2.5 transition-all shadow-md flex items-center gap-2 active:scale-95 cursor-pointer"
                 >
-                  <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z" />
-                  <circle cx="12" cy="12" r="3" />
-                  <path d="M12 9.5V12l1.6 1.2" />
-                </svg>
-                <p className="text-xs text-gray-400 max-w-sm">
-                  Nenhum monitoramento configurado no momento. Clique em
-                  <span className="text-gray-300"> Adicionar Monitoramento </span>
-                  acima para começar.
-                </p>
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <line x1="12" y1="5" x2="12" y2="19" />
+                    <line x1="5" y1="12" x2="19" y2="12" />
+                  </svg>
+                  <span>Adicionar Monitoramento</span>
+                </button>
               </div>
             ) : (
               <div className="space-y-4">
-                <ul className="divide-y divide-white/5">
-                  {[...activeCameras, ...orphanMonitors].map((m) => (
-                    <li key={m.id} className="flex items-center justify-between py-3 gap-4">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-white truncate">
-                            {m.label || m.cameraName || m.cameraId}
-                          </span>
-                          {m.cameraName && m.label && (
-                            <span className="text-xs text-gray-400 font-normal">
-                              · {m.cameraName}
+                <div className="grid grid-cols-1 gap-3">
+                  {[...activeCameras, ...orphanMonitors].map((m) => {
+                    const formattedTriggers = m.triggers.map(formatTriggerPortuguese).filter(Boolean)
+                    return (
+                      <div
+                        key={m.id}
+                        className="flex items-center justify-between p-4 gap-4 rounded-xl bg-card border border-border/40 shadow-sm hover:border-border transition-all"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-semibold text-text truncate">
+                              {m.label || m.cameraName || m.cameraId}
                             </span>
+                            {m.cameraName && m.label && (
+                              <span className="text-xs text-text-muted font-normal">
+                                · {m.cameraName}
+                              </span>
+                            )}
+                          </div>
+                          {(formattedTriggers.length > 0 || m.cooldownSec) && (
+                            <p className="text-xs text-text-muted mt-1">
+                              {formattedTriggers.join(' · ')}
+                              {m.cooldownSec ? `${formattedTriggers.length > 0 ? ' · ' : ''}Cooldown: ${m.cooldownSec}s` : ''}
+                            </p>
                           )}
                         </div>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          {m.triggers.map(formatTriggerPortuguese).join(' · ')}
-                          {m.cooldownSec ? ` · Cooldown: ${m.cooldownSec}s` : ''}
-                        </p>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            onClick={() => {
+                              setEditingMonitor(m)
+                              setIsMonitorModalOpen(true)
+                            }}
+                            className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-lg bg-input hover:bg-card border border-border/30 transition-all"
+                          >
+                            Editar
+                          </button>
+                          <button
+                            onClick={async () => {
+                              try {
+                                await command('pause_monitoring', { monitorId: m.id })
+                                void refresh()
+                              } catch (err) {
+                                setError(err instanceof Error ? err.message : String(err))
+                              }
+                            }}
+                            className="text-xs font-medium text-amber-400 hover:text-amber-300 px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 transition-all"
+                          >
+                            Pausar
+                          </button>
+                          <button
+                            onClick={async () => {
+                              try {
+                                await command('stop_monitoring', { monitorId: m.id })
+                                void refresh()
+                              } catch (err) {
+                                setError(err instanceof Error ? err.message : String(err))
+                              }
+                            }}
+                            title="Excluir monitoramento"
+                            aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}
+                            className="text-xs text-red-400 hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all"
+                          >
+                            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </button>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          onClick={() => {
-                            setEditingMonitor(m)
-                            setIsMonitorModalOpen(true)
-                          }}
-                          className="text-xs font-medium text-gray-300 hover:text-white px-2.5 py-1 rounded-md hover:bg-white/10 transition-all"
-                        >
-                          Editar
-                        </button>
-                        <button
-                          onClick={async () => {
-                            try {
-                              await command('pause_monitoring', { monitorId: m.id })
-                              void refresh()
-                            } catch (err) {
-                              setError(err instanceof Error ? err.message : String(err))
-                            }
-                          }}
-                          className="text-xs font-medium text-amber-400 hover:text-amber-300 px-2.5 py-1 rounded-md hover:bg-amber-500/10 transition-all"
-                        >
-                          Pausar
-                        </button>
-                        <button
-                          onClick={async () => {
-                            try {
-                              await command('stop_monitoring', { monitorId: m.id })
-                              void refresh()
-                            } catch (err) {
-                              setError(err instanceof Error ? err.message : String(err))
-                            }
-                          }}
-                          title="Excluir monitoramento"
-                          aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}
-                          className="text-xs text-red-400 hover:text-red-300 p-1.5 rounded-md hover:bg-red-500/10 transition-all"
-                        >
-                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                          </svg>
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
+                    )
+                  })}
+
+                  {/* Card Tracejado para Adicionar Monitoramento Abaixo */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const evt = new CustomEvent('momai:open_automation_modal', {
+                        detail: { triggerProvider: 'momai-vision' }
+                      })
+                      window.dispatchEvent(evt)
+                      if (window.parent && window.parent !== window) {
+                        window.parent.dispatchEvent(evt)
+                      }
+                    }}
+                    className="group flex items-center justify-center gap-2 p-3.5 rounded-xl border border-dashed border-border/50 hover:border-emerald-500/50 bg-input/20 hover:bg-input/50 transition-all duration-200 cursor-pointer text-text-muted hover:text-text"
+                  >
+                    <div className="w-6 h-6 rounded-lg bg-card border border-border/40 text-emerald-400 flex items-center justify-center group-hover:scale-105 transition-transform">
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <path d="M12 5v14M5 12h14" />
+                      </svg>
+                    </div>
+                    <span className="text-xs font-semibold">Adicionar Monitoramento</span>
+                  </button>
+                </div>
 
                 {pausedMonitors.length > 0 && (
-                  <div className="pt-3 border-t border-white/5">
-                    <h4 className="text-xs font-medium text-gray-400 mb-2">
+                  <div className="pt-4 border-t border-border/20">
+                    <h4 className="text-xs font-semibold text-text-muted mb-2.5 uppercase tracking-wider">
                       Pausados ({pausedMonitors.length})
                     </h4>
-                    <ul className="divide-y divide-white/5 opacity-75">
-                      {pausedMonitors.map((m) => (
-                        <li key={m.id} className="flex items-center justify-between py-2.5 gap-4">
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm font-medium text-gray-300 truncate">
-                                {m.label || m.cameraName || m.cameraId}
-                              </span>
-                              {m.cameraName && m.label && (
-                                <span className="text-xs text-gray-500">
-                                  · {m.cameraName}
+                    <div className="grid grid-cols-1 gap-2.5 opacity-80">
+                      {pausedMonitors.map((m) => {
+                        const formattedTriggers = m.triggers.map(formatTriggerPortuguese).filter(Boolean)
+                        return (
+                          <div
+                            key={m.id}
+                            className="flex items-center justify-between p-3.5 gap-4 rounded-xl bg-card/60 border border-border/30"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-text truncate">
+                                  {m.label || m.cameraName || m.cameraId}
                                 </span>
+                                {m.cameraName && m.label && (
+                                  <span className="text-xs text-text-muted">
+                                    · {m.cameraName}
+                                  </span>
+                                )}
+                              </div>
+                              {formattedTriggers.length > 0 && (
+                                <p className="text-xs text-text-muted mt-0.5">
+                                  {formattedTriggers.join(' · ')}
+                                </p>
                               )}
                             </div>
-                            <p className="text-xs text-gray-500 mt-0.5">
-                              {m.triggers.map(formatTriggerPortuguese).join(' · ')}
-                            </p>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await command('resume_monitoring', { monitorId: m.id })
+                                    void refresh()
+                                  } catch (err) {
+                                    setError(err instanceof Error ? err.message : String(err))
+                                  }
+                                }}
+                                className="text-xs font-medium text-emerald-400 hover:text-emerald-300 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-all"
+                              >
+                                Retomar
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setEditingMonitor(m)
+                                  setIsMonitorModalOpen(true)
+                                }}
+                                className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-lg bg-input hover:bg-card border border-border/30 transition-all"
+                              >
+                                Editar
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await command('stop_monitoring', { monitorId: m.id })
+                                    void refresh()
+                                  } catch (err) {
+                                    setError(err instanceof Error ? err.message : String(err))
+                                  }
+                                }}
+                                title="Excluir monitoramento"
+                                aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}
+                                className="text-xs text-red-400 hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all"
+                              >
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                                  <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2 2v2" />
+                                </svg>
+                              </button>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <button
-                              onClick={async () => {
-                                try {
-                                  await command('resume_monitoring', { monitorId: m.id })
-                                  void refresh()
-                                } catch (err) {
-                                  setError(err instanceof Error ? err.message : String(err))
-                                }
-                              }}
-                              className="text-xs font-medium text-emerald-400 hover:text-emerald-300 px-2.5 py-1 rounded-md hover:bg-emerald-500/10 transition-all"
-                            >
-                              Retomar
-                            </button>
-                            <button
-                              onClick={() => {
-                                setEditingMonitor(m)
-                                setIsMonitorModalOpen(true)
-                              }}
-                              className="text-xs font-medium text-gray-400 hover:text-gray-200 px-2.5 py-1 rounded-md hover:bg-white/10 transition-all"
-                            >
-                              Editar
-                            </button>
-                            <button
-                              onClick={async () => {
-                                try {
-                                  await command('stop_monitoring', { monitorId: m.id })
-                                  void refresh()
-                                } catch (err) {
-                                  setError(err instanceof Error ? err.message : String(err))
-                                }
-                              }}
-                              title="Excluir monitoramento"
-                              aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}
-                              className="text-xs text-red-400 hover:text-red-300 p-1.5 rounded-md hover:bg-red-500/10 transition-all"
-                            >
-                              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2 2v2" />
-                              </svg>
-                            </button>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
+                        )
+                      })}
+                    </div>
                   </div>
                 )}
               </div>
@@ -4778,7 +4807,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       {activeTab === 'alerts' ? (
         <section className="space-y-3">
           <div className="flex items-center justify-between mb-1">
-            <h3 className="text-sm font-semibold text-white">Histórico de Alertas</h3>
+            <h3 className="text-sm font-semibold text-text">Histórico de Alertas</h3>
             {alerts.length > 0 ? (
               <button
                 onClick={() => void handleClearAlerts()}
@@ -4792,7 +4821,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
             ) : null}
           </div>
           {alerts.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-white/15 p-8 text-center text-sm text-gray-400">
+            <div className="rounded-2xl border border-dashed border-border/40 bg-card/30 p-8 text-center text-sm text-text-muted">
               Nenhum alerta ainda. Os alertas aparecem aqui, no chat e no overlay flutuante.
             </div>
           ) : (
@@ -4805,33 +4834,33 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               return (
                 <div
                   key={alertKey(alert)}
-                  className="flex gap-3.5 items-center justify-between rounded-2xl border border-white/10 bg-zinc-900/70 p-3.5 hover:border-white/20 transition-all shadow-md"
+                  className="flex gap-3.5 items-center justify-between rounded-2xl border border-border/40 bg-card p-3.5 hover:border-border/80 transition-all shadow-md"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-sm font-semibold text-white truncate max-w-[70%]">
+                      <p className="text-sm font-semibold text-text truncate max-w-[70%]">
                         {alert.cameraName || 'Câmera'}
                         {alert.className ? ` · ${ptLabel(alert.className)}` : ''}
                         {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
                       </p>
                       {alert.ts ? (
-                        <span className="text-[11px] text-gray-400 font-medium shrink-0 bg-white/5 px-2 py-0.5 rounded-md border border-white/5">
+                        <span className="text-[11px] text-text-muted font-medium shrink-0 bg-input px-2 py-0.5 rounded-md border border-border/30">
                           {formatTime(alert.ts)}
                         </span>
                       ) : null}
                     </div>
                     {alert.description || alert.triggeredBy ? (
-                      <p className="text-xs text-gray-300 mt-1">
+                      <p className="text-xs text-text-muted mt-1">
                         {alert.description ? `${alert.description} ` : ''}
                         {alert.triggeredBy ? (
-                          <span className="text-gray-500">{triggerLabel(alert)}</span>
+                          <span className="text-text-muted/80">{triggerLabel(alert)}</span>
                         ) : null}
                       </p>
                     ) : null}
                   </div>
                   {imgSrc ? (
                     <div
-                      className="group relative w-32 h-20 rounded-xl bg-black shrink-0 overflow-hidden cursor-pointer border border-white/10 hover:border-emerald-500/60 transition-all shadow-sm"
+                      className="group relative w-32 h-20 rounded-xl bg-black shrink-0 overflow-hidden cursor-pointer border border-border/40 hover:border-emerald-500/60 transition-all shadow-sm"
                       onClick={() => setExpandedAlert(alert)}
                       title="Clique para ampliar em tela cheia"
                     >
@@ -4860,9 +4889,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       {activeTab === 'gallery' ? (
         <section>
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-white">Prints da Câmera</h3>
+            <h3 className="text-sm font-semibold text-text">Prints da Câmera</h3>
             <div className="flex items-center gap-3">
-              <button onClick={() => void refreshGallery()} className="text-xs text-gray-400 hover:text-gray-200 transition-colors">
+              <button onClick={() => void refreshGallery()} className="text-xs text-text-muted hover:text-text transition-colors">
                 atualizar
               </button>
               {snapshots.length > 0 ? (
@@ -4879,7 +4908,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
             </div>
           </div>
           {snapshots.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-white/15 p-8 text-center text-sm text-gray-400">
+            <div className="rounded-2xl border border-dashed border-border/40 bg-card/30 p-8 text-center text-sm text-text-muted">
               Galeria de prints vazia. Print por print, a MomAI monta seu histórico visual.
             </div>
           ) : (
@@ -4889,7 +4918,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                   key={snap.id}
                   onClick={() => setExpandedPrint(snap)}
                   onContextMenu={(e) => handleContextMenu(e, snap)}
-                  className="group rounded-xl overflow-hidden border border-white/10 bg-zinc-900/60 cursor-pointer hover:border-emerald-500/50 transition-all shadow-md flex flex-col h-full"
+                  className="group rounded-xl overflow-hidden border border-border/40 bg-card cursor-pointer hover:border-emerald-500/50 transition-all shadow-md flex flex-col h-full"
                 >
                   <div className="relative w-full aspect-video bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
                     <img
@@ -4908,16 +4937,16 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                     </div>
                   </div>
                   <figcaption className="px-2.5 py-2 flex-1 flex flex-col justify-between">
-                    <p className="text-[11px] text-gray-300 font-medium truncate">{snap.description || formatTime(snap.ts)}</p>
-                    <div className="flex items-center justify-between mt-1 pt-1 border-t border-white/5">
-                      <span className="text-[10px] text-gray-500">{formatTime(snap.ts)}</span>
+                    <p className="text-[11px] text-text font-medium truncate">{snap.description || formatTime(snap.ts)}</p>
+                    <div className="flex items-center justify-between mt-1 pt-1 border-t border-border/20">
+                      <span className="text-[10px] text-text-muted">{formatTime(snap.ts)}</span>
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
                           void handleDeletePrint(snap.id)
                         }}
                         title="Excluir print"
-                        className="p-1 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors"
+                        className="p-1 text-text-muted hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors"
                       >
                         <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -4936,33 +4965,30 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       {activeTab === 'settings' ? (
         <section className="space-y-6 max-w-2xl mx-auto pb-12 animate-fadeIn">
           <div className="text-center mb-6">
-            <h2 className="text-lg font-bold text-white flex items-center justify-center gap-2">
+            <h2 className="text-lg font-bold text-text flex items-center justify-center gap-2">
               <svg className="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
               Configurações do Vision
             </h2>
-            <p className="text-xs text-gray-400 mt-1">
+            <p className="text-xs text-text-muted mt-1">
               Ajuste suas preferências de câmeras, retenção de prints e modos de rastreamento local.
             </p>
           </div>
 
-
-
-
-          <div className="rounded-2xl border border-white/10 bg-zinc-900/70 backdrop-blur-md p-6 shadow-xl space-y-4">
+          <div className="rounded-2xl border border-border/40 bg-card backdrop-blur-md p-6 shadow-xl space-y-4">
             <div>
-              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-text flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-400" />
                 Retenção de Prints
               </h3>
-              <p className="text-xs text-gray-400 mt-0.5">
+              <p className="text-xs text-text-muted mt-0.5">
                 Defina o limite de armazenamento local para galeria de prints e histórico.
               </p>
             </div>
             <div className="space-y-3">
-              <label className="flex items-center justify-between text-xs text-gray-300 bg-white/5 p-3 rounded-xl border border-white/5">
+              <label className="flex items-center justify-between text-xs text-text bg-input/50 p-3 rounded-xl border border-border/30">
                 <span>Dias de armazenamento (padrão: 7)</span>
                 <input
                   type="number"
@@ -4970,10 +4996,10 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                   max={90}
                   value={config.retentionDays ?? 7}
                   onChange={(e) => void saveSettings({ retentionDays: Number(e.target.value) || 7 })}
-                  className="w-20 bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-sm text-right text-gray-100 focus:outline-none focus:border-emerald-500"
+                  className="w-20 bg-input border border-border/40 rounded-lg px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-emerald-500"
                 />
               </label>
-              <label className="flex items-center justify-between text-xs text-gray-300 bg-white/5 p-3 rounded-xl border border-white/5">
+              <label className="flex items-center justify-between text-xs text-text bg-input/50 p-3 rounded-xl border border-border/30">
                 <span>Máximo de arquivos armazenados (padrão: 200)</span>
                 <input
                   type="number"
@@ -4981,11 +5007,11 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                   max={1000}
                   value={config.maxSnapshots ?? 200}
                   onChange={(e) => void saveSettings({ maxSnapshots: Number(e.target.value) || 200 })}
-                  className="w-20 bg-black/40 border border-white/10 rounded-lg px-2.5 py-1.5 text-sm text-right text-gray-100 focus:outline-none focus:border-emerald-500"
+                  className="w-20 bg-input border border-border/40 rounded-lg px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-emerald-500"
                 />
               </label>
             </div>
-            <p className="text-[11px] text-gray-500">
+            <p className="text-[11px] text-text-muted">
               Prints ficam guardados localmente no seu computador. Frames ao vivo em vídeo nunca são gravados em disco.
             </p>
           </div>

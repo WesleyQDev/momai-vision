@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
 import { ptLabel, triggerLabel } from './vision/labels'
 import { classColor } from './vision/theme-color'
+import visionIconPng from '../icon.png'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
@@ -130,21 +131,12 @@ function formatTime(ts?: number): string {
 
 function VisionIcon({ className = 'w-5 h-5' }: { className?: string }): JSX.Element {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M2.5 12c2.1-4.3 5.6-6.5 9.5-6.5s7.4 2.2 9.5 6.5c-2.1 4.3-5.6 6.5-9.5 6.5S4.6 16.3 2.5 12Z" />
-      <circle cx="12" cy="12" r="3" />
-      <circle cx="12" cy="12" r="1" fill="currentColor" />
-      <path d="M17.6 4.9v3.2M16 6.5h3.2" />
-    </svg>
+    <img
+      src={visionIconPng}
+      alt="MomAI Vision"
+      className={`${className} object-contain inline-block shrink-0`}
+      draggable={false}
+    />
   )
 }
 
