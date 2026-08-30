@@ -5,6 +5,7 @@
   "description": "Olhos para a MomAI: prints de câmeras, monitoramento e alertas 100% locais.",
   "author": "MomAI",
   "icon": "icon.png",
+  "icon_url": "https://raw.githubusercontent.com/WesleyQDev/momai-vision/main/icon.png",
   "momai_compat": ">=1.10.0",
   "sdkVersion": 1,
   "background": true,
