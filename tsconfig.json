@@ -15,6 +15,6 @@
       "momai:sdk": ["./src/sdk-shim.d.ts"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "icon.png.d.ts"],
   "exclude": ["node_modules", "dist"]
 }

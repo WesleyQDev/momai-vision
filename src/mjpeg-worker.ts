@@ -30,7 +30,7 @@ interface WorkerScope {
 
 const scope = self as unknown as WorkerScope
 
-const MAX_EMIT_INTERVAL = 32 // ~30fps
+const MAX_EMIT_INTERVAL = 33 // ~30fps estável (cadência VSync contra rajadas de rede)
 const BOUNDARY = new TextEncoder().encode('--frame\r\n')
 const HEADER_END = new TextEncoder().encode('\r\n\r\n')
 const DECODER = new TextDecoder('latin1')
@@ -68,7 +68,9 @@ async function emitLatest(): Promise<void> {
   frameCount++
   const fpsNow = Date.now()
   if (fpsNow - fpsTs >= 1000) {
-    scope.postMessage({ type: 'fps', fps: frameCount })
+    const elapsedSec = Math.max(0.5, (fpsNow - fpsTs) / 1000)
+    const measuredFps = Math.min(30, Math.round(frameCount / elapsedSec))
+    scope.postMessage({ type: 'fps', fps: measuredFps })
     frameCount = 0
     fpsTs = fpsNow
   }

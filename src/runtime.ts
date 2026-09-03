@@ -27,6 +27,7 @@ import {
   type Detection,
   type SceneAnswer
 } from './vision/triggers'
+import { filterDetectionsInZone, type Point } from './vision/zone'
 
 const SKILL_ID = process.env.MOMAI_EXTENSION_ID || 'momai-vision'
 // A porta padrão do node-core do host é 8050 (não 8000).
@@ -121,6 +122,7 @@ interface StoredConfig {
   ipCameras?: Array<{ id: string; name: string; url: string }>
   selectedCameras?: string[]
   sendActions?: MonitorAction[]
+  detectionZones?: Record<string, Point[]>
 }
 
 // Cache da config: o bridge.storage.get lê o config.json do DISCO a cada
@@ -281,20 +283,18 @@ const ipInFlight = new Map<string, number>()
 
 function pushIpFrameToHost(cameraId: string, frameData: Buffer | string): void {
   const current = ipInFlight.get(cameraId) || 0
-  if (current >= 2) {
+  if (current >= 4) {
     metricFor(cameraId).framesDropped++
     metricFor(cameraId).pushDropped++
-    return // descarta frame se pipeline estiver com 2 requisições em voo para manter tempo real
+    return // descarta frame se pipeline estiver com 4 requisições em voo para manter tempo real
   }
   ipInFlight.set(cameraId, current + 1)
 
   const buf = Buffer.isBuffer(frameData) ? frameData : Buffer.from(frameData, 'base64')
   // Timeout curto: o push é fire-and-forget para o preview (não bloqueia o parse
-  // do MJPEG). Sem timeout, um node-core ocupado pelo YOLO segurava o fetch
-  // por até 30s e mantinha `ipInFlight` alto, descartando frames subsequentes
-  // e fazendo a IP parecer congelada junto com a webcam.
+  // do MJPEG).
   const ac = new AbortController()
-  const t = setTimeout(() => ac.abort(), 2000)
+  const t = setTimeout(() => ac.abort(), 1200)
   hostFetch(`/media/camera/frame/${encodeURIComponent(cameraId)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'image/jpeg' },
@@ -324,12 +324,15 @@ async function startMjpeg(camera: CameraEntry): Promise<void> {
     }
   }
 
-  // RTSP: tenta HTTP primeiro (muitas câmeras RTSP também expõem snapshot HTTP
-  // em 80/5000/8080). Se o usuário errou o path RTSP (ex.: /onvif1 inválido),
-  // o HTTP pode funcionar e evita o custo do FFmpeg. Só vai para RTSP se
-  // todos os http falharem — e o RTSP tem timeout curto para não segurar a
-  // webcam junto (isolamento real).
+  // RTSP direto: se a URL for rtsp://, conecta diretamente via FFmpeg sem passar
+  // pelos fallbacks HTTP lentos (evita atraso de até 15s e timeouts).
   const isRtsp = !!camera.url && camera.url.startsWith('rtsp://')
+  if (isRtsp) {
+    void startRtspStream(camera).catch((e) => {
+      bridge?.log(`[vision] RTSP start failed for ${camera.name}: ${e instanceof Error ? e.message : String(e)}`)
+    })
+    return
+  }
 
   const controller = new AbortController()
   const entry: StreamEntry = {
@@ -595,27 +598,29 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
   const SOI = Buffer.from([0xff, 0xd8])
   const EOI = Buffer.from([0xff, 0xd9])
 
-  const initialTransport = preferredTransportMap.get(camera.id) || 'tcp'
+  const initialTransport = preferredTransportMap.get(camera.id) || 'udp'
 
   const trySpawn = (transport: 'tcp' | 'udp', isRetry = false) => {
-    if (!isRetry) bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) ${transport}/timeout 8s...`)
+    if (!isRetry) bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) [${transport}]...`)
     else bridge?.log(`[vision] RTSP: ${transport === 'udp' ? 'tcp' : 'udp'} falhou, tentando ${transport} para ${camera.name} (${redactedUrl})...`)
-    const ffmpeg = spawn('ffmpeg', [
+    const ffmpegArgs = [
       '-hide_banner',
       '-loglevel', 'error',
       '-rtsp_transport', transport,
-      '-timeout', '8000000',
-      '-probesize', '64k',
-      '-analyzeduration', '500000',
-      '-fflags', '+nobuffer+genpts+discardcorrupt',
+      '-allowed_media_types', 'video',
+      '-timeout', '5000000',
+      '-probesize', '128k',
+      '-analyzeduration', '1000000',
+      '-fflags', '+nobuffer+discardcorrupt',
       '-flags', 'low_delay',
       '-i', url,
-      '-vf', 'fps=24,scale=640:-2',
+      '-vf', 'fps=25,scale=640:-2',
       '-f', 'image2pipe',
       '-vcodec', 'mjpeg',
-      '-q:v', '2',
+      '-q:v', '3',
       'pipe:1'
-    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    ]
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     const session: RtspSession = { ffmpeg, alive: true }
     rtspSessions.set(camera.id, session)
@@ -631,16 +636,24 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       else jpegBuf = Buffer.concat([jpegBuf, chunk])
       while (true) {
         const soi = jpegBuf.indexOf(SOI)
-        if (soi === -1) break
-        const eoi = jpegBuf.indexOf(EOI, soi + 2)
-        if (eoi === -1) break
-        const frame = jpegBuf.subarray(soi, eoi + 2) as Buffer
+        if (soi === -1) {
+          if (jpegBuf.length > 512 * 1024) jpegBuf = Buffer.alloc(0)
+          break
+        }
+        if (soi > 0) {
+          jpegBuf = jpegBuf.subarray(soi) as Buffer
+        }
+        const eoi = jpegBuf.indexOf(EOI, 2)
+        if (eoi === -1) {
+          if (jpegBuf.length > 1024 * 1024) jpegBuf = Buffer.alloc(0)
+          break
+        }
+        const frame = jpegBuf.subarray(0, eoi + 2) as Buffer
         jpegBuf = jpegBuf.subarray(eoi + 2) as Buffer
         entry.latest = Buffer.from(frame)
         entry.latestTs = Date.now()
         pushIpFrameToHost(camera.id, frame)
       }
-      if (jpegBuf.length > 5 * 1024 * 1024) jpegBuf = Buffer.alloc(0)
     })
 
     ffmpeg.stderr!.on('data', (data: Buffer) => {
@@ -664,13 +677,16 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       if (!session.alive) return
       session.alive = false
       rtspSessions.delete(camera.id)
-      const isConnTimeout = stderrBuf.includes('-138') || stderrBuf.toLowerCase().includes('connection to tcp') || stderrBuf.toLowerCase().includes('timed out') || stderrBuf.toLowerCase().includes('nonmatching transport') || stderrBuf.toLowerCase().includes('invalid data')
-      if (transport === 'tcp' && isConnTimeout && !hadFirstFrame && !entry.controller.signal.aborted) {
-        bridge?.log(`[vision] RTSP: tcp falhou para ${camera.name}, alternando imediatamente para udp...`)
+      const errLower = stderrBuf.toLowerCase()
+      const isConnTimeout = stderrBuf.includes('-138') || errLower.includes('connection to tcp') || errLower.includes('timed out') || errLower.includes('nonmatching transport') || errLower.includes('invalid data') || errLower.includes('method setup failed')
+      const nextTransport = transport === 'udp' ? 'tcp' : 'udp'
+      if (!isRetry && isConnTimeout && !hadFirstFrame && !entry.controller.signal.aborted) {
+        bridge?.log(`[vision] RTSP: ${transport} falhou para ${camera.name}, alternando imediatamente para ${nextTransport}...`)
+        preferredTransportMap.set(camera.id, nextTransport)
         setTimeout(() => {
           if (entry.controller.signal.aborted) { mjpegStreams.delete(camera.id); return }
           try { ffmpeg.kill() } catch {}
-          trySpawn('udp', true)
+          trySpawn(nextTransport, true)
         }, 50)
         return
       }
@@ -1361,13 +1377,17 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
           )
         : null
 
-      if (!cam) {
-        // Fallback: se a câmera não for especificada ou não for encontrada pelo nome, usa a primeira selecionada ou disponível
+      // Se o usuário especificou uma câmera (rawCam), NUNCA faz fallback para outra câmera (ex: USB).
+      // Apenas se rawCam for vazio usa a primeira selecionada ou disponível.
+      if (!cam && !rawCam) {
         const config = await loadConfig()
         const selectedList = config.selectedCameras || []
         cam = allCams.find((c) => selectedList.includes(c.id)) || allCams[0]
       }
-      if (!cam) continue
+
+      const camId = cam ? cam.id : rawCam
+      const camName = cam ? cam.name : (rawCam || 'Câmera')
+      if (!camId) continue
 
       const objCond = (auto.global_conditions || []).find(
         (c: any) =>
@@ -1410,8 +1430,8 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
 
       const config: MonitorConfig = {
         id,
-        cameraId: cam.id,
-        cameraName: cam.name,
+        cameraId: camId,
+        cameraName: camName,
         triggers: [triggerObj],
         label: `⚡ ${auto.automationName || 'Automação Hub'}`,
         createdAt: Date.now(),
@@ -1421,9 +1441,11 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
 
       synced.push({ config, state })
 
-      if (cam.source === 'webcam') void ensureWebcamWatch(cam.id).catch(() => {})
-      if (cam.source === 'ip') void startMjpeg(cam).catch(() => {})
-      ensureCameraTicker(cam.id)
+      if (cam) {
+        if (cam.source === 'webcam') void ensureWebcamWatch(cam.id).catch(() => {})
+        if (cam.source === 'ip') void startMjpeg(cam).catch(() => {})
+        ensureCameraTicker(cam.id)
+      }
     }
 
     // Automação pausada/excluída direto no hub (sem passar pelas tools):
@@ -1521,7 +1543,9 @@ async function tickCamera(cameraId: string): Promise<void> {
   if (anyDetect) {
     try {
       const result = await engineDetectSerial(cameraId, frame.jpegBase64)
-      detections = result.boxes || []
+      const rawBoxes = result.boxes || []
+      const zone = _configCache?.detectionZones?.[cameraId]
+      detections = filterDetectionsInZone(rawBoxes, zone)
       if (result.error) bridge?.log(`[vision] detect error: ${result.error}`)
       metricFor(cameraId).renderAt = Date.now()
       bridge?.sendEvent('vision_detections', {
@@ -1944,10 +1968,10 @@ async function reconnectWebcamIfStale(camera: CameraEntry): Promise<void> {
   const lastTry = webcamLastReconnectTs.get(deviceId) || 0
   if (Date.now() - lastTry < WEB_RECONNECT_MIN_MS) return
   webcamLastReconnectTs.set(deviceId, Date.now())
-  await ensureWebcamWatch(camera.id, 24, true)
+  await ensureWebcamWatch(camera.id, 30, true)
 }
 
-async function ensureWebcamWatch(cameraId: string, fps = 24, force = false): Promise<void> {
+async function ensureWebcamWatch(cameraId: string, fps = 30, force = false): Promise<void> {
   const camera = findCamera(cameraId)
   if (!camera || camera.source !== 'webcam' || !camera.deviceId) return
   // `force` lets syncWebcamWatches re-issue start-watch even when we already
@@ -2384,6 +2408,117 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
   if (!args.monitorId) {
     return { ok: false, error: 'monitorId required' }
   }
+
+  // Tratamento especial para automações do Hub (auto-*)
+  if (args.monitorId.startsWith('auto-')) {
+    const autoId = args.monitorId.replace('auto-', '')
+    try {
+      const res = await hostFetch('/automations')
+      if (!res.ok) {
+        return { ok: false, error: `Falha ao buscar automações (HTTP ${res.status}).` }
+      }
+      const list = await res.json()
+      if (!Array.isArray(list)) {
+        return { ok: false, error: 'Lista de automações inválida.' }
+      }
+      const auto = list.find((a: any) => a && (a.id === autoId || a.automationId === autoId))
+      if (!auto) {
+        return { ok: false, error: `Automação ${autoId} não encontrada no Automation Hub.` }
+      }
+
+      // 1. Atualizar Câmera se fornecida
+      if (args.cameraId && args.cameraId.trim()) {
+        await refreshWebcams()
+        const targetCamId = args.cameraId.trim()
+        const cam = findCamera(targetCamId)
+        const camName = cam ? cam.name : targetCamId
+
+        if (cam) {
+          const config = await loadConfig()
+          const selectedList = config.selectedCameras || []
+          if (!selectedList.includes(cam.id)) {
+            await updateConfig((cfg) => {
+              cfg.selectedCameras = [...(cfg.selectedCameras || []), cam.id]
+            })
+          }
+        }
+
+        if (!auto.trigger) auto.trigger = {}
+        if (!auto.trigger.trigger_config) auto.trigger.trigger_config = {}
+        if (!auto.trigger.params) auto.trigger.params = {}
+
+        auto.trigger.camera = camName
+        auto.trigger.trigger_config.camera = camName
+        auto.trigger.trigger_config.cameraId = targetCamId
+        auto.trigger.trigger_config.cameraName = camName
+        auto.trigger.params.camera = camName
+        auto.trigger.params.cameraId = targetCamId
+        auto.trigger.params.cameraName = camName
+
+        if (Array.isArray(auto.global_conditions)) {
+          for (const cond of auto.global_conditions) {
+            if (cond.field?.toLowerCase().includes('camera') || cond.field?.toLowerCase().includes('câmera')) {
+              cond.value = camName
+            }
+          }
+        }
+      }
+
+      // 2. Atualizar Label / Nome
+      if (args.label !== undefined) {
+        const cleanName = args.label.replace(/^⚡\s*/, '').trim()
+        if (cleanName) {
+          auto.name = cleanName
+        }
+      }
+
+      // 3. Atualizar Triggers (objeto / movimento / presença)
+      if (Array.isArray(args.triggers) && args.triggers.length > 0) {
+        const trig = args.triggers[0]
+        if (!auto.trigger) auto.trigger = {}
+        if (!auto.trigger.trigger_config) auto.trigger.trigger_config = {}
+        if (!auto.trigger.params) auto.trigger.params = {}
+
+        if (trig.type === 'motion') {
+          auto.trigger.type = 'momai-vision.vision_alert'
+          auto.trigger.trigger_config.triggeredBy = 'motion'
+          auto.trigger.params.triggeredBy = 'motion'
+        } else if ('className' in trig && trig.className) {
+          const normClass = normalizeClassName(trig.className)
+          auto.trigger.type = 'momai-vision.vision_alert'
+          auto.trigger.trigger_config.className = normClass
+          auto.trigger.params.className = normClass
+          if (trig.type === 'presence' || trig.type === 'absence') {
+            auto.trigger.trigger_config.triggeredBy = trig.type
+            auto.trigger.params.triggeredBy = trig.type
+          } else {
+            auto.trigger.trigger_config.triggeredBy = 'object'
+            auto.trigger.params.triggeredBy = 'object'
+          }
+        }
+      }
+
+      // 4. Salvar no Automation Hub
+      const saveRes = await hostFetch('/automations', {
+        method: 'POST',
+        body: JSON.stringify(auto)
+      })
+      if (!saveRes.ok) {
+        const errData = await saveRes.json().catch(() => ({}))
+        return { ok: false, error: errData.detail || `Falha ao salvar automação (HTTP ${saveRes.status}).` }
+      }
+
+      lastAutomationSyncTs = 0
+      await syncAutomationMonitors().catch(() => [])
+      notifyMonitorsChanged()
+      bridge?.log(`[vision] updated automation monitoring: ${args.monitorId}`)
+      return { ok: true, monitorId: args.monitorId }
+    } catch (err) {
+      bridge?.log(`[vision] update_monitoring error for automation ${args.monitorId}: ${err instanceof Error ? err.message : String(err)}`)
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
   const entry = monitors.get(args.monitorId)
   if (!entry) {
     return { ok: false, error: `monitorId not found: ${args.monitorId}` }
@@ -2401,10 +2536,9 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
     const config = await loadConfig()
     const selectedList = config.selectedCameras || []
     if (!selectedList.includes(newCamera.id)) {
-      return {
-        ok: false,
-        error: `A câmera "${newCamera.name}" não foi selecionada pelo usuário no painel da MomAI Vision.`
-      }
+      await updateConfig((cfg) => {
+        cfg.selectedCameras = [...(cfg.selectedCameras || []), newCamera.id]
+      })
     }
     camera = newCamera
     entry.config.cameraId = newCamera.id
@@ -2655,12 +2789,21 @@ async function toolGetStatus(): Promise<unknown> {
         const camCond = (auto.global_conditions || []).find((c: any) => c.field?.toLowerCase().includes('camera'))
         const rawCam = trig.trigger_config?.camera || trig.params?.camera || trig.camera || camCond?.value || ''
         const allCams = [...webcamCache, ...ipCameras]
-        const cam = allCams.find((c) => c.id === rawCam || c.name === rawCam) || allCams[0]
-        const camId = cam ? cam.id : (rawCam || 'webcam:0')
-        const camName = cam ? cam.name : camId
+        const cam = rawCam
+          ? allCams.find(
+              (c) =>
+                c.id === rawCam ||
+                c.name === rawCam ||
+                (rawCam.length >= 3 &&
+                  (c.id.toLowerCase().includes(rawCam.toLowerCase()) ||
+                    c.name.toLowerCase().includes(rawCam.toLowerCase())))
+            )
+          : null
+        const camId = cam ? cam.id : (rawCam || allCams[0]?.id || 'webcam:0')
+        const camName = cam ? cam.name : (rawCam || camId)
         const labelName = auto.automationName || 'Automação Hub'
 
-        // Ativa o ticker/watch da câmera se necessário
+        // Ativa o ticker/watch da câmera se a câmera estiver disponível
         if (cam && auto.enabled) {
           if (cam.source === 'webcam') void ensureWebcamWatch(cam.id).catch(() => {})
           if (cam.source === 'ip') void startMjpeg(cam).catch(() => {})
@@ -2693,10 +2836,12 @@ async function toolGetStatus(): Promise<unknown> {
     }
   }
 
+  const cfg = await loadConfig()
   return {
     ok: true,
     monitors: combined,
-    cameras: status
+    cameras: status,
+    detectionZones: cfg.detectionZones || {}
   }
 }
 
@@ -2750,6 +2895,18 @@ async function toolListAlerts(args: { limit?: number }): Promise<unknown> {
 
 async function toolClearAlerts(): Promise<unknown> {
   await saveAlertsHistory([])
+  return { ok: true }
+}
+
+async function toolDeleteAlert(args: { alertId?: string; ts?: number; cameraId?: string }): Promise<unknown> {
+  const history = await loadAlertsHistory()
+  const updated = history.filter((a) => {
+    const key = `${a.cameraId}_${a.ts}_${a.className || 'obj'}_${a.snapshotId || ''}`
+    if (args.alertId && key === args.alertId) return false
+    if (args.ts && a.ts === args.ts && (!args.cameraId || a.cameraId === args.cameraId)) return false
+    return true
+  })
+  await saveAlertsHistory(updated)
   return { ok: true }
 }
 
@@ -2906,7 +3063,9 @@ async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): 
       })
       return
     }
-    const detections = result.boxes || []
+    const rawDetections = result.boxes || []
+    const zone = _configCache?.detectionZones?.[cameraId]
+    const detections = filterDetectionsInZone(rawDetections, zone)
     lastPumpBoxes.set(cameraId, detections)
     metricFor(cameraId).renderAt = Date.now()
     metricFor(cameraId).framesIn++
@@ -2980,6 +3139,7 @@ async function toolConfigure(args: {
   ipCameras?: Array<{ id: string; name: string; url: string }>
   selectedCameras?: string[]
   sendActions?: MonitorAction[]
+  detectionZones?: Record<string, Point[]>
 }): Promise<unknown> {
   // SSRF: valida cada URL de câmera IP ANTES de persistir (esquema http/https/
   // rtsp, bloqueia loopback/link-local/metadata + resolução de hostname). Uma
@@ -2996,6 +3156,9 @@ async function toolConfigure(args: {
     }
   }
 
+  const oldConfig = await loadConfig()
+  const previousSelected = new Set(oldConfig.selectedCameras || [])
+
   // Read-modify-write serializado (M8): duas gravações concorrentes do config
   // (configure do modal + poll) não podem perder campos uma da outra.
   const config = await updateConfig((cfg) => {
@@ -3005,7 +3168,48 @@ async function toolConfigure(args: {
     if (args.ipCameras !== undefined) cfg.ipCameras = args.ipCameras
     if (args.selectedCameras !== undefined) cfg.selectedCameras = args.selectedCameras
     if (args.sendActions !== undefined) cfg.sendActions = args.sendActions
+    if (args.detectionZones !== undefined) cfg.detectionZones = args.detectionZones
   })
+
+  // Se câmeras foram desselecionadas/removidas, pausa automaticamente os monitoramentos associados
+  if (args.selectedCameras !== undefined) {
+    const nextSelected = new Set(args.selectedCameras)
+    let anyPaused = false
+    for (const removedId of previousSelected) {
+      if (!nextSelected.has(removedId)) {
+        const cam = findCamera(removedId)
+        const camName = cam?.name || removedId
+        // Pausa monitores locais
+        for (const [id, entry] of monitors.entries()) {
+          if (
+            !entry.config.paused &&
+            (entry.config.cameraId === removedId ||
+              entry.config.cameraName === camName ||
+              entry.config.cameraId === camName)
+          ) {
+            entry.config.paused = true
+            stopCameraTickerIfIdle(entry.config.cameraId)
+            anyPaused = true
+          }
+        }
+        // Pausa automações ativas no hub
+        for (const auto of autoMonitorsCache) {
+          if (
+            !auto.config.paused &&
+            (auto.config.cameraId === removedId ||
+              auto.config.cameraName === camName ||
+              auto.config.cameraId === camName)
+          ) {
+            void toolPauseMonitoring({ monitorId: auto.config.id }).catch(() => {})
+          }
+        }
+      }
+    }
+    if (anyPaused) {
+      await saveMonitors()
+      notifyMonitorsChanged()
+    }
+  }
   if (args.ipCameras !== undefined) {
     const previousIpIds = new Set(ipCameras.map((c) => c.id))
     await syncIpCameras()
@@ -3159,6 +3363,7 @@ const tools: Record<string, (args: any) => Promise<unknown>> = {
   list_snapshots: toolListSnapshots,
   list_alerts: toolListAlerts,
   clear_alerts: toolClearAlerts,
+  delete_alert: toolDeleteAlert,
   get_frame: toolGetFrame,
   reload_camera: toolReloadCamera,
   frame_pump: toolFramePump,

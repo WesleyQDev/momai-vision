@@ -179,6 +179,28 @@ describe('runtime.js as a persistent worker (host contract)', () => {
         }
         return
       }
+      if (url === '/automations' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(
+          JSON.stringify([
+            {
+              id: 'autotest',
+              name: 'Automação Teste',
+              enabled: true,
+              trigger: {
+                type: 'momai-vision.vision_alert',
+                trigger_config: { camera: 'webcam:test-cam' }
+              }
+            }
+          ])
+        )
+        return
+      }
+      if (url === '/automations' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
+        return
+      }
       res.writeHead(404, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ detail: 'Not found' }))
     })
@@ -593,6 +615,41 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       })) as { ok: boolean; error?: string }
       expect(res.ok).toBe(false)
       expect(res.error).toMatch(/pausar/i)
+    },
+    60000
+  )
+
+  it(
+    'updates an automation monitor via update_monitoring (auto-*) without monitorId not found',
+    async () => {
+      const res = (await execute({
+        toolName: 'update_monitoring',
+        args: {
+          monitorId: 'auto-autotest',
+          cameraId: 'webcam:test-cam',
+          label: '⚡ Portão Inteligente',
+          triggers: [{ type: 'object', className: 'person' }]
+        }
+      })) as { ok: boolean; error?: string }
+      if (!res.ok) console.error('UPDATE RES ERROR:', res.error)
+      expect(res.ok).toBe(true)
+      expect(res.error).toBeUndefined()
+    },
+    60000
+  )
+
+  it(
+    'returns error when update_monitoring is called on nonexistent automation in hub',
+    async () => {
+      const res = (await execute({
+        toolName: 'update_monitoring',
+        args: {
+          monitorId: 'auto-nao-existe',
+          label: 'Inexistente'
+        }
+      })) as { ok: boolean; error?: string }
+      expect(res.ok).toBe(false)
+      expect(res.error).toMatch(/não encontrada/i)
     },
     60000
   )
