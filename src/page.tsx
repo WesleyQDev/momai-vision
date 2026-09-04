@@ -14,8 +14,9 @@ import { ptLabel, PT_CLASS, triggerLabel } from './vision/labels'
 import { AlertCanvasOverlay } from './panel'
 import { classColor } from './vision/theme-color'
 import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
-import { filterDetectionsInZone, orderPointsClockwise, createBoxFromCorners, type Point } from './vision/zone'
+import { filterDetectionsInZone, orderPointsClockwise, createBoxFromCorners, simplifyPolygon, type Point } from './vision/zone'
 import visionIconPng from '../icon.png'
+import ContextMenu from './components/ContextMenu'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
@@ -234,6 +235,153 @@ function formatCameraName(name?: string | null, source?: string): string {
   return name
 }
 
+function resolveFullImageUrl(src: string): string {
+  if (!src) return ''
+  if (src.startsWith('data:') || src.startsWith('blob:')) return src
+  if (src.startsWith('http://') || src.startsWith('https://')) return src
+  const base = window.api?.getApiBaseUrl?.() || 'http://127.0.0.1:8000'
+  const path = src.startsWith('/') ? src : `/${src}`
+  return `${base}${path}`
+}
+
+function dataUriToBlob(dataUri: string): Blob | null {
+  try {
+    const parts = dataUri.split(',')
+    if (parts.length < 2) return null
+    const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/png'
+    const binary = atob(parts[1])
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i)
+    }
+    return new Blob([bytes], { type: mime })
+  } catch {
+    return null
+  }
+}
+
+async function convertImageSourceToPngBlob(imgSrc: string): Promise<Blob> {
+  const fullUrl = resolveFullImageUrl(imgSrc)
+
+  // 1. Data URI direta
+  if (fullUrl.startsWith('data:')) {
+    const directBlob = dataUriToBlob(fullUrl)
+    if (directBlob && directBlob.type === 'image/png') {
+      return directBlob
+    }
+  }
+
+  // 2. Render via HTMLImageElement + Canvas (converte JPEG/WEBP/DataURI para PNG Bitmap)
+  try {
+    const blobFromCanvas = await new Promise<Blob | null>((resolve) => {
+      const img = new Image()
+      if (!fullUrl.startsWith('data:')) {
+        img.crossOrigin = 'anonymous'
+      }
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas')
+          canvas.width = img.naturalWidth || img.width || 640
+          canvas.height = img.naturalHeight || img.height || 360
+          const ctx = canvas.getContext('2d')
+          if (!ctx) {
+            resolve(null)
+            return
+          }
+          ctx.drawImage(img, 0, 0)
+          canvas.toBlob((blob) => resolve(blob), 'image/png')
+        } catch {
+          resolve(null)
+        }
+      }
+      img.onerror = () => resolve(null)
+      img.src = fullUrl
+    })
+    if (blobFromCanvas && blobFromCanvas.size > 0) {
+      return blobFromCanvas.type === 'image/png'
+        ? blobFromCanvas
+        : new Blob([blobFromCanvas], { type: 'image/png' })
+    }
+  } catch {}
+
+  // 3. Fallback via fetch + createImageBitmap
+  try {
+    const res = await fetch(fullUrl)
+    const rawBlob = await res.blob()
+    const bitmap = await createImageBitmap(rawBlob)
+    const canvas = document.createElement('canvas')
+    canvas.width = bitmap.width
+    canvas.height = bitmap.height
+    const ctx = canvas.getContext('2d')
+    if (ctx) {
+      ctx.drawImage(bitmap, 0, 0)
+      const converted = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'))
+      if ('close' in bitmap && typeof (bitmap as any).close === 'function') {
+        (bitmap as any).close()
+      }
+      if (converted && converted.size > 0) {
+        return converted.type === 'image/png'
+          ? converted
+          : new Blob([converted], { type: 'image/png' })
+      }
+    }
+  } catch {}
+
+  throw new Error('Falha ao converter imagem para PNG')
+}
+
+/**
+ * Converte a imagem para um Bitmap PNG nativo e grava diretamente na área de transferência
+ * do Windows através da API do Electron (clipboard.writeImage) ou ClipboardItem do Chromium.
+ */
+async function copyImageToClipboard(imgSrc: string): Promise<boolean> {
+  if (!imgSrc) return false
+
+  const fullUrl = resolveFullImageUrl(imgSrc)
+
+  // Método 1: Bridge Nativa do Electron (Gravação direta Win32/Bitmap no Windows - 100% garantido sem DOMException)
+  try {
+    const api = (window as any).api || (window as any).momaiAPI
+    if (api?.writeImageToClipboard) {
+      const res = await api.writeImageToClipboard(fullUrl)
+      if (res?.ok) return true
+    }
+    if (api?.invoke) {
+      const res = await api.invoke('clipboard:write-image', fullUrl)
+      if (res?.ok) return true
+    }
+  } catch (err) {
+    console.debug('Electron native clipboard bridge fallback:', err)
+  }
+
+  // Método 2: Passar Promise<Blob> para ClipboardItem dentro do clique do usuário
+  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+    try {
+      const pngPromise = convertImageSourceToPngBlob(imgSrc)
+      const item = new ClipboardItem({ 'image/png': pngPromise })
+      await navigator.clipboard.write([item])
+      return true
+    } catch (err) {
+      console.debug('Async Promise ClipboardItem write fallback:', err)
+    }
+  }
+
+  // Método 3: Resolução prévia do Blob e escrita direta
+  try {
+    const pngBlob = await convertImageSourceToPngBlob(imgSrc)
+    if (pngBlob && typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+      const strictPng = pngBlob.type === 'image/png' ? pngBlob : new Blob([pngBlob], { type: 'image/png' })
+      const item = new ClipboardItem({ 'image/png': strictPng })
+      await navigator.clipboard.write([item])
+      return true
+    }
+  } catch (err) {
+    console.debug('Direct blob clipboard write fallback:', err)
+  }
+
+  return false
+}
+
 // Chave estável de um alerta para deduplicação e key de renderização.
 // snapshotId é único por alerta (cada alerta grava um snapshot); sem ele,
 // usa a composição temporal do evento.
@@ -432,103 +580,114 @@ function createMjpegReader(
   const DECODER = new TextDecoder('latin1')
 
   const start = async () => {
-    const res = await fetch(url, { signal, headers: { Accept: 'image/jpeg' } })
-    if (!res.ok || !res.body) throw new Error(`Mjpeg stream HTTP ${res.status}`)
-    const reader = res.body.getReader()
-    const chunks: Uint8Array[] = []
-    const flushToU8 = () => {
-      const total = chunks.reduce((n, c) => n + c.length, 0)
-      const out = new Uint8Array(total)
-      let o = 0
-      for (const c of chunks) {
-        out.set(c, o)
-        o += c.length
-      }
-      chunks.length = 0
-      return out
-    }
-    let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
-    // Busca de sequência otimizada (indexOfSeq em vision/mjpeg-parse.ts): o
-    // primeiro byte via `indexOf` NATIVO (memchr do V8, ~10x mais rápido que
-    // scan JS puro) e validação dos bytes seguintes apenas quando ele casa.
-    const parse = (buf: Uint8Array): Uint8Array => {
-      let idx = indexOfSeq(buf, BOUNDARY)
-      while (idx !== -1) {
-        const after = idx + BOUNDARY.length
-        // Sem Content-Length o frame termina no próximo boundary — antes era
-        // emitido um frame de 0 bytes (length = 0) que quebrava o
-        // createImageBitmap.
-        const range = extractJpegFrame(buf, BOUNDARY, HEADER_END, (bytes) => DECODER.decode(bytes), after)
-        if (!range) break
-        // View do JPEG dentro do buffer de concat — sem cópia. O buffer não é
-        // mutado depois (o parse substitui `joined` por subarrays novos), então
-        // é seguro o createImageBitmap ler assíncrono dele.
-        latestFrame = buf.subarray(range.start, range.end)
-        if (!emitScheduled) {
-          // Caso comum (frames a ~24fps, intervalo já decorrido): emite
-          // SÍNCRONO, sem a latência de um setTimeout(0) extra no event loop
-          // (que, com o main thread ocupado, adicionava atraso perceptível).
-          // O timer só é agendado para o throttle quando os frames chegam mais
-          // rápido que MAX_EMIT_INTERVAL.
+    while (!signal.aborted) {
+      let sessionAc: AbortController | null = null
+      let sessionActive = true
+      let lastFrameTs = Date.now()
+
+      const watchdogTimer = setInterval(() => {
+        if (!sessionActive || signal.aborted) {
+          clearInterval(watchdogTimer)
+          return
+        }
+        if (Date.now() - lastFrameTs > 4500) {
+          clearInterval(watchdogTimer)
+          try { sessionAc?.abort() } catch {}
+        }
+      }, 1500)
+
+      try {
+        sessionAc = new AbortController()
+        const onAbort = () => sessionAc?.abort()
+        signal.addEventListener('abort', onAbort, { once: true })
+
+        const res = await fetch(url, { signal: sessionAc.signal, headers: { Accept: 'image/jpeg' } })
+        if (!res.ok || !res.body) throw new Error(`Mjpeg stream HTTP ${res.status}`)
+        const reader = res.body.getReader()
+        const chunks: Uint8Array[] = []
+        const flushToU8 = () => {
+          const total = chunks.reduce((n, c) => n + c.length, 0)
+          const out = new Uint8Array(total)
+          let o = 0
+          for (const c of chunks) {
+            out.set(c, o)
+            o += c.length
+          }
+          chunks.length = 0
+          return out
+        }
+        let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
+        
+        const parse = (buf: Uint8Array): Uint8Array => {
+          let idx = indexOfSeq(buf, BOUNDARY)
+          while (idx !== -1) {
+            const after = idx + BOUNDARY.length
+            const range = extractJpegFrame(buf, BOUNDARY, HEADER_END, (bytes) => DECODER.decode(bytes), after)
+            if (!range) break
+            latestFrame = buf.subarray(range.start, range.end)
+            if (!emitScheduled) {
+              const now = Date.now()
+              if (now - lastEmit >= MAX_EMIT_INTERVAL) {
+                emitLatest()
+              } else {
+                emitScheduled = true
+                setTimeout(emitLatest, MAX_EMIT_INTERVAL - (now - lastEmit))
+              }
+            }
+            buf = buf.subarray(range.end)
+            idx = indexOfSeq(buf, BOUNDARY)
+          }
+          return buf
+        }
+
+        const MAX_EMIT_INTERVAL = 16
+        let latestFrame: Uint8Array | null = null
+        let emitScheduled = false
+        let lastEmit = 0
+
+        const emitLatest = () => {
+          emitScheduled = false
+          if (!latestFrame) return
           const now = Date.now()
-          if (now - lastEmit >= MAX_EMIT_INTERVAL) {
-            emitLatest()
-          } else {
+          const wait = lastEmit + MAX_EMIT_INTERVAL - now
+          if (wait > 0) {
             emitScheduled = true
-            setTimeout(emitLatest, MAX_EMIT_INTERVAL - (now - lastEmit))
+            setTimeout(emitLatest, wait)
+            return
+          }
+          lastEmit = now
+          const frame = latestFrame
+          latestFrame = null
+          handlers.onFrame(frame)
+        }
+
+        while (!signal.aborted) {
+          const { done, value } = await reader.read()
+          if (done || signal.aborted) break
+          lastFrameTs = Date.now()
+          chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
+          let joined: Uint8Array
+          if (chunks.length === 1 && pending.length === 0) {
+            joined = chunks[0]
+            chunks.length = 0
+          } else {
+            joined = pending.length ? concatBytes(pending, flushToU8()) : flushToU8()
+          }
+          pending = parse(joined)
+          if (pending.length > 5 * 1024 * 1024) {
+            pending = new Uint8Array(0)
           }
         }
-        buf = buf.subarray(range.end)
-        idx = indexOfSeq(buf, BOUNDARY)
+      } catch (err) {
+        if (signal.aborted) break
+        handlers.onError(err)
+      } finally {
+        sessionActive = false
+        clearInterval(watchdogTimer)
       }
-      return buf
-    }
 
-    // Teto de ~60fps com latest-wins, emitindo BYTES (zero cópia por frame).
-    // Preview sempre no frame mais novo, com fluidez máxima sem atrasos.
-    const MAX_EMIT_INTERVAL = 16 // ~60fps (máxima fluidez)
-    let latestFrame: Uint8Array | null = null
-    let emitScheduled = false
-    let lastEmit = 0
-
-    const emitLatest = () => {
-      emitScheduled = false
-      if (!latestFrame) return
-      const now = Date.now()
-      const wait = lastEmit + MAX_EMIT_INTERVAL - now
-      if (wait > 0) {
-        emitScheduled = true
-        setTimeout(emitLatest, wait)
-        return
-      }
-      lastEmit = now
-      const frame = latestFrame
-      latestFrame = null
-      handlers.onFrame(frame)
-    }
-
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
-      // Caso comum em LAN: cada frame chega num ÚNICO chunk (o node-core
-      // escreve o multipart por frame). Nesse caso `joined` é a view do próprio
-      // chunk — evita a cópia de ~100KB por frame (a maior fonte de alocação
-      // do main thread com 3 câmeras → GC → jank).
-      let joined: Uint8Array
-      if (chunks.length === 1 && pending.length === 0) {
-        joined = chunks[0]
-        chunks.length = 0
-      } else {
-        joined = pending.length ? concatBytes(pending, flushToU8()) : flushToU8()
-      }
-      pending = parse(joined)
-      // Guarda anti-vazamento: stream malformado (sem boundary/frame completo)
-      // não pode acumular memória sem limite no main thread.
-      if (pending.length > 5 * 1024 * 1024) {
-        pending = new Uint8Array(0)
-      }
+      if (signal.aborted) break
+      await new Promise((r) => setTimeout(r, 1000))
     }
   }
 
@@ -1002,8 +1161,13 @@ function ZoneOverlay({
   const dragVertexIdxRef = useRef<number | null>(null)
   dragVertexIdxRef.current = dragVertexIdx
 
+  // Arrastar/mover polígono inteiro para reposicionar a área
+  const dragPolygonStartRef = useRef<Point | null>(null)
+  const dragPolygonInitialPointsRef = useRef<Point[]>([])
+
   const dragStartRef = useRef<Point | null>(null)
   const isDraggingRef = useRef(false)
+  const [isDrawingFreehand, setIsDrawingFreehand] = useState(false)
   const freehandPointsRef = useRef<Point[]>([])
 
   // Fecha o dropdown ao clicar fora
@@ -1018,8 +1182,10 @@ function ZoneOverlay({
     return () => window.removeEventListener('mousedown', handleClickOutside)
   }, [isDropdownOpen])
 
-  const getSvgNormPoint = (e: React.MouseEvent<SVGSVGElement>): Point | null => {
-    const svg = e.currentTarget
+  const getSvgNormPoint = (e: React.MouseEvent<SVGElement>): Point | null => {
+    const target = e.currentTarget
+    const svg = (target instanceof SVGSVGElement ? target : target.ownerSVGElement) as SVGSVGElement | null
+    if (!svg) return null
     const pt = svg.createSVGPoint()
     pt.x = e.clientX
     pt.y = e.clientY
@@ -1033,15 +1199,14 @@ function ZoneOverlay({
 
   const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!isEditing) return
+    if (dragVertexIdxRef.current !== null || dragPolygonStartRef.current !== null) return
+
     const pt = getSvgNormPoint(e)
     if (!pt) return
     dragStartRef.current = pt
     isDraggingRef.current = false
     if (drawMode === 'freehand') {
       freehandPointsRef.current = [pt]
-      if (onSetPoints) {
-        onSetPoints([pt])
-      }
     }
   }
 
@@ -1062,6 +1227,19 @@ function ZoneOverlay({
       return
     }
 
+    // 2. Translação da área inteira: arrastar o corpo do polígono
+    if (dragPolygonStartRef.current && onSetPoints) {
+      const start = dragPolygonStartRef.current
+      const dx = pt.x - start.x
+      const dy = pt.y - start.y
+      const moved = dragPolygonInitialPointsRef.current.map((p) => ({
+        x: Math.max(0, Math.min(1, Number((p.x + dx).toFixed(4)))),
+        y: Math.max(0, Math.min(1, Number((p.y + dy).toFixed(4))))
+      }))
+      onSetPoints(moved)
+      return
+    }
+
     if (!dragStartRef.current || !onSetPoints) return
     const start = dragStartRef.current
     const distFromStart = Math.hypot(pt.x - start.x, pt.y - start.y)
@@ -1076,11 +1254,14 @@ function ZoneOverlay({
       const box = createBoxFromCorners(start, pt)
       onSetPoints(box)
     } else if (drawMode === 'freehand') {
-      // Modo Lápis Livre: adiciona pontos continuamente por onde o mouse/lápis passa
+      // Modo Lápis Livre: desenha diretamente o traço contínuo sem bolinhas
+      if (!isDrawingFreehand) {
+        setIsDrawingFreehand(true)
+      }
       const pts = freehandPointsRef.current
       const lastPt = pts[pts.length - 1] || start
       const distFromLast = Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y)
-      if (distFromLast >= 0.015) {
+      if (distFromLast >= 0.012) {
         pts.push(pt)
         onSetPoints([...pts])
       }
@@ -1089,6 +1270,12 @@ function ZoneOverlay({
 
   const handleMouseUp = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!isEditing) return
+
+    if (dragPolygonStartRef.current) {
+      dragPolygonStartRef.current = null
+      dragPolygonInitialPointsRef.current = []
+      return
+    }
 
     // Soltou o vértice que estava sendo editado/arrastado
     if (dragVertexIdxRef.current !== null) {
@@ -1102,6 +1289,7 @@ function ZoneOverlay({
     const currentMode = drawMode
     dragStartRef.current = null
     isDraggingRef.current = false
+    setIsDrawingFreehand(false)
 
     if (!wasDragging) {
       // Clique pontual sem arrastar no modo 'points': insere vértice individual
@@ -1109,10 +1297,11 @@ function ZoneOverlay({
         onAddPoint(pt)
       }
     } else if (currentMode === 'freehand') {
-      // Finalizou desenho livre com o lápis
+      // Finalizou desenho livre com o lápis: simplifica pontos gerando vértices limpos e editáveis
       const pts = freehandPointsRef.current
       if (pts.length >= 3 && onSetPoints) {
-        onSetPoints([...pts])
+        const simplified = simplifyPolygon(pts, 0.014)
+        onSetPoints(simplified)
       }
     }
   }
@@ -1140,26 +1329,39 @@ function ZoneOverlay({
         onMouseUp={handleMouseUp}
       >
         {/* Polígono: em edição fica vermelho; salvo fica em azul claro com intensidade aumentada */}
-        {activePoints.length >= 3 ? (
+        {activePoints.length >= 3 && !isDrawingFreehand ? (
           <polygon
             points={svgPointsStr}
             fill={isEditing ? 'rgba(239, 68, 68, 0.16)' : 'rgba(56, 189, 248, 0.12)'}
             stroke={isEditing ? '#ef4444' : 'rgba(56, 189, 248, 0.85)'}
             strokeWidth={isEditing ? '2.5' : '1.8'}
             strokeDasharray={isEditing ? '6 4' : '5 3'}
+            className={isEditing ? 'cursor-move pointer-events-auto' : ''}
+            onMouseDown={(e) => {
+              if (isEditing && !isDrawingFreehand && dragVertexIdxRef.current === null) {
+                e.stopPropagation()
+                const pt = getSvgNormPoint(e)
+                if (pt) {
+                  dragPolygonStartRef.current = pt
+                  dragPolygonInitialPointsRef.current = [...activePoints]
+                }
+              }
+            }}
           />
-        ) : activePoints.length === 2 ? (
+        ) : (isDrawingFreehand || activePoints.length >= 2) ? (
+          /* Traço vermelho contínuo desenhado diretamente pelo lápis livre (sem bolinhas) */
           <polyline
             points={svgPointsStr}
             fill="none"
             stroke="#ef4444"
             strokeWidth="2.5"
-            strokeDasharray="6 4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
           />
         ) : null}
 
-        {/* Vértices/bolinhas editáveis: visíveis nos modos 'points' ou 'box' (ou poucos pontos) para arrastar e ajustar */}
-        {isEditing && (drawMode === 'points' || drawMode === 'box' || activePoints.length <= 16) &&
+        {/* Vértices/bolinhas editáveis: visíveis nos pontos da área para arrastar e ajustar, MAS NUNCA durante o traçado livre */}
+        {isEditing && !isDrawingFreehand && activePoints.length >= 3 &&
           activePoints.map((p, idx) => {
             const isDraggingThis = dragVertexIdx === idx
             return (
@@ -1175,7 +1377,6 @@ function ZoneOverlay({
                     e.stopPropagation()
                     setDragVertexIdx(idx)
                   }}
-                  
                 />
                 <circle
                   cx={p.x * vbW}
@@ -1194,20 +1395,20 @@ function ZoneOverlay({
       {/* Durante edição: barra flutuante no canto inferior direito adaptada aos temas e sem contagem de pontos */}
       {isEditing ? (
         isCompact ? (
-          /* Modo Card Compacto: leve, compacto, adaptado aos temas com Dropdown de modos */
-          <div className="absolute bottom-1.5 right-1.5 z-40 flex items-center gap-1 p-1 rounded-lg bg-card/90 backdrop-blur-xs border border-border/40 text-text text-xs shadow-xl animate-fadeIn pointer-events-auto">
+          /* Modo Card Compacto: ultra compacto com ícones elegantes para caber perfeitamente no card pequeno */
+          <div className="absolute bottom-1.5 right-1.5 z-40 flex items-center gap-0.5 p-0.5 rounded-lg bg-black/75 backdrop-blur-md border border-white/20 text-white text-[9px] shadow-2xl animate-fadeIn pointer-events-auto">
             {/* Dropdown de Ferramentas no Card Pequeno */}
             <div ref={dropdownRef} className="relative">
               <button
                 type="button"
                 onClick={() => setIsDropdownOpen((v) => !v)}
-                className="px-1.5 py-0.5 rounded bg-transparent hover:bg-input text-text font-bold text-[9px] border border-border/40 transition-colors flex items-center gap-0.5"
-                title="Escolher ferramenta de seleção de área"
+                className="h-5 px-1 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-[9px] border border-white/10 transition-all flex items-center gap-0.5 cursor-pointer"
+                title="Escolher ferramenta de desenho"
               >
                 <span>
-                  {drawMode === 'freehand' ? '✏️ Livre' : drawMode === 'box' ? '▢ Retângulo' : '📍 Pontos'}
+                  {drawMode === 'freehand' ? '✏️' : drawMode === 'box' ? '▢' : '📍'}
                 </span>
-                <svg className={`w-2.5 h-2.5 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <svg className={`w-2 h-2 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <path d="M6 9l6 6 6-6" />
                 </svg>
               </button>
@@ -1217,21 +1418,21 @@ function ZoneOverlay({
                   <button
                     type="button"
                     onClick={() => { setDrawMode('freehand'); setIsDropdownOpen(false) }}
-                    className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors ${drawMode === 'freehand' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
+                    className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'freehand' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
                   >
                     <span>✏️</span> <span>Lápis livre</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => { setDrawMode('box'); setIsDropdownOpen(false) }}
-                    className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors ${drawMode === 'box' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
+                    className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'box' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
                   >
                     <span>▢</span> <span>Retângulo</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => { setDrawMode('points'); setIsDropdownOpen(false) }}
-                    className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors ${drawMode === 'points' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
+                    className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'points' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
                   >
                     <span>📍</span> <span>Pontos</span>
                   </button>
@@ -1243,10 +1444,13 @@ function ZoneOverlay({
               <button
                 type="button"
                 onClick={onUndo}
-                className="px-1.5 py-0.5 rounded bg-transparent hover:bg-input text-text font-medium text-[9px] border border-border/40 transition-colors"
+                className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white font-medium text-[9px] border border-white/10 transition-all flex items-center justify-center active:scale-90 cursor-pointer"
                 title="Desfazer último ponto"
               >
-                Desfazer
+                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 7v6h6" />
+                  <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+                </svg>
               </button>
             ) : null}
 
@@ -1254,10 +1458,12 @@ function ZoneOverlay({
               <button
                 type="button"
                 onClick={onClear}
-                className="px-1.5 py-0.5 rounded bg-transparent hover:bg-red-500/20 text-red-500 hover:text-red-400 font-medium text-[9px] border border-border/40 transition-colors"
-                title="Limpar área"
+                className="w-5 h-5 rounded bg-white/10 hover:bg-red-500/30 text-red-400 font-medium text-[9px] border border-white/10 transition-all flex items-center justify-center active:scale-90 cursor-pointer"
+                title="Limpar área demarcada"
               >
-                Limpar
+                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
               </button>
             ) : null}
 
@@ -1265,9 +1471,13 @@ function ZoneOverlay({
               <button
                 type="button"
                 onClick={onCancel}
-                className="px-1.5 py-0.5 rounded bg-transparent hover:bg-input text-text font-bold text-[9px] border border-border/40 transition-colors"
+                className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white/80 hover:text-white font-bold text-[9px] border border-white/10 transition-all flex items-center justify-center active:scale-90 cursor-pointer"
+                title="Cancelar edição de área"
               >
-                Cancelar
+                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
               </button>
             ) : null}
 
@@ -1276,13 +1486,17 @@ function ZoneOverlay({
                 type="button"
                 disabled={draftPoints.length < 3}
                 onClick={() => onSave(draftPoints)}
-                className={`px-2 py-0.5 rounded font-bold text-[9px] transition-all shadow-sm border ${
+                className={`h-5 px-1.5 rounded font-bold text-[9px] transition-all shadow-sm border flex items-center gap-0.5 active:scale-90 ${
                   draftPoints.length >= 3
-                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400'
-                    : 'bg-transparent text-text-muted/40 border-border/30 cursor-not-allowed'
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 cursor-pointer'
+                    : 'bg-white/5 text-white/30 border-white/10 cursor-not-allowed'
                 }`}
+                title={draftPoints.length >= 3 ? 'Salvar área demarcada' : 'Desenhe uma área com pelo menos 3 pontos'}
               >
-                Salvar
+                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                <span>Salvar</span>
               </button>
             ) : null}
           </div>
@@ -1396,6 +1610,68 @@ function ZoneOverlay({
 }
 
 // ---------------------------------------------------------------------------
+// Action button with distinct color themes, glow, and custom spring animations
+// ---------------------------------------------------------------------------
+
+function CardHeaderActionButton({
+  icon,
+  title,
+  onClick,
+  isActive = false,
+  hoverTransform,
+}: {
+  icon: React.ReactNode
+  title: string
+  onClick: (e: React.MouseEvent) => void
+  isActive?: boolean
+  hoverTransform: string
+}) {
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <button
+      type="button"
+      draggable={false}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick(e)
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        backgroundColor: isActive
+          ? 'rgba(255, 255, 255, 0.35)'
+          : hovered
+            ? 'rgba(255, 255, 255, 0.25)'
+            : 'rgba(255, 255, 255, 0.08)',
+        borderColor: isActive
+          ? 'rgba(255, 255, 255, 0.75)'
+          : hovered
+            ? 'rgba(255, 255, 255, 0.5)'
+            : 'rgba(255, 255, 255, 0.18)',
+        color: '#ffffff',
+        boxShadow: hovered ? '0 0 10px rgba(255, 255, 255, 0.45)' : 'none',
+        transform: hovered ? 'scale(1.12)' : 'scale(1)',
+        transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+      }}
+      className="w-6 h-6 rounded-lg flex items-center justify-center border cursor-pointer select-none"
+      title={title}
+    >
+      <div
+        style={{
+          transform: hovered ? hoverTransform : 'none',
+          transition: 'transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1)',
+        }}
+        className="flex items-center justify-center pointer-events-none text-white"
+      >
+        {icon}
+      </div>
+    </button>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Camera Card with Live Preview & Top Header Bar (Name, Expand & Close)
 // ---------------------------------------------------------------------------
 
@@ -1423,6 +1699,7 @@ const CameraCard = memo(function CameraCard({
   onDragEnd,
   onDetections,
   hasMonitor = false,
+  onContextMenu,
   suppressPump = false
 }: {
   camera: CameraInfo
@@ -1448,6 +1725,7 @@ const CameraCard = memo(function CameraCard({
   onDragEnd?: (e: React.DragEvent) => void
   onDetections?: (cameraId: string, boxes: Detection[]) => void
   hasMonitor?: boolean
+  onContextMenu?: (e: React.MouseEvent, camera: CameraInfo) => void
   // Quando o ExpandedCameraModal está aberto para esta câmera, o modal já
   // bombeia frames de detecção para ela — o card por trás não precisa
   // duplicar a carga (2 fetchDirectFrame + 2 frame_pump por ciclo).
@@ -1459,7 +1737,8 @@ const CameraCard = memo(function CameraCard({
 
   useEffect(() => {
     if (isEditingZone) {
-      setDraftPoints(zone && zone.length >= 3 ? [...zone] : [])
+      const initial = zone && zone.length >= 3 ? [...zone] : []
+      setDraftPoints(initial.length > 20 ? simplifyPolygon(initial, 0.015) : initial)
     }
   }, [isEditingZone, zone])
 
@@ -1827,7 +2106,7 @@ const CameraCard = memo(function CameraCard({
       onError: () => {
         if (cancelled) return
         if (errorRef.current === null) {
-          errorRef.current = 'Perda de conexão com a câmera. Tente recarregar.'
+          errorRef.current = 'Sinal instável. Reconectando automaticamente...'
           setError(errorRef.current)
         }
       },
@@ -1851,7 +2130,7 @@ const CameraCard = memo(function CameraCard({
             onError: () => {
               if (cancelled) return
               if (errorRef.current === null) {
-                errorRef.current = 'Perda de conexão com a câmera. Tente recarregar.'
+                errorRef.current = 'Sinal instável. Reconectando automaticamente...'
                 setError(errorRef.current)
               }
             }
@@ -1895,7 +2174,7 @@ const CameraCard = memo(function CameraCard({
         onError: () => {
           if (cancelled) return
           if (errorRef.current === null) {
-            errorRef.current = 'Perda de conexão com a câmera. Tente recarregar.'
+            errorRef.current = 'Sinal instável. Reconectando automaticamente...'
             setError(errorRef.current)
           }
         }
@@ -2148,12 +2427,19 @@ const CameraCard = memo(function CameraCard({
     <div
       ref={cardRef}
       draggable={!isEditingZone}
+      onContextMenu={(e) => {
+        if (!isEditingZone && onContextMenu) {
+          e.preventDefault()
+          e.stopPropagation()
+          onContextMenu(e, camera)
+        }
+      }}
       onDragStart={(e) => onDragStart?.(e, index)}
       onDragOver={(e) => onDragOver?.(e, index)}
       onDragLeave={(e) => onDragLeave?.(e)}
       onDrop={(e) => onDrop?.(e, index)}
       onDragEnd={(e) => onDragEnd?.(e)}
-      className="flex flex-col min-w-0 h-full"
+      className="group flex flex-col min-w-0 h-full"
     >
       {/* Outside Top Left: Camera Name + Monitors count in gray */}
       <div className="flex items-center justify-between gap-2 px-1 mb-1.5 min-w-0">
@@ -2177,7 +2463,17 @@ const CameraCard = memo(function CameraCard({
             : 'border-border/30 hover:border-border/60'
           }`}
       >
-        <div className="relative w-full aspect-video bg-input/40 rounded-t-2xl overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
+        <div
+          className="relative w-full aspect-video bg-input/40 rounded-t-2xl overflow-hidden shrink-0 cursor-pointer select-none"
+          style={{ aspectRatio: '16 / 9' }}
+          onDoubleClick={(e) => {
+            if (!isEditingZone && onExpand) {
+              e.stopPropagation()
+              onExpand(camera)
+            }
+          }}
+          title={isEditingZone ? undefined : 'Dois cliques para ampliar'}
+        >
           <canvas
             ref={frameCanvasRef}
             className={`absolute inset-0 w-full h-full object-cover ${hasFrame ? 'block' : 'opacity-0'}`}
@@ -2222,22 +2518,29 @@ const CameraCard = memo(function CameraCard({
           ) : null}
 
           {error ? (
-            <div className="absolute inset-0 flex items-center justify-center text-xs text-red-400 bg-black/70 z-20 p-4 text-center">
-              {error}
+            <div className={`absolute z-20 p-3 pointer-events-none ${hasFrame ? 'bottom-2 left-2 right-2 flex justify-center' : 'inset-0 flex items-center justify-center bg-black/75'}`}>
+              <div className="flex items-center gap-2 bg-black/85 backdrop-blur-md px-3 py-1.5 rounded-full border border-amber-500/40 text-xs text-amber-300 shadow-lg animate-pulse">
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0" />
+                <span>{error}</span>
+              </div>
             </div>
           ) : null}
 
-          {/* Top Header Bar Inside Card: Zone Pencil, Expand & Close/Remove Buttons */}
-          <div className="absolute top-2 right-2 z-20 flex items-center gap-1.5">
+          {/* Top Header Bar Inside Card: Zone Pen, Expand & Close/Remove Buttons */}
+          <div
+            draggable={false}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            className={`absolute top-2 right-2 z-30 flex items-center gap-1.5 bg-black/75 backdrop-blur-md p-1 rounded-xl border border-white/20 shadow-2xl transition-all duration-200 ${
+              isEditingZone
+                ? 'opacity-100 scale-100'
+                : 'opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100'
+            }`}
+          >
             {onToggleEditZone ? (
-              <button
-                type="button"
-                onClick={onToggleEditZone}
-                className={`w-6 h-6 rounded-full flex items-center justify-center transition-all shadow-md active:scale-95 hover:scale-105 ${
-                  isEditingZone
-                    ? 'bg-sky-500 text-white ring-2 ring-sky-400'
-                    : 'bg-black/60 hover:bg-black/80 text-white'
-                }`}
+              <CardHeaderActionButton
+                isActive={isEditingZone || Boolean(zone && zone.length >= 3)}
+                hoverTransform="rotate(-30deg) translateY(-2px) scale(1.2)"
                 title={
                   isEditingZone
                     ? 'Concluir ou cancelar demarcação da área'
@@ -2245,39 +2548,43 @@ const CameraCard = memo(function CameraCard({
                       ? 'Editar área de monitoramento (zona ativa)'
                       : 'Definir área de monitoramento'
                 }
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 20h9" />
-                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-                </svg>
-              </button>
+                onClick={() => onToggleEditZone()}
+                icon={
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.623l4.353-1.32a2 2 0 0 0 .83-.497z" />
+                    <path d="m15 5 4 4" />
+                  </svg>
+                }
+              />
             ) : null}
             {onExpand ? (
-              <button
+              <CardHeaderActionButton
+                hoverTransform="scale(1.35)"
+                title="Ampliar imagem (tela cheia)"
                 onClick={() => onExpand(camera)}
-                className="w-6 h-6 bg-black/60 hover:bg-black/80 text-white rounded-full flex items-center justify-center transition-all hover:scale-105 active:scale-95 shadow-md"
-                title="Ampliar imagem"
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-                </svg>
-              </button>
+                icon={
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                  </svg>
+                }
+              />
             ) : null}
             {onRemove ? (
-              <button
-                onClick={() => onRemove(camera.id)}
-                className="w-6 h-6 bg-black/60 hover:bg-red-500 hover:text-white text-gray-200 rounded-full flex items-center justify-center transition-all hover:scale-105 active:scale-95 shadow-md"
+              <CardHeaderActionButton
+                hoverTransform="rotate(90deg) scale(1.2)"
                 title={
                   camera.source === 'ip'
                     ? 'Remover câmera IP (cadastro e exibição)'
                     : 'Fechar / Remover câmera da exibição'
                 }
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
+                onClick={() => onRemove(camera.id)}
+                icon={
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                }
+              />
             ) : null}
           </div>
         </div>
@@ -2847,7 +3154,7 @@ function ExpandedCameraModal({
 
   useEffect(() => {
     if (isEditingZone) {
-      setDraftPoints(zone && zone.length >= 3 ? [...zone] : [])
+      const initial = zone && zone.length >= 3 ? [...zone] : []; setDraftPoints(initial.length > 20 ? simplifyPolygon(initial, 0.015) : initial)
     }
   }, [isEditingZone, zone])
 
@@ -3133,7 +3440,7 @@ function ExpandedCameraModal({
       onError: () => {
         if (cancelled) return
         if (errorRef.current === null) {
-          errorRef.current = 'Perda de conexão com a câmera. Feche e reabra para reconectar.'
+          errorRef.current = 'Sinal instável. Reconectando automaticamente...'
           setError(errorRef.current)
         }
       },
@@ -3157,7 +3464,7 @@ function ExpandedCameraModal({
             onError: () => {
               if (cancelled) return
               if (errorRef.current === null) {
-                errorRef.current = 'Perda de conexão com a câmera. Feche e reabra para reconectar.'
+                errorRef.current = 'Sinal instável. Reconectando automaticamente...'
                 setError(errorRef.current)
               }
             }
@@ -3191,7 +3498,7 @@ function ExpandedCameraModal({
         onError: () => {
           if (cancelled) return
           if (errorRef.current === null) {
-            errorRef.current = 'Perda de conexão com a câmera. Feche e reabra para reconectar.'
+            errorRef.current = 'Sinal instável. Reconectando automaticamente...'
             setError(errorRef.current)
           }
         }
@@ -3224,21 +3531,22 @@ function ExpandedCameraModal({
   return (
     <div className="fixed inset-0 z-50 bg-bg overflow-hidden flex flex-col animate-fadeIn">
       <div className="h-full flex flex-col">
-        <div className="flex items-center justify-between px-5 py-3 border-b border-border/40 bg-card/85 backdrop-blur-md shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="relative flex items-center justify-between px-6 py-3 border-b border-border/40 bg-card/85 backdrop-blur-md shrink-0">
+          <div className="w-12 shrink-0" />
+          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 max-w-[45%] pointer-events-none">
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
             <h2 className="text-base font-bold text-text truncate">{formatCameraName(camera.name, camera.source)}</h2>
             <span className="text-xs text-text-muted shrink-0">({isWebcam ? 'Webcam' : 'IP / RTSP'})</span>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0 ml-auto z-10">
             {onToggleEditZone ? (
               <button
                 type="button"
                 onClick={onToggleEditZone}
                 className={`text-xs font-semibold rounded-lg px-3 py-1.5 transition-all flex items-center gap-1.5 shadow-sm active:scale-95 border ${
                   isEditingZone
-                    ? 'bg-sky-500 text-white border-sky-400 ring-2 ring-sky-400/40'
-                    : 'bg-input hover:bg-card border-border/50 text-text'
+                    ? 'bg-accent text-white border-accent ring-2 ring-accent/30'
+                    : 'bg-input hover:bg-card border-border text-text'
                 }`}
                 title={
                   isEditingZone
@@ -3249,8 +3557,8 @@ function ExpandedCameraModal({
                 }
               >
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12 20h9" />
-                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                  <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.623l4.353-1.32a2 2 0 0 0 .83-.497z" />
+                  <path d="m15 5 4 4" />
                 </svg>
                 <span>{isEditingZone ? 'Editando área...' : zone && zone.length >= 3 ? 'Área ativa' : 'Definir área'}</span>
               </button>
@@ -3302,7 +3610,17 @@ function ExpandedCameraModal({
           </div>
         </div>
 
-        <div ref={frameBoxRef} className="flex-1 min-h-0 relative bg-bg overflow-hidden flex items-center justify-center">
+        <div
+          ref={frameBoxRef}
+          className="flex-1 min-h-0 relative bg-bg overflow-hidden flex items-center justify-center cursor-pointer select-none"
+          onDoubleClick={(e) => {
+            if (!isEditingZone && onClose) {
+              e.stopPropagation()
+              onClose()
+            }
+          }}
+          title={isEditingZone ? undefined : 'Dois cliques para fechar'}
+        >
           <canvas
             ref={frameCanvasRef}
             className="w-full h-full object-contain"
@@ -3332,8 +3650,11 @@ function ExpandedCameraModal({
           ) : null}
 
           {error ? (
-            <div className="absolute inset-0 flex items-center justify-center text-sm text-red-400 bg-black/70 p-4 text-center">
-              {error}
+            <div className={`absolute z-20 p-4 pointer-events-none ${ready ? 'bottom-6 left-6 right-6 flex justify-center' : 'inset-0 flex items-center justify-center bg-black/75'}`}>
+              <div className="flex items-center gap-2.5 bg-black/85 backdrop-blur-md px-4 py-2 rounded-full border border-amber-500/40 text-sm text-amber-300 shadow-xl animate-pulse">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping shrink-0" />
+                <span>{error}</span>
+              </div>
             </div>
           ) : null}
         </div>
@@ -3351,12 +3672,14 @@ function ExpandedPrintModal({
   onClose,
   onDescribe,
   onDelete,
+  onContextMenu,
   busy
 }: {
   snap: Snapshot | null
   onClose: () => void
   onDescribe: (snapId: string) => Promise<void>
   onDelete: (snapId: string) => Promise<void>
+  onContextMenu?: (e: React.MouseEvent, snap: Snapshot) => void
   busy: boolean
 }): JSX.Element | null {
   if (!snap) return null
@@ -3366,7 +3689,10 @@ function ExpandedPrintModal({
     `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${snap.id}.jpg`
 
   return (
-    <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md animate-fadeIn">
+    <div
+      className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md animate-fadeIn select-none"
+      onContextMenu={(e) => onContextMenu?.(e, snap)}
+    >
       <div className="h-full flex flex-col">
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 bg-black/40 shrink-0">
           <div>
@@ -3384,7 +3710,10 @@ function ExpandedPrintModal({
           </button>
         </div>
 
-        <div className="flex-1 min-h-0 relative bg-black flex items-center justify-center p-4">
+        <div
+          onContextMenu={(e) => onContextMenu?.(e, snap)}
+          className="flex-1 min-h-0 relative bg-black flex items-center justify-center p-4 cursor-context-menu"
+        >
           <img src={imgSrc} alt={snap.description || 'Print'} className="max-w-full max-h-full object-contain" />
         </div>
 
@@ -3401,7 +3730,8 @@ function ExpandedPrintModal({
             <button
               disabled={busy}
               onClick={() => void onDelete(snap.id)}
-              className="text-xs font-medium rounded-lg bg-red-600/80 hover:bg-red-500 disabled:opacity-50 text-white px-3 py-1.5 transition-colors shrink-0 flex items-center gap-1.5"
+              className="text-xs font-medium rounded-lg bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white px-3 py-1.5 transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+              style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -3421,10 +3751,12 @@ function ExpandedPrintModal({
 
 function ExpandedAlertModal({
   alert,
-  onClose
+  onClose,
+  onContextMenu
 }: {
   alert: Alert | null
   onClose: () => void
+  onContextMenu?: (e: React.MouseEvent, alert: Alert) => void
 }): JSX.Element | null {
   if (!alert) return null
 
@@ -3435,7 +3767,10 @@ function ExpandedAlertModal({
       : '')
 
   return (
-    <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md animate-fadeIn flex flex-col">
+    <div
+      className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md animate-fadeIn flex flex-col select-none"
+      onContextMenu={(e) => onContextMenu?.(e, alert)}
+    >
       <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 bg-black/40 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
@@ -3458,7 +3793,10 @@ function ExpandedAlertModal({
         </button>
       </div>
 
-      <div className="flex-1 min-h-0 relative bg-black flex items-center justify-center p-4">
+      <div
+        onContextMenu={(e) => onContextMenu?.(e, alert)}
+        className="flex-1 min-h-0 relative bg-black flex items-center justify-center p-4 cursor-context-menu"
+      >
         {imgSrc ? (
           <AlertCanvasOverlay
             imageDataUri={imgSrc}
@@ -4239,7 +4577,7 @@ function AddEditMonitorModal({
 
           <form onSubmit={handleSubmit} className="px-5 py-6 sm:px-8 space-y-6 overflow-y-auto custom-scrollbar flex-1">
             {error ? (
-              <div className="p-3 text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-xl">
+              <div className="p-3 text-xs text-red-600 dark:text-red-400 bg-red-500/10 border border-red-500/30 rounded-xl font-medium">
                 {error}
               </div>
             ) : null}
@@ -4612,44 +4950,71 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   const [expandedCamera, setExpandedCamera] = useState<CameraInfo | null>(null)
   const [expandedPrint, setExpandedPrint] = useState<Snapshot | null>(null)
   const [expandedAlert, setExpandedAlert] = useState<Alert | null>(null)
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; snap: Snapshot } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{
+    x: number
+    y: number
+    target:
+      | { type: 'snapshot'; snap: Snapshot; imgSrc: string }
+      | { type: 'alert'; alert: Alert; imgSrc: string }
+      | { type: 'camera'; camera: CameraInfo }
+  } | null>(null)
   const [copyToast, setCopyToast] = useState<string | null>(null)
   const [confirmClearPrints, setConfirmClearPrints] = useState(false)
   const [confirmClearAlerts, setConfirmClearAlerts] = useState(false)
   const [editingZoneCameraId, setEditingZoneCameraId] = useState<string | null>(null)
 
-  const handleContextMenu = useCallback((e: React.MouseEvent, snap: Snapshot) => {
+  const handleCameraContextMenu = useCallback((e: React.MouseEvent, camera: CameraInfo) => {
     e.preventDefault()
     e.stopPropagation()
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
-      snap
+      target: { type: 'camera', camera }
     })
   }, [])
 
-  const handleCopyPrint = useCallback(async (snap: Snapshot) => {
-    setContextMenu(null)
+  const handleSnapshotContextMenu = useCallback((e: React.MouseEvent, snap: Snapshot) => {
+    e.preventDefault()
+    e.stopPropagation()
     const imgSrc =
       snap.imageDataUri ||
       `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${snap.id}.jpg`
-    try {
-      const res = await fetch(imgSrc)
-      const blob = await res.blob()
-      if (typeof ClipboardItem !== 'undefined') {
-        const type = blob.type.startsWith('image/') ? blob.type : 'image/png'
-        const item = new ClipboardItem({ [type]: blob })
-        await navigator.clipboard.write([item])
-      } else {
-        await navigator.clipboard.writeText(imgSrc)
-      }
-      setCopyToast('Print copiado para a área de transferência!')
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      target: { type: 'snapshot', snap, imgSrc }
+    })
+  }, [])
+
+  const handleAlertContextMenu = useCallback((e: React.MouseEvent, alert: Alert) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const imgSrc =
+      alert.imageDataUri ||
+      (alert.snapshotId
+        ? `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${alert.snapshotId}.jpg`
+        : '')
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      target: { type: 'alert', alert, imgSrc }
+    })
+  }, [])
+
+  const handleCopyImage = useCallback(async (imgSrc: string) => {
+    setContextMenu(null)
+    if (!imgSrc) {
+      setCopyToast('Sem imagem disponível para copiar')
       setTimeout(() => setCopyToast(null), 2500)
-    } catch {
-      await navigator.clipboard.writeText(imgSrc).catch(() => { })
-      setCopyToast('URL do print copiada!')
-      setTimeout(() => setCopyToast(null), 2500)
+      return
     }
+    const ok = await copyImageToClipboard(imgSrc)
+    if (ok) {
+      setCopyToast('Imagem copiada! Pronta para colar (Ctrl+V)')
+    } else {
+      setCopyToast('Não foi possível copiar a imagem')
+    }
+    setTimeout(() => setCopyToast(null), 2500)
   }, [])
 
   useEffect(() => {
@@ -4856,6 +5221,24 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       }
     },
     []
+  )
+
+  const handleDeleteFromContextMenu = useCallback(
+    async (target: { type: 'snapshot'; snap: Snapshot; imgSrc: string } | { type: 'alert'; alert: Alert; imgSrc: string }) => {
+      setContextMenu(null)
+      if (target.type === 'snapshot') {
+        if (expandedPrint?.id === target.snap.id) {
+          setExpandedPrint(null)
+        }
+        await handleDeletePrint(target.snap.id)
+      } else {
+        if (expandedAlert && alertKey(expandedAlert) === alertKey(target.alert)) {
+          setExpandedAlert(null)
+        }
+        await handleDeleteAlert(target.alert)
+      }
+    },
+    [expandedPrint, expandedAlert, handleDeletePrint, handleDeleteAlert]
   )
 
   useEffect(() => {
@@ -5317,6 +5700,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 onRemove={handleRemoveCamera}
                 onExpand={handleExpandCamera}
                 onReload={handleReloadCamera}
+                onContextMenu={handleCameraContextMenu}
                 refreshKey={refreshKey}
                 isActive={isActive}
                 index={idx}
@@ -5441,7 +5825,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                             }}
                             title="Excluir monitoramento"
                             aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}
-                            className="text-xs text-red-400 hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all"
+                            className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all cursor-pointer"
                           >
                             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                               <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2 2v2" />
@@ -5539,7 +5923,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                                 }}
                                 title="Excluir monitoramento"
                                 aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}
-                                className="text-xs text-red-400 hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all"
+                                className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all cursor-pointer"
                               >
                                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                                   <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2 2v2" />
@@ -5567,16 +5951,17 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
             {alerts.length > 0 ? (
               confirmClearAlerts ? (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-red-400 font-medium">Limpar todos os alertas?</span>
+                  <span className="text-xs text-red-600 dark:text-red-400 font-semibold">Limpar todos os alertas?</span>
                   <button
                     onClick={() => void handleClearAlerts()}
-                    className="text-xs px-2.5 py-1 rounded-lg bg-red-600 text-white font-medium hover:bg-red-500 transition-colors shadow-sm"
+                    className="text-xs px-2.5 py-1 rounded-lg bg-red-500 hover:bg-red-600 text-white font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
+                    style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
                   >
                     Sim, limpar
                   </button>
                   <button
                     onClick={() => setConfirmClearAlerts(false)}
-                    className="text-xs px-2.5 py-1 rounded-lg bg-card text-text-muted hover:text-text border border-border/40 transition-colors"
+                    className="text-xs px-2.5 py-1 rounded-lg bg-card text-text-muted hover:text-text border border-border/40 transition-colors font-medium cursor-pointer"
                   >
                     Cancelar
                   </button>
@@ -5584,7 +5969,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               ) : (
                 <button
                   onClick={() => setConfirmClearAlerts(true)}
-                  className="text-xs text-red-400/80 hover:text-red-300 transition-colors flex items-center gap-1"
+                  className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-colors flex items-center gap-1 font-medium cursor-pointer"
                 >
                   <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -5608,7 +5993,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               return (
                 <div
                   key={alertKey(alert)}
-                  className="flex gap-3.5 items-center justify-between rounded-2xl border border-border/40 bg-card p-3.5 hover:border-border/80 transition-all shadow-md"
+                  onContextMenu={(e) => handleAlertContextMenu(e, alert)}
+                  className="flex gap-3.5 items-center justify-between rounded-2xl border border-border/40 bg-card p-3.5 hover:border-border/80 transition-all shadow-md select-none"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -5637,7 +6023,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                       <div
                         className="group relative w-32 h-20 rounded-xl bg-black shrink-0 overflow-hidden cursor-pointer border border-border/40 hover:border-emerald-500/60 transition-all shadow-sm"
                         onClick={() => setExpandedAlert(alert)}
-                        title="Clique para ampliar em tela cheia"
+                        onContextMenu={(e) => handleAlertContextMenu(e, alert)}
+                        title="Clique para ampliar em tela cheia (Botão direito para copiar/excluir)"
                       >
                         <AlertCanvasOverlay
                           imageDataUri={imgSrc}
@@ -5659,7 +6046,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                         void handleDeleteAlert(alert)
                       }}
                       title="Excluir este alerta"
-                      className="p-1.5 text-text-muted hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors shrink-0"
+                      className="p-1.5 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors shrink-0 cursor-pointer"
                     >
                       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -5685,16 +6072,17 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               {snapshots.length > 0 ? (
                 confirmClearPrints ? (
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-red-400 font-medium">Excluir todos os prints?</span>
+                    <span className="text-xs text-red-600 dark:text-red-400 font-semibold">Excluir todos os prints?</span>
                     <button
                       onClick={() => void handleClearAllPrints()}
-                      className="text-xs px-2.5 py-1 rounded-lg bg-red-600 text-white font-medium hover:bg-red-500 transition-colors shadow-sm"
+                      className="text-xs px-2.5 py-1 rounded-lg bg-red-500 hover:bg-red-600 text-white font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
+                      style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
                     >
                       Sim, excluir
                     </button>
                     <button
                       onClick={() => setConfirmClearPrints(false)}
-                      className="text-xs px-2.5 py-1 rounded-lg bg-card text-text-muted hover:text-text border border-border/40 transition-colors"
+                      className="text-xs px-2.5 py-1 rounded-lg bg-card text-text-muted hover:text-text border border-border/40 transition-colors font-medium cursor-pointer"
                     >
                       Cancelar
                     </button>
@@ -5702,7 +6090,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 ) : (
                   <button
                     onClick={() => setConfirmClearPrints(true)}
-                    className="text-xs text-red-400/80 hover:text-red-300 transition-colors flex items-center gap-1"
+                    className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-colors flex items-center gap-1 font-medium cursor-pointer"
                   >
                     <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -5723,8 +6111,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 <figure
                   key={snap.id}
                   onClick={() => setExpandedPrint(snap)}
-                  onContextMenu={(e) => handleContextMenu(e, snap)}
-                  className="group rounded-xl overflow-hidden border border-border/40 bg-card cursor-pointer hover:border-emerald-500/50 transition-all shadow-md flex flex-col h-full"
+                  onContextMenu={(e) => handleSnapshotContextMenu(e, snap)}
+                  className="group rounded-xl overflow-hidden border border-border/40 bg-card cursor-pointer hover:border-emerald-500/50 transition-all shadow-md flex flex-col h-full select-none"
                 >
                   <div className="relative w-full aspect-video bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
                     <img
@@ -5752,7 +6140,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                           void handleDeletePrint(snap.id)
                         }}
                         title="Excluir print"
-                        className="p-1 text-text-muted hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors"
+                        className="p-1 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors cursor-pointer"
                       >
                         <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -5867,43 +6255,85 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         onClose={() => setExpandedPrint(null)}
         onDescribe={describePrint}
         onDelete={handleDeletePrint}
+        onContextMenu={handleSnapshotContextMenu}
         busy={busy}
       />
 
-      {/* Right Click Context Menu */}
+      {/* Standardized Context Menu */}
       {contextMenu ? (
-        <div
-          className="fixed z-50 min-w-[140px] py-1 bg-zinc-900/95 border border-white/15 rounded-xl shadow-2xl backdrop-blur-md animate-fadeIn text-xs text-gray-200 overflow-hidden"
-          style={{
-            top: Math.min(contextMenu.y, window.innerHeight - 100),
-            left: Math.min(contextMenu.x, window.innerWidth - 150)
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            onClick={() => void handleCopyPrint(contextMenu.snap)}
-            className="w-full px-3 py-2 text-left hover:bg-white/10 flex items-center gap-2 transition-colors text-gray-200"
-          >
-            <svg className="w-3.5 h-3.5 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-            </svg>
-            Copiar
-          </button>
-          <button
-            onClick={() => {
-              const snapId = contextMenu.snap.id
-              setContextMenu(null)
-              void handleDeletePrint(snapId)
-            }}
-            className="w-full px-3 py-2 text-left hover:bg-red-500/20 text-red-400 flex items-center gap-2 transition-colors"
-          >
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-            </svg>
-            Excluir
-          </button>
-        </div>
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          items={
+            contextMenu.target.type === 'camera'
+              ? [
+                  {
+                    id: 'snapshot',
+                    label: 'Tirar print',
+                    onClick: () => void takeSnapshot(contextMenu.target.camera.id)
+                  },
+                  {
+                    id: 'expand',
+                    label: 'Ampliar imagem',
+                    onClick: () => handleExpandCamera(contextMenu.target.camera)
+                  },
+                  {
+                    id: 'zone',
+                    label:
+                      config.detectionZones?.[contextMenu.target.camera.id] &&
+                      config.detectionZones[contextMenu.target.camera.id].length >= 3
+                        ? 'Editar área de monitoramento'
+                        : 'Definir área de monitoramento',
+                    onClick: () => handleToggleEditZone(contextMenu.target.camera.id)
+                  },
+                  {
+                    id: 'monitor',
+                    label: 'Criar monitoramento',
+                    onClick: () => {
+                      setEditingMonitor({
+                        id: '',
+                        cameraId: contextMenu.target.camera.id,
+                        cameraName: contextMenu.target.camera.name,
+                        triggers: []
+                      })
+                      setIsMonitorModalOpen(true)
+                    }
+                  },
+                  {
+                    id: 'reload',
+                    label: 'Recarregar câmera',
+                    onClick: () => void handleReloadCamera(contextMenu.target.camera.id)
+                  },
+                  {
+                    id: 'remove',
+                    label: contextMenu.target.camera.source === 'ip' ? 'Remover câmera IP' : 'Remover da exibição',
+                    danger: true,
+                    onClick: () => void handleRemoveCamera(contextMenu.target.camera.id)
+                  }
+                ]
+              : [
+                  {
+                    id: 'copy',
+                    label: 'Copiar',
+                    shortcut: 'Ctrl+C',
+                    onClick: () => void handleCopyImage(contextMenu.target.imgSrc)
+                  },
+                  {
+                    id: 'delete',
+                    label: 'Excluir',
+                    shortcut: 'Del',
+                    danger: true,
+                    onClick: () => {
+                      if (contextMenu.target.type !== 'camera') {
+                        void handleDeleteFromContextMenu(contextMenu.target)
+                      }
+                    }
+                  }
+                ]
+          }
+          minWidth={170}
+        />
       ) : null}
 
       {/* Expanded Alert Lightbox Modal */}
@@ -5911,16 +6341,17 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         <ExpandedAlertModal
           alert={expandedAlert}
           onClose={() => setExpandedAlert(null)}
+          onContextMenu={handleAlertContextMenu}
         />
       ) : null}
 
-      {/* Copy Toast Notification */}
+      {/* Windows Style Notification Pill */}
       {copyToast ? (
-        <div className="fixed bottom-5 right-5 z-50 bg-emerald-600 text-white text-xs px-3 py-2 rounded-xl shadow-xl animate-fadeIn flex items-center gap-1.5 font-medium">
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <path d="M20 6L9 17l-5-5" />
+        <div className="fixed bottom-6 right-6 z-[9999] bg-[#2b2b2b] text-[#f1f1f1] text-[12px] px-3 py-1.5 rounded-[4px] shadow-[0_4px_16px_rgba(0,0,0,0.6)] border border-[#3e3e42] animate-in fade-in slide-in-from-bottom-2 duration-150 flex items-center gap-2 select-none font-sans">
+          <svg className="w-3.5 h-3.5 text-[#d4d4d4]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="20 6 9 17 4 12" />
           </svg>
-          {copyToast}
+          <span>{copyToast}</span>
         </div>
       ) : null}
     </div>

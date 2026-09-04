@@ -20,6 +20,7 @@ import {
   applySceneAnswer,
   inSchedule,
   normalizeClassName,
+  automationTimingToMonitor,
   type MonitorConfig,
   type MonitorState,
   type MonitorAction,
@@ -607,6 +608,9 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       '-hide_banner',
       '-loglevel', 'error',
       '-rtsp_transport', transport,
+      '-buffer_size', '2097152',
+      '-max_delay', '500000',
+      '-err_detect', 'ignore_err',
       '-allowed_media_types', 'video',
       '-timeout', '5000000',
       '-probesize', '128k',
@@ -660,7 +664,7 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       const msg = data.toString()
       stderrBuf += msg
       if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000)
-      if (msg.includes('POC') || msg.includes('RPS') || msg.includes('NALU')) return
+      if (msg.includes('POC') || msg.includes('RPS') || msg.includes('NALU') || msg.includes('PPS id')) return
       if (msg.toLowerCase().includes('error') || msg.toLowerCase().includes('failed') || msg.toLowerCase().includes('fatal') || msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('401')) {
         bridge?.log(`[vision] RTSP FFmpeg (${camera.name}) [${transport}]: ${msg.slice(0, 250)}`)
       }
@@ -678,10 +682,10 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       session.alive = false
       rtspSessions.delete(camera.id)
       const errLower = stderrBuf.toLowerCase()
-      const isConnTimeout = stderrBuf.includes('-138') || errLower.includes('connection to tcp') || errLower.includes('timed out') || errLower.includes('nonmatching transport') || errLower.includes('invalid data') || errLower.includes('method setup failed')
+      const isTransportMismatch = errLower.includes('nonmatching transport') || (transport === 'tcp' && (errLower.includes('connection to tcp') || errLower.includes('method setup failed')))
       const nextTransport = transport === 'udp' ? 'tcp' : 'udp'
-      if (!isRetry && isConnTimeout && !hadFirstFrame && !entry.controller.signal.aborted) {
-        bridge?.log(`[vision] RTSP: ${transport} falhou para ${camera.name}, alternando imediatamente para ${nextTransport}...`)
+      if (!isRetry && isTransportMismatch && !hadFirstFrame && !entry.controller.signal.aborted) {
+        bridge?.log(`[vision] RTSP: ${transport} incompatível para ${camera.name}, alternando para ${nextTransport}...`)
         preferredTransportMap.set(camera.id, nextTransport)
         setTimeout(() => {
           if (entry.controller.signal.aborted) { mjpegStreams.delete(camera.id); return }
@@ -690,7 +694,19 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
         }, 50)
         return
       }
-      bridge?.log(`[vision] RTSP: FFmpeg saiu para ${camera.name} [${transport}] code=${code} signal=${signal}`)
+      if (!entry.controller.signal.aborted) {
+        bridge?.log(`[vision] RTSP: FFmpeg saiu para ${camera.name} [${transport}] code=${code} signal=${signal} — auto-reiniciando em 800ms...`)
+        setTimeout(() => {
+          if (entry.controller.signal.aborted) {
+            mjpegStreams.delete(camera.id)
+            return
+          }
+          try { ffmpeg.kill() } catch {}
+          trySpawn(transport, false)
+        }, 800)
+        return
+      }
+      bridge?.log(`[vision] RTSP: FFmpeg finalizado para ${camera.name} [${transport}] code=${code}`)
       mjpegStreams.delete(camera.id)
     })
 
@@ -1425,6 +1441,11 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
         : { type: 'object', className: normalizeClassName(rawObj) }
 
       const id = `auto-${auto.automationId}`
+      // O tempo de negócio mora na automação: propaga policy/conditions para o
+      // sensoriamento (evita snapshot/overlay/LLM desperdiçados). Sem policy,
+      // mantém o comportamento padrão (cooldown 300s, sem janela).
+      const timing = automationTimingToMonitor(auto.policy, auto.global_conditions)
+      if (timing.expired || timing.never) continue
       const existing = autoMonitorsCache.find((m) => m.config.id === id)
       const state = existing?.state || createMonitorState()
 
@@ -1438,6 +1459,9 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
         paused: false,
         actions: auto.actions || []
       }
+      if (timing.cooldownSec !== null && timing.cooldownSec !== undefined)
+        config.cooldownSec = timing.cooldownSec
+      if (timing.schedule) config.schedule = timing.schedule
 
       synced.push({ config, state })
 

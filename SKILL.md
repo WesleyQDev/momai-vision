@@ -1,26 +1,6 @@
 ---
 name: MomAI Vision
-description: Olhos para a MomAI: snapshots de câmeras, monitoramento e alertas 100% locais.
-author: WesleyQDev
-version: 1.0.0
-icon: 👁️
-tags:
-  - vision
-  - camera
-  - monitoring
-permissions:
-  - camera
-  - network
-intents:
-  - "o que você vê aí"
-  - "tirar snapshot"
-  - "me avise quando"
-  - "monitorar"
-  - "vigiar"
-  - "câmera"
-  - "câmeras"
-  - "movimento"
-  - "ver as câmeras"
+description: Olhos para a MomAI: snapshots de câmeras, monitoramento e alertas 100% locais. Use quando o usuario falar de câmera, ver, enxergar, monitorar, vigiar, movimento, alguem chegou, encomenda, porta, ou pedir o que a câmera está vendo.
 ---
 
 # MomAI Vision
@@ -106,7 +86,7 @@ Para alterar um monitoramento existente (ex.: "mude o tempo do alerta da garagem
 1. Para criar uma automação de visão, chame **somente** `create_automation`.
 2. Ao disparar um trigger: snapshot salvo na galeria + **overlay flutuante** com a imagem + cartão no chat (`vision_alert`) + entrada no feed de alertas da página.
 3. Para pausar (manter salvo): `pause_monitoring {monitorId}` — o overlay e o card somem, mas o monitor continua gerenciável na página. Para retomar depois: `resume_monitoring {monitorId}`.
-4. Para excluir de vez (remover dados): `stop_monitoring {monitorId}` — também pela página (botão lixeira) ou pelo overlay.�gina. Para retomar depois: `resume_monitoring {monitorId}`.
+4. Para excluir de vez (remover dados): `stop_monitoring {monitorId}` — também pela página (botão lixeira) ou pelo overlay.�gina. Para retomar depois: `resume_monitoring {monitorId}`.
 5. Para excluir de vez (remover dados): `stop_monitoring {monitorId}` — também pela página (botão lixeira) ou pelo overlay.
 
 ## Performance

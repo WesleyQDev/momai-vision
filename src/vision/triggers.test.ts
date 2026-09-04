@@ -5,6 +5,7 @@ import {
   applySceneAnswer,
   inSchedule,
   normalizeClassName,
+  automationTimingToMonitor,
   type MonitorConfig,
   type Detection,
   type Trigger
@@ -247,5 +248,54 @@ describe('evaluateMonitor — periodic', () => {
     expect(sceneDue).toHaveLength(1)
     const again = evaluateMonitor(config, state, ctx({ now: NOW + 30_000 }))
     expect(again.sceneDue).toHaveLength(0)
+  })
+})
+
+describe('automationTimingToMonitor — tempo da automacao no sensoriamento', () => {
+  it('sem policy mantem padrao (sem cooldown, sem janela)', () => {
+    const t = automationTimingToMonitor(undefined, undefined)
+    expect(t.cooldownSec).toBeNull()
+    expect(t.schedule).toBeNull()
+  })
+
+  it('cooldownSeconds vence cooldownMinutes', () => {
+    const t = automationTimingToMonitor({ cooldownSeconds: 20, cooldownMinutes: 10 }, [])
+    expect(t.cooldownSec).toBe(20)
+  })
+
+  it('converte minutos legados e respeita piso de 5s/teto 3600s', () => {
+    expect(automationTimingToMonitor({ cooldownMinutes: 10 }, []).cooldownSec).toBe(600)
+    expect(automationTimingToMonitor({ cooldownSeconds: 1 }, []).cooldownSec).toBe(5)
+    expect(automationTimingToMonitor({ cooldownSeconds: 99999 }, []).cooldownSec).toBe(3600)
+  })
+
+  it('mapeia weekdays + janela, inclusive overnight', () => {
+    const t = automationTimingToMonitor(
+      { weekdays: [1, 2, 3, 4, 5], startTime: '22:00', endTime: '06:00' },
+      []
+    )
+    expect(t.schedule?.days).toEqual([1, 2, 3, 4, 5])
+    expect(t.schedule?.start).toBe('22:00')
+    expect(t.schedule?.end).toBe('06:00')
+  })
+
+  it('intersecta conditions time_window com a policy', () => {
+    const t = automationTimingToMonitor({ startTime: '22:00', endTime: '06:00' }, [
+      { kind: 'time_window', field: 'time.time', operator: 'between', value: ['23:00', '05:00'] }
+    ])
+    expect(t.schedule?.start).toBe('23:00')
+    expect(t.schedule?.end).toBe('05:00')
+  })
+
+  it('dias contraditorios resultam em never', () => {
+    const t = automationTimingToMonitor({ weekdays: [1] }, [
+      { kind: 'time_window', field: 'time.weekday', operator: 'in', value: [0] }
+    ])
+    expect(t.never).toBe(true)
+  })
+
+  it('expirada resulta em expired', () => {
+    const t = automationTimingToMonitor({ expiresAt: '2020-01-01T00:00:00.000Z' }, [])
+    expect(t.expired).toBe(true)
   })
 })

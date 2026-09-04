@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
+import ContextMenu from './components/ContextMenu'
 import { ptLabel, triggerLabel } from './vision/labels'
 import { classColor } from './vision/theme-color'
 import visionIconPng from '../icon.png'
@@ -160,6 +161,7 @@ async function pauseMonitor(monitorId: string | undefined, onClose?: () => void)
 function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
   const [stopping, setStopping] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const isOverlay = typeof data?.onClose === 'function'
   const isSnapshot = data?.triggeredBy === 'snapshot'
 
@@ -272,6 +274,11 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
     <div
       className={`w-full ${expanded && isOverlay ? '' : 'max-w-md'} rounded-xl border border-white/10 bg-zinc-900/95 text-gray-100 shadow-lg overflow-hidden`}
       style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        setMenu({ x: e.clientX, y: e.clientY })
+      }}
     >
       {/* Header doubles as the drag handle in the floating overlay window. */}
       <div
@@ -391,6 +398,69 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
           ) : null}
         </div>
       </div>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={[
+            ...(data?.imageDataUri
+              ? [
+                  {
+                    id: 'expand',
+                    label: expanded ? 'Reduzir print' : 'Ampliar print',
+                    onClick: toggleExpand
+                  }
+                ]
+              : []),
+            {
+              id: 'copy-desc',
+              label: 'Copiar descrição',
+              onClick: () => {
+                try {
+                  void navigator.clipboard?.writeText?.(
+                    data?.description || (isSnapshot ? 'Snapshot capturado' : 'Alerta da câmera')
+                  )
+                } catch {}
+              }
+            },
+            ...(data?.cameraName
+              ? [
+                  {
+                    id: 'copy-camera',
+                    label: 'Copiar câmera',
+                    onClick: () => {
+                      try {
+                        void navigator.clipboard?.writeText?.(data?.cameraName || '')
+                      } catch {}
+                    }
+                  }
+                ]
+              : []),
+            ...(data?.monitorId
+              ? [
+                  {
+                    id: 'pause',
+                    label: 'Pausar monitoramento',
+                    onClick: () => {
+                      setStopping(true)
+                      void pauseMonitor(data.monitorId, data.onClose).catch(() => setStopping(false))
+                    }
+                  }
+                ]
+              : []),
+            ...(typeof data?.onClose === 'function'
+              ? [
+                  {
+                    id: 'close',
+                    label: 'Fechar',
+                    onClick: () => data?.onClose?.()
+                  }
+                ]
+              : [])
+          ]}
+        />
+      )}
     </div>
   )
 }
@@ -406,6 +476,12 @@ interface Status {
 
 export default function VisionPanel(props: { data?: unknown }): JSX.Element {
   const [status, setStatus] = useState<Status | null>(null)
+  const [monitorMenu, setMonitorMenu] = useState<{
+    x: number
+    y: number
+    id: string
+    cameraName?: string
+  } | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -448,7 +524,15 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
       {monitors.length > 0 ? (
         <ul className="space-y-1.5">
           {monitors.map((m) => (
-            <li key={m.id} className="flex items-center justify-between rounded-lg bg-white/5 px-3 py-2">
+            <li
+              key={m.id}
+              className="flex items-center justify-between rounded-lg bg-white/5 px-3 py-2 cursor-context-menu"
+              onContextMenu={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                setMonitorMenu({ x: e.clientX, y: e.clientY, id: m.id, cameraName: m.cameraName })
+              }}
+            >
               <div className="min-w-0">
                 <p className="text-xs font-medium truncate">{m.cameraName || m.id}</p>
                 <p className="text-[11px] text-gray-400">
@@ -461,6 +545,44 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
         </ul>
       ) : (
         <p className="text-xs text-gray-400">Nenhum monitor ativo.</p>
+      )}
+      {monitorMenu && (
+        <ContextMenu
+          x={monitorMenu.x}
+          y={monitorMenu.y}
+          onClose={() => setMonitorMenu(null)}
+          items={[
+            ...(monitorMenu.cameraName
+              ? [
+                  {
+                    id: 'copy-name',
+                    label: 'Copiar nome da câmera',
+                    onClick: () => {
+                      try {
+                        void navigator.clipboard?.writeText?.(monitorMenu.cameraName || '')
+                      } catch {}
+                    }
+                  }
+                ]
+              : []),
+            {
+              id: 'copy-id',
+              label: 'Copiar ID do monitor',
+              onClick: () => {
+                try {
+                  void navigator.clipboard?.writeText?.(monitorMenu.id)
+                } catch {}
+              }
+            },
+            {
+              id: 'pause',
+              label: 'Pausar monitoramento',
+              onClick: () => {
+                void pauseMonitor(monitorMenu.id).catch(() => {})
+              }
+            }
+          ]}
+        />
       )}
     </div>
   )

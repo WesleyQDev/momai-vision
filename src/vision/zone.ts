@@ -118,3 +118,43 @@ export function createBoxFromCorners(p1: Point, p2: Point): Point[] {
     { x: Number(x1.toFixed(4)), y: Number(y2.toFixed(4)) }
   ]
 }
+
+function perpendicularDistance(p: Point, lineA: Point, lineB: Point): number {
+  const dx = lineB.x - lineA.x
+  const dy = lineB.y - lineA.y
+  const mag = Math.hypot(dx, dy)
+  if (mag === 0) return Math.hypot(p.x - lineA.x, p.y - lineA.y)
+  return Math.abs(dy * p.x - dx * p.y + lineB.x * lineA.y - lineB.y * lineA.x) / mag
+}
+
+/**
+ * Simplifies a polygon using the Ramer-Douglas-Peucker algorithm.
+ * Reduces dense freehand points into key structural vertices (~8-16 points),
+ * allowing clean modification and dragging of vertices.
+ */
+export function simplifyPoints(points: Point[], tolerance = 0.015): Point[] {
+  if (points.length <= 4) return points
+  let maxDist = 0
+  let index = 0
+  const end = points.length - 1
+  for (let i = 1; i < end; i++) {
+    const dist = perpendicularDistance(points[i], points[0], points[end])
+    if (dist > maxDist) {
+      maxDist = dist
+      index = i
+    }
+  }
+  if (maxDist > tolerance) {
+    const left = simplifyPoints(points.slice(0, index + 1), tolerance)
+    const right = simplifyPoints(points.slice(index), tolerance)
+    return left.slice(0, -1).concat(right)
+  }
+  return [points[0], points[end]]
+}
+
+export function simplifyPolygon(points: Point[], tolerance = 0.015): Point[] {
+  if (points.length <= 4) return points
+  const simplified = simplifyPoints(points, tolerance)
+  return simplified.length >= 3 ? simplified : points
+}
+

@@ -119,53 +119,95 @@ function parse(buf: Uint8Array): Uint8Array {
   return buf
 }
 
+let isRunning = false
+let activeUrl = ''
+
 async function run(url: string): Promise<void> {
-  ac = new AbortController()
-  try {
-    const res = await fetch(url, { signal: ac.signal, headers: { Accept: 'image/jpeg' } })
-    if (!res.ok || !res.body) throw new Error(`Mjpeg stream HTTP ${res.status}`)
-    const reader = res.body.getReader()
-    const chunks: Uint8Array[] = []
-    let pending: Uint8Array = new Uint8Array(0)
-    const flushToU8 = (): Uint8Array => {
-      const total = chunks.reduce((n, c) => n + c.length, 0)
-      const out = new Uint8Array(total)
-      let o = 0
-      for (const c of chunks) {
-        out.set(c, o)
+  activeUrl = url
+  isRunning = true
+  let failCount = 0
+
+  while (isRunning) {
+    ac = new AbortController()
+    let sessionActive = true
+    let lastFrameTs = Date.now()
+
+    // Watchdog de inatividade: se nenhum frame for recebido por mais de 4.5s, força reconexão
+    const watchdogTimer = setInterval(() => {
+      if (!sessionActive || !isRunning) {
+        clearInterval(watchdogTimer)
+        return
       }
-      chunks.length = 0
-      return out
-    }
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
-      let joined: Uint8Array
-      if (chunks.length === 1 && pending.length === 0) {
-        joined = chunks[0]
+      if (Date.now() - lastFrameTs > 4500) {
+        clearInterval(watchdogTimer)
+        try { ac?.abort() } catch {}
+      }
+    }, 1500)
+
+    try {
+      const res = await fetch(activeUrl, { signal: ac.signal, headers: { Accept: 'image/jpeg' } })
+      if (!res.ok || !res.body) throw new Error(`Mjpeg stream HTTP ${res.status}`)
+      const reader = res.body.getReader()
+      const chunks: Uint8Array[] = []
+      let pending: Uint8Array = new Uint8Array(0)
+      const flushToU8 = (): Uint8Array => {
+        const total = chunks.reduce((n, c) => n + c.length, 0)
+        const out = new Uint8Array(total)
+        let o = 0
+        for (const c of chunks) {
+          out.set(c, o)
+        }
         chunks.length = 0
-      } else {
-        joined = pending.length ? concatBytes(pending, flushToU8()) : flushToU8()
+        return out
       }
-      pending = parse(joined)
-      if (pending.length > 5 * 1024 * 1024) {
-        pending = new Uint8Array(0)
+
+      failCount = 0
+
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done || !isRunning) break
+        lastFrameTs = Date.now()
+        chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
+        let joined: Uint8Array
+        if (chunks.length === 1 && pending.length === 0) {
+          joined = chunks[0]
+          chunks.length = 0
+        } else {
+          joined = pending.length ? concatBytes(pending, flushToU8()) : flushToU8()
+        }
+        pending = parse(joined)
+        if (pending.length > 5 * 1024 * 1024) {
+          pending = new Uint8Array(0)
+        }
       }
+    } catch (err) {
+      if (!isRunning) break
+      failCount++
+      scope.postMessage({
+        type: 'error',
+        message: `Reconectando câmera... (${err instanceof Error ? err.message : String(err)})`
+      })
+    } finally {
+      sessionActive = false
+      clearInterval(watchdogTimer)
     }
-  } catch (err) {
-    if (!ac.signal.aborted) {
-      scope.postMessage({ type: 'error', message: err instanceof Error ? err.message : String(err) })
-    }
+
+    if (!isRunning) break
+
+    // Backoff de reconexão suave: 600ms, 1200ms, max 2500ms
+    const delay = Math.min(2500, 600 * Math.pow(1.4, Math.min(failCount, 4)))
+    await new Promise((resolve) => setTimeout(resolve, delay))
   }
 }
 
 scope.onmessage = (e: MessageEvent<WorkerIncomingMessage>) => {
   const msg = e.data
   if (msg.type === 'start') {
+    isRunning = false
     if (ac) ac.abort()
     void run(String(msg.url || ''))
   } else if (msg.type === 'abort') {
+    isRunning = false
     if (ac) ac.abort()
   } else if (msg.type === 'get_frame') {
     if (currentFrame) {

@@ -135,6 +135,141 @@ function inCooldown(state: MonitorState, monitor: MonitorConfig, now: number): b
   return now - state.lastAlertTs < cooldown
 }
 
+/** Campos genéricos do Hub de Automações lidos na propagação de tempo. */
+export interface AutomationPolicyLike {
+  cooldownSeconds?: number
+  cooldownMinutes?: number
+  maxPerDay?: number
+  weekdays?: number[]
+  startTime?: string
+  endTime?: string
+  expiresAt?: string
+}
+
+export interface AutomationConditionLike {
+  kind?: string
+  field?: string
+  operator?: string
+  value?: unknown
+}
+
+export interface AutomationTiming {
+  expired?: boolean
+  never?: boolean
+  cooldownSec?: number | null
+  schedule?: Schedule | null
+}
+
+function toMinutes(hhmm: string): number {
+  const [h, m] = String(hhmm).split(':').map(Number)
+  return h * 60 + m
+}
+
+function toHHMM(min: number): string {
+  const h = Math.floor(min / 60) % 24
+  const m = min % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
+}
+
+/** Janela HH:MM como lista de intervalos inclusivos (suporta overnight). */
+function rangesOf(start: string, end: string): Array<[number, number]> {
+  const s = toMinutes(start)
+  const e = toMinutes(end)
+  return s <= e ? [[s, e]] : [[s, 1439], [0, e]]
+}
+
+function intersectRanges(
+  A: Array<[number, number]>,
+  B: Array<[number, number]>
+): Array<[number, number]> {
+  const out: Array<[number, number]> = []
+  for (const [a1, a2] of A)
+    for (const [b1, b2] of B) {
+      const s = Math.max(a1, b1)
+      const e = Math.min(a2, b2)
+      if (s <= e) out.push([s, e])
+    }
+  return out
+}
+
+function rangesToWindow(R: Array<[number, number]>): [string | null, string | null] {
+  if (R.length === 0) return [null, null]
+  if (R.length === 1) return [toHHMM(R[0][0]), toHHMM(R[0][1])]
+  const sorted = [...R].sort((x, y) => x[0] - y[0])
+  if (sorted.length === 2 && sorted[0][0] === 0 && sorted[1][1] === 1439)
+    return [toHHMM(sorted[1][0]), toHHMM(sorted[0][1])]
+  const s = Math.min(...R.map((r) => r[0]))
+  const e = Math.max(...R.map((r) => r[1]))
+  return [toHHMM(s), toHHMM(e)]
+}
+
+/**
+ * Traduz o tempo de negócio da automação (policy + conditions time_window)
+ * para o sensoriamento local. O dono único do tempo é a automação: a extensão
+ * propaga em vez de ter tempo próprio (evita snapshot/overlay/LLM
+ * desperdiçados quando o Hub barraria o disparo de qualquer forma).
+ */
+export function automationTimingToMonitor(
+  policy: AutomationPolicyLike | null | undefined,
+  conditions: AutomationConditionLike[] | null | undefined
+): AutomationTiming {
+  const p: AutomationPolicyLike = policy && typeof policy === 'object' ? policy : {}
+  if (p.expiresAt) {
+    const exp = new Date(p.expiresAt).getTime()
+    if (!isNaN(exp) && Date.now() > exp) return { expired: true }
+  }
+  let cd: number | null = null
+  if (p.cooldownSeconds !== undefined && p.cooldownSeconds !== null) cd = Number(p.cooldownSeconds)
+  else if (p.cooldownMinutes !== undefined && p.cooldownMinutes !== null)
+    cd = Number(p.cooldownMinutes) * 60
+  // Piso de 5s vale só para monitores vindos de automação (manuais mantêm
+  // o clamp 10–3600 de start/update_monitoring).
+  const cooldownSec = cd !== null && !isNaN(cd) ? Math.min(Math.max(cd, 5), 3600) : null
+  let days: number[] | null = Array.isArray(p.weekdays)
+    ? p.weekdays.map(Number).filter((d) => d >= 0 && d <= 6)
+    : null
+  let window: Array<[number, number]> | null = null
+  if (typeof p.startTime === 'string' && p.startTime && typeof p.endTime === 'string' && p.endTime)
+    window = rangesOf(p.startTime, p.endTime)
+  for (const c of Array.isArray(conditions) ? conditions : []) {
+    if (!c || c.kind !== 'time_window') continue
+    if (c.field === 'time.weekday' && c.operator === 'in' && Array.isArray(c.value)) {
+      const ds = (c.value as unknown[]).map(Number).filter((d) => d >= 0 && d <= 6)
+      days = days ? days.filter((d) => ds.includes(d)) : ds
+    }
+    if (
+      c.field === 'time.time' &&
+      c.operator === 'between' &&
+      Array.isArray(c.value) &&
+      c.value.length >= 2
+    ) {
+      const w = rangesOf(String(c.value[0]), String(c.value[1]))
+      window = window ? intersectRanges(window, w) : w
+    }
+    if (c.field === 'time.time' && c.operator === 'equals' && c.value) {
+      const w = rangesOf(String(c.value), String(c.value))
+      window = window ? intersectRanges(window, w) : w
+    }
+  }
+  if (days !== null && days.length === 0) return { never: true }
+  let winStart: string | null = null
+  let winEnd: string | null = null
+  if (window !== null) {
+    ;[winStart, winEnd] = rangesToWindow(window)
+    if (!winStart || !winEnd) return { never: true }
+  }
+  let schedule: Schedule | null = null
+  if ((days && days.length > 0) || winStart) {
+    schedule = {}
+    if (days && days.length > 0) schedule.days = days
+    if (winStart && winEnd) {
+      schedule.start = winStart
+      schedule.end = winEnd
+    }
+  }
+  return { cooldownSec, schedule }
+}
+
 function findDetections(detections: Detection[], className: string, minConfidence: number): Detection[] {
   const wanted = normalizeClassName(className).toLowerCase()
   return detections.filter((d) => d.className.toLowerCase() === wanted && d.confidence >= minConfidence)
