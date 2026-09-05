@@ -1,7 +1,7 @@
 {
   "id": "momai-vision",
   "name": "MomAI Vision",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "is_official": true,
   "description": "Veja suas câmeras, receba alertas de movimento e pergunte o que está acontecendo.",
   "category": "utility",
@@ -9,7 +9,10 @@
   "readme": {
     "pt-BR": "README.md",
     "en-US": "README.en-US.md",
-    "es": "README.es.md"
+    "es": "README.es.md",
+    "fr": "README.fr.md",
+    "de": "README.de.md",
+    "it": "README.it.md"
   },
   "locales": {
     "pt-BR": {
