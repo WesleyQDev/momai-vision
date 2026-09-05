@@ -74,15 +74,27 @@ export function AlertCanvasOverlay({
   }, [imageDataUri])
 
   const isContain = objectFit === 'object-contain'
+  const validSrc =
+    typeof imageDataUri === 'string' &&
+    !imageDataUri.includes('{{') &&
+    (imageDataUri.startsWith('data:image/') ||
+      imageDataUri.startsWith('http://') ||
+      imageDataUri.startsWith('https://') ||
+      imageDataUri.startsWith('/'))
+      ? imageDataUri
+      : undefined
 
   return (
     <div ref={containerRef} className={`relative w-full h-full bg-black overflow-hidden ${className}`}>
-      {imageDataUri ? (
+      {validSrc ? (
         <img
           ref={imgRef}
-          src={imageDataUri}
+          src={validSrc}
           alt="Snapshot"
           className={`absolute inset-0 w-full h-full ${objectFit}`}
+          onError={(e) => {
+            ;(e.currentTarget as HTMLElement).style.display = 'none'
+          }}
         />
       ) : null}
       {boxes && boxes.length > 0 ? (
@@ -164,6 +176,11 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const isOverlay = typeof data?.onClose === 'function'
   const isSnapshot = data?.triggeredBy === 'snapshot'
+  const effectiveImageUri =
+    (typeof data?.imageDataUri === 'string' &&
+      !data.imageDataUri.includes('{{') &&
+      data.imageDataUri.trim()) ||
+    (data?.snapshotId ? `/media/camera/snapshot/${data.snapshotId}` : '')
 
   // In the floating overlay, "ampliar" re-opens the window sized to the
   // photo's real aspect ratio (measured from the frame) so the image fills the
@@ -188,8 +205,10 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         skillId: EXT_ID,
         panel: 'dist/panel.js',
         panelType: 'extension-panel',
+        overlayId: cleanData.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
+        overlay_id: cleanData.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
         overlaySize: { width: w, height: h },
-        strategy: 'replace',
+        strategy: 'stack',
         structuredResponse: { type: 'vision_alert', data: cleanData }
       })
     }
@@ -198,14 +217,16 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         skillId: EXT_ID,
         panel: 'dist/panel.js',
         panelType: 'extension-panel',
+        overlayId: cleanData.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
+        overlay_id: cleanData.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
         overlaySize: { width: 480, height: 560 },
-        strategy: 'replace',
+        strategy: 'stack',
         structuredResponse: { type: 'vision_alert', data: cleanData }
       })
       return
     }
     // Measure the actual frame aspect so the window matches it (no bars/crop).
-    if (data?.imageDataUri) {
+    if (effectiveImageUri) {
       const img = new Image()
       img.onload = () => {
         const aspect =
@@ -213,7 +234,7 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         resize(aspect)
       }
       img.onerror = () => resize(16 / 9)
-      img.src = data.imageDataUri
+      img.src = effectiveImageUri
     } else {
       resize(16 / 9)
     }
@@ -225,10 +246,10 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         className="fixed inset-0 z-50 bg-black select-none"
         style={{ WebkitAppRegion: 'drag' } as any}
       >
-        {data?.imageDataUri ? (
+        {effectiveImageUri ? (
           <AlertCanvasOverlay
-            imageDataUri={data.imageDataUri}
-            boxes={data.boxes}
+            imageDataUri={effectiveImageUri}
+            boxes={data?.boxes}
             objectFit="object-contain"
           />
         ) : (
@@ -254,8 +275,8 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
       <div className="w-full max-w-md rounded-xl border border-white/10 bg-zinc-900/95 text-gray-100 shadow-lg overflow-hidden">
         <div className="relative w-full aspect-video bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
           <AlertCanvasOverlay
-            imageDataUri={data.imageDataUri}
-            boxes={data.boxes}
+            imageDataUri={effectiveImageUri}
+            boxes={data?.boxes}
             objectFit="object-cover"
           />
         </div>
@@ -298,7 +319,7 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
           className="flex items-center gap-1 shrink-0"
           style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
         >
-          {data?.imageDataUri ? (
+          {effectiveImageUri ? (
             <button
               onClick={toggleExpand}
               className="rounded-full p-1.5 text-gray-400 hover:bg-white/10 hover:text-white transition-colors"
@@ -330,7 +351,7 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         </div>
       </div>
 
-      {data?.imageDataUri ? (
+      {effectiveImageUri ? (
         <div
           className="relative w-full bg-black overflow-hidden shrink-0 cursor-pointer"
           style={
@@ -344,8 +365,8 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
           title={expanded ? 'Reduzir print' : 'Ampliar print'}
         >
           <AlertCanvasOverlay
-            imageDataUri={data.imageDataUri}
-            boxes={data.boxes}
+            imageDataUri={effectiveImageUri}
+            boxes={data?.boxes}
             objectFit={expanded ? 'object-contain' : 'object-cover'}
           />
         </div>

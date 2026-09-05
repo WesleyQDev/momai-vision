@@ -14,14 +14,32 @@ O MomAI Vision é o motor de percepção visual local do assistente. Ele analisa
      - `imageDataUri`: String base64 com a captura exata (foto) do instante da detecção
      - `ts`: Timestamp numérico do disparo
 
+## Actions (Ações Disponíveis)
+
+1. **`momai-vision.show_overlay` (AÇÃO PADRÃO E PRINCIPAL DE ALERTA)**:
+   - Exibe o card flutuante personalizado (overlay) da MomAI Vision na tela com a foto capturada em tempo real e as caixas de detecção (bounding boxes) desenhadas sobre a pessoa ou objeto detectado.
+   - **REGRA OBRIGATÓRIA PARA O ASSISTENTE (LLM)**:
+     - Sempre que o usuário solicitar para monitorar câmera e "me avise", "notifique", "avise na tela", "mostre o alerta" ou "envie uma notificação", **VOCÊ DEVE INDUZIR E USAR COMO AÇÃO PADRÃO: `momai-vision.show_overlay`**!
+     - **NÃO UTILIZE `system.notify`** para regras de visão por padrão! O `system.notify` gera apenas uma notificação genérica de texto do sistema operacional sem imagem. O overlay flutuante (`momai-vision.show_overlay`) é a experiência rica nativa do MomAI Vision. Apenas use `system.notify` se o usuário pedir explicitamente "notificação do windows" ou "notificação simples do sistema".
+     - Parâmetros recomendados (todos são opcionais — se omitidos, o overlay recupera automaticamente o snapshot e bounding boxes do alerta mais recente da câmera):
+        ```json
+        {
+          "action_id": "momai-vision.show_overlay",
+          "params": {
+            "cameraId": "{{trigger.payload.cameraId}}",
+            "cameraName": "{{trigger.payload.cameraName}}",
+            "description": "{{trigger.payload.description}}"
+          }
+        }
+        ```
+        *(Nota: se passar `imageDataUri`, sempre feche com chaves duplas `{{trigger.payload.imageDataUri}}`, mas pode omitir tranquilamente pois o runtime já associa a captura recente automaticamente).*
+
 ## Como o Assistente (LLM) Deve Orquestrar Regras de Visão
 
-1. **Desacoplamento de Ações**:
-   - A visão é apenas uma **origem de dados (Trigger)**.
-   - A ação de destino deve ser escolhida pelo assistente com base nos canais ativos e na intenção do usuário:
-     - Envio de foto/mensagem em aplicativo de mensagens ou e-mail ativo;
-     - Notificação do sistema (`system.notify`);
-     - Acionamento de dispositivo físico (ex.: ligar iluminação externa no ecossistema de casa inteligente).
+1. **Ação Padrão vs Outros Canais**:
+   - Por padrão, vincule o disparo à ação **`momai-vision.show_overlay`**.
+   - Se o usuário pedir expressamente canais adicionais (ex.: "me avise no WhatsApp e mostre o alerta"), adicione múltiplas ações na lista: `momai-vision.show_overlay` E `momai-whatsapp.send_message`.
+   - Se o usuário pedir apenas um canal externo específico (ex.: "apenas envie foto no WhatsApp se alguém aparecer"), use a ação daquele canal.
 
 2. **Criação Direta em 1 Passo**:
    - Chame `create_automation` vinculando:
@@ -29,7 +47,19 @@ O MomAI Vision é o motor de percepção visual local do assistente. Ele analisa
      - `global_conditions`:
        - Filtro por tipo de objeto: `[{ "field": "trigger.payload.className", "operator": "equals", "value": "person" }]`
        - *(Opcional)* Filtro por câmera: `[{ "field": "trigger.payload.cameraName", "operator": "contains", "value": "Garagem" }]`
-     - `actions`: `[{ "action_id": "<canal_escolhido>", "params": { ... } }]` (onde imagens utilizam `{{trigger.payload.imageDataUri}}` e textos usam `{{trigger.payload.cameraName}}` ou `{{trigger.payload.description}}`).
+     - `actions`:
+       ```json
+       [
+         {
+           "action_id": "momai-vision.show_overlay",
+           "params": {
+             "cameraId": "{{trigger.payload.cameraId}}",
+             "cameraName": "{{trigger.payload.cameraName}}",
+             "description": "{{trigger.payload.description}}"
+           }
+         }
+       ]
+       ```
 
 3. **Guardrail de Câmeras**:
    - **NÃO chame** `list_cameras`, `get_status` ou `update_monitoring` para criar automações. O Hub de Automações se encarrega de capturar e filtrar os eventos emitidos sem necessidade de intervenção manual nos monitores.

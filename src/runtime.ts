@@ -1297,6 +1297,8 @@ const monitors = new Map<string, ActiveMonitor>()
 const cameraTickers = new Map<string, ReturnType<typeof setInterval>>()
 const motionGates = new Map<string, MotionGate>()
 let lastOverlayMonitorId: string | null = null
+let lastAlertData: any = null
+const lastAlertDataByCamera = new Map<string, any>()
 
 function saveMonitors(): Promise<void> {
   return bridge!.storage.set(
@@ -1786,23 +1788,17 @@ async function fireAlert(config: MonitorConfig, alert: import('./vision/triggers
     }
   }
 
+  // Cache do alerta mais recente em memória para ser consumido pela ação show_overlay
+  lastAlertData = data
+  lastAlertDataByCamera.set(config.cameraId, data)
+  lastOverlayMonitorId = config.id
+
   void saveAlertToHistory(alertPayload).catch((err) => {
     bridge?.log(`[vision] failed to save alert history: ${err instanceof Error ? err.message : String(err)}`)
   })
 
   bridge?.sendEvent('vision_alert', data.data)
   bridge?.sendStructuredResponse(data)
-
-  // Floating overlay is the primary alert channel (host mechanism).
-  lastOverlayMonitorId = config.id
-  bridge?.sendEvent('open_overlay', {
-    skillId: SKILL_ID,
-    panel: 'dist/panel.js',
-    panelType: 'extension-panel',
-    structuredResponse: data,
-    overlaySize: { width: 480, height: 560 },
-    strategy: 'replace'
-  })
 
   bridge?.log(`[vision] alert fired: ${alert.triggeredBy} on ${config.cameraId}`)
 }
@@ -2496,6 +2492,15 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
         }
       }
 
+      // 2.1 Atualizar Cooldown / Policy
+      if (args.cooldownSec !== undefined) {
+        if (!auto.policy || typeof auto.policy !== 'object') {
+          auto.policy = {}
+        }
+        delete auto.policy.cooldownMinutes
+        auto.policy.cooldownSeconds = Math.max(1, Number(args.cooldownSec) || 60)
+      }
+
       // 3. Atualizar Triggers (objeto / movimento / presença)
       if (Array.isArray(args.triggers) && args.triggers.length > 0) {
         const trig = args.triggers[0]
@@ -2629,6 +2634,8 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
 async function toolPauseMonitoring(args: { monitorId?: string; all?: boolean }): Promise<unknown> {
   if (args.monitorId?.startsWith('auto-')) {
     const autoId = args.monitorId.replace('auto-', '')
+    const targetAuto = autoMonitorsCache.find((m) => m.config.id === args.monitorId)
+    const camId = targetAuto?.config.cameraId
     try {
       const res = await hostFetch(`/automations/${autoId}/toggle`, {
         method: 'PATCH',
@@ -2645,6 +2652,9 @@ async function toolPauseMonitoring(args: { monitorId?: string; all?: boolean }):
     // Remove do cache imediatamente: o ticker não pode disparar alertas/overlay
     // enquanto a automação está pausada (o próximo sync também a excluiria).
     autoMonitorsCache = autoMonitorsCache.filter((m) => m.config.id !== args.monitorId)
+    if (camId) {
+      stopCameraTickerIfIdle(camId)
+    }
     if (lastOverlayMonitorId === args.monitorId) {
       bridge?.sendEvent('close_overlay', {})
       lastOverlayMonitorId = null
@@ -2717,6 +2727,8 @@ async function toolResumeMonitoring(args: { monitorId?: string; all?: boolean })
 async function toolStopMonitoring(args: { monitorId?: string; all?: boolean }): Promise<unknown> {
   if (args.monitorId?.startsWith('auto-')) {
     const autoId = args.monitorId.replace('auto-', '')
+    const targetAuto = autoMonitorsCache.find((m) => m.config.id === args.monitorId)
+    const camId = targetAuto?.config.cameraId
     try {
       const res = await hostFetch(`/automations/${autoId}`, { method: 'DELETE' })
       if (!res.ok) {
@@ -2728,6 +2740,9 @@ async function toolStopMonitoring(args: { monitorId?: string; all?: boolean }): 
       return { ok: false, error: 'Falha ao excluir a automação. Backend inacessível.' }
     }
     autoMonitorsCache = autoMonitorsCache.filter((m) => m.config.id !== args.monitorId)
+    if (camId) {
+      stopCameraTickerIfIdle(camId)
+    }
     if (lastOverlayMonitorId === args.monitorId) {
       bridge?.sendEvent('close_overlay', {})
       lastOverlayMonitorId = null
@@ -2735,8 +2750,22 @@ async function toolStopMonitoring(args: { monitorId?: string; all?: boolean }): 
     notifyMonitorsChanged()
     return { ok: true }
   }
+  if (args.all) {
+    const autoEntries = [...autoMonitorsCache]
+    for (const autoEntry of autoEntries) {
+      const autoId = autoEntry.config.id.replace('auto-', '')
+      try {
+        await hostFetch(`/automations/${autoId}`, { method: 'DELETE' })
+      } catch {}
+      if (lastOverlayMonitorId === autoEntry.config.id) {
+        bridge?.sendEvent('close_overlay', {})
+        lastOverlayMonitorId = null
+      }
+    }
+    autoMonitorsCache = []
+  }
   const ids = args.all ? [...monitors.keys()] : args.monitorId ? [args.monitorId] : []
-  if (ids.length === 0) return { ok: false, error: 'monitorId required (or all: true)' }
+  if (ids.length === 0 && !args.all) return { ok: false, error: 'monitorId required (or all: true)' }
   for (const id of ids) {
     const entry = monitors.get(id)
     if (!entry) continue
@@ -2745,6 +2774,11 @@ async function toolStopMonitoring(args: { monitorId?: string; all?: boolean }): 
     if (lastOverlayMonitorId === id) {
       bridge?.sendEvent('close_overlay', {})
       lastOverlayMonitorId = null
+    }
+  }
+  if (args.all) {
+    for (const cam of listCameras()) {
+      stopCameraTickerIfIdle(cam.id)
     }
   }
   await saveMonitors()
@@ -2834,11 +2868,14 @@ async function toolGetStatus(): Promise<unknown> {
           ensureCameraTicker(cam.id)
         }
 
+        const timing = automationTimingToMonitor(auto.policy, auto.global_conditions)
+
         return {
           id: `auto-${auto.automationId}`,
           cameraId: camId,
           cameraName: camName,
           triggers: [{ type: trig.id || trig.type || 'vision:detection' }],
+          cooldownSec: timing.cooldownSec ?? 300,
           label: `⚡ ${labelName}`,
           createdAt: Date.now(),
           paused: !auto.enabled,
@@ -3372,6 +3409,94 @@ async function toolWarmWebcam(args: { cameraId?: string }): Promise<unknown> {
   return { ok: true }
 }
 
+// Exibe o overlay flutuante da câmera (acionado pelo Automation Hub ou sob demanda)
+async function toolShowOverlay(args: {
+  cameraId?: string
+  cameraName?: string
+  description?: string
+  imageDataUri?: string
+  boxes?: any[]
+  tts?: string
+  [key: string]: unknown
+}): Promise<{ ok: boolean; overlayId?: string; error?: string }> {
+  const isTemplate = (val: unknown): boolean =>
+    typeof val === 'string' && (val.includes('{{') || val.includes('}}'))
+
+  const cleanString = (val: unknown, fallback: string): string =>
+    typeof val === 'string' && !isTemplate(val) && val.trim() ? val.trim() : fallback
+
+  const isValidImage = (val: unknown): boolean => {
+    if (typeof val !== 'string' || !val || isTemplate(val)) return false
+    const trimmed = val.trim()
+    return (
+      trimmed.startsWith('data:image/') ||
+      trimmed.startsWith('http://') ||
+      trimmed.startsWith('https://') ||
+      trimmed.startsWith('/')
+    )
+  }
+
+  const rawCamId = args?.cameraId ? String(args.cameraId) : ''
+  const reqCamId = !isTemplate(rawCamId) ? rawCamId : ''
+  const targetData = (reqCamId ? lastAlertDataByCamera.get(reqCamId) : null) || lastAlertData
+
+  const resolvedCamId = cleanString(reqCamId, targetData?.data?.cameraId || 'default')
+  const resolvedCameraName = cleanString(args?.cameraName, targetData?.data?.cameraName || resolvedCamId)
+  const resolvedDescription = cleanString(args?.description, targetData?.data?.description || 'Alerta de detecção')
+
+  let resolvedImage = isValidImage(args?.imageDataUri) ? String(args.imageDataUri) : ''
+  if (!resolvedImage && targetData?.data?.imageDataUri && isValidImage(targetData.data.imageDataUri)) {
+    resolvedImage = targetData.data.imageDataUri
+  }
+  if (!resolvedImage && targetData?.data?.snapshotId) {
+    resolvedImage = `/media/camera/snapshot/${targetData.data.snapshotId}`
+  }
+
+  const resolvedBoxes =
+    !isTemplate(args?.boxes) && Array.isArray(args?.boxes) && args.boxes.length > 0
+      ? args.boxes
+      : Array.isArray(targetData?.data?.boxes)
+        ? targetData.data.boxes
+        : []
+
+  const resolvedTts = cleanString(
+    args?.tts,
+    cleanString(args?.description, targetData?.data?.tts || resolvedDescription)
+  )
+
+  const alertData = {
+    ...(targetData?.data || {}),
+    cameraId: resolvedCamId,
+    cameraName: resolvedCameraName,
+    description: resolvedDescription,
+    imageDataUri: resolvedImage,
+    boxes: resolvedBoxes,
+    tts: resolvedTts
+  }
+
+  const structuredData = {
+    type: 'vision_alert',
+    data: alertData
+  }
+
+  const overlayId = `vision-cam-${resolvedCamId}`
+  lastOverlayMonitorId = alertData.monitorId || lastAlertData?.data?.monitorId || null
+
+  bridge?.sendEvent('open_overlay', {
+    skillId: SKILL_ID,
+    panel: 'dist/panel.js',
+    panelType: 'extension-panel',
+    overlayId,
+    overlay_id: overlayId,
+    structuredResponse: structuredData,
+    overlaySize: { width: 480, height: 560 },
+    strategy: 'stack'
+  })
+
+  bridge?.log(`[vision] open_overlay displayed via automation action for camera: ${resolvedCamId}`)
+  return { ok: true, overlayId }
+}
+
 const tools: Record<string, (args: any) => Promise<unknown>> = {
   list_cameras: toolListCameras,
   capture_snapshot: toolCaptureSnapshot,
@@ -3392,7 +3517,8 @@ const tools: Record<string, (args: any) => Promise<unknown>> = {
   reload_camera: toolReloadCamera,
   frame_pump: toolFramePump,
   configure: toolConfigure,
-  warm_webcam: toolWarmWebcam
+  warm_webcam: toolWarmWebcam,
+  show_overlay: toolShowOverlay
 }
 
 let initPromise: Promise<void> | null = null

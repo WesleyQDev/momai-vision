@@ -55,6 +55,55 @@ interface CameraInfo {
   monitors: number
 }
 
+interface AutomationWorkflowSnapshot {
+  id?: string
+  name?: string
+  description?: string
+  enabled?: boolean
+  trigger?: {
+    id?: string
+    type?: string
+    provider?: string
+    params?: Record<string, unknown>
+    config?: Record<string, unknown>
+  }
+  triggers?: Array<{
+    id: string
+    type: string
+    provider?: string
+    params?: Record<string, unknown>
+  }>
+  triggerMode?: string
+  globalConditions?: Array<{
+    id?: string
+    kind?: string
+    field: string
+    operator: string
+    value: unknown
+  }>
+  conditions?: AutomationWorkflowSnapshot['globalConditions']
+  global_conditions?: AutomationWorkflowSnapshot['globalConditions']
+  policy?: {
+    cooldownSeconds?: number
+    cooldownMinutes?: number
+    maxPerDay?: number
+    weekdays?: number[]
+    startTime?: string
+    endTime?: string
+    expiresAt?: string
+  }
+  steps?: Array<{
+    id: string
+    name?: string
+    type?: string
+    action_id?: string
+    provider?: string
+    action?: string
+    params?: Record<string, unknown>
+  }>
+  actions?: AutomationWorkflowSnapshot['steps']
+}
+
 interface MonitorInfo {
   id: string
   cameraId: string
@@ -67,6 +116,8 @@ interface MonitorInfo {
   lastAlertTs?: number
   actions?: MonitorActionUI[]
   paused?: boolean
+  isAutomation?: boolean
+  automationWorkflow?: AutomationWorkflowSnapshot | null
 }
 
 // Forma permissiva dos triggers vindos da API (o runtime normaliza para os
@@ -1161,6 +1212,9 @@ function ZoneOverlay({
   const dragVertexIdxRef = useRef<number | null>(null)
   dragVertexIdxRef.current = dragVertexIdx
 
+  const draftPointsRef = useRef<Point[]>(draftPoints)
+  draftPointsRef.current = draftPoints
+
   // Arrastar/mover polígono inteiro para reposicionar a área
   const dragPolygonStartRef = useRef<Point | null>(null)
   const dragPolygonInitialPointsRef = useRef<Point[]>([])
@@ -1169,6 +1223,23 @@ function ZoneOverlay({
   const isDraggingRef = useRef(false)
   const [isDrawingFreehand, setIsDrawingFreehand] = useState(false)
   const freehandPointsRef = useRef<Point[]>([])
+
+  // Global mouseup listener to guarantee drag release even outside SVG bounds
+  useEffect(() => {
+    if (!isEditing) return
+    const handleGlobalMouseUp = () => {
+      if (dragVertexIdxRef.current !== null) {
+        dragVertexIdxRef.current = null
+        setDragVertexIdx(null)
+      }
+      if (dragPolygonStartRef.current !== null) {
+        dragPolygonStartRef.current = null
+        dragPolygonInitialPointsRef.current = []
+      }
+    }
+    window.addEventListener('mouseup', handleGlobalMouseUp)
+    return () => window.removeEventListener('mouseup', handleGlobalMouseUp)
+  }, [isEditing])
 
   // Fecha o dropdown ao clicar fora
   useEffect(() => {
@@ -1218,10 +1289,11 @@ function ZoneOverlay({
     // 1. Edição de vértice: arrastar bolinha para ajustar a posição do ponto
     if (dragVertexIdxRef.current !== null && onSetPoints) {
       const idx = dragVertexIdxRef.current
-      const currentList = isEditing ? draftPoints : (zone || [])
+      const currentList = draftPointsRef.current.length > 0 ? draftPointsRef.current : (isEditing ? draftPoints : (zone || []))
       const updated = [...currentList]
       if (idx >= 0 && idx < updated.length) {
         updated[idx] = pt
+        draftPointsRef.current = updated
         onSetPoints(updated)
       }
       return
@@ -1236,6 +1308,7 @@ function ZoneOverlay({
         x: Math.max(0, Math.min(1, Number((p.x + dx).toFixed(4)))),
         y: Math.max(0, Math.min(1, Number((p.y + dy).toFixed(4))))
       }))
+      draftPointsRef.current = moved
       onSetPoints(moved)
       return
     }
@@ -1279,6 +1352,7 @@ function ZoneOverlay({
 
     // Soltou o vértice que estava sendo editado/arrastado
     if (dragVertexIdxRef.current !== null) {
+      dragVertexIdxRef.current = null
       setDragVertexIdx(null)
       return
     }
@@ -1370,11 +1444,12 @@ function ZoneOverlay({
                 <circle
                   cx={p.x * vbW}
                   cy={p.y * vbH}
-                  r={isCompact ? 9 : 14}
+                  r={isCompact ? 12 : 18}
                   fill="transparent"
                   className="cursor-move pointer-events-auto"
                   onMouseDown={(e) => {
                     e.stopPropagation()
+                    dragVertexIdxRef.current = idx
                     setDragVertexIdx(idx)
                   }}
                 />
@@ -1735,11 +1810,13 @@ const CameraCard = memo(function CameraCard({
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
 
+  const wasEditingRef = useRef(false)
   useEffect(() => {
-    if (isEditingZone) {
+    if (isEditingZone && !wasEditingRef.current) {
       const initial = zone && zone.length >= 3 ? [...zone] : []
       setDraftPoints(initial.length > 20 ? simplifyPolygon(initial, 0.015) : initial)
     }
+    wasEditingRef.current = isEditingZone
   }, [isEditingZone, zone])
 
   const handleAddDraftPoint = useCallback((pt: Point) => {
@@ -1757,9 +1834,10 @@ const CameraCard = memo(function CameraCard({
     setDraftPoints((prev) => prev.slice(0, -1))
   }, [])
 
-  const handleSaveDraftZone = useCallback(() => {
-    if (draftPoints.length >= 3 && onSaveZone) {
-      onSaveZone(draftPoints)
+  const handleSaveDraftZone = useCallback((pts?: Point[]) => {
+    const toSave = Array.isArray(pts) && pts.length >= 3 ? pts : draftPoints
+    if (toSave.length >= 3 && onSaveZone) {
+      onSaveZone(toSave)
     }
   }, [draftPoints, onSaveZone])
 
@@ -3152,10 +3230,13 @@ function ExpandedCameraModal({
   const frameBoxRef = useRef<HTMLDivElement | null>(null)
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
 
+  const wasEditingRef = useRef(false)
   useEffect(() => {
-    if (isEditingZone) {
-      const initial = zone && zone.length >= 3 ? [...zone] : []; setDraftPoints(initial.length > 20 ? simplifyPolygon(initial, 0.015) : initial)
+    if (isEditingZone && !wasEditingRef.current) {
+      const initial = zone && zone.length >= 3 ? [...zone] : []
+      setDraftPoints(initial.length > 20 ? simplifyPolygon(initial, 0.015) : initial)
     }
+    wasEditingRef.current = isEditingZone
   }, [isEditingZone, zone])
 
   const handleAddDraftPoint = useCallback((pt: Point) => {
@@ -3173,9 +3254,10 @@ function ExpandedCameraModal({
     setDraftPoints((prev) => prev.slice(0, -1))
   }, [])
 
-  const handleSaveDraftZone = useCallback(() => {
-    if (draftPoints.length >= 3 && onSaveZone) {
-      onSaveZone(draftPoints)
+  const handleSaveDraftZone = useCallback((pts?: Point[]) => {
+    const toSave = Array.isArray(pts) && pts.length >= 3 ? pts : draftPoints
+    if (toSave.length >= 3 && onSaveZone) {
+      onSaveZone(toSave)
     }
   }, [draftPoints, onSaveZone])
 
@@ -3854,14 +3936,25 @@ const ALL_OBJECT_OPTIONS = Object.entries(PT_CLASS).map(([key, label]) => ({
   label: `${label.charAt(0).toUpperCase() + label.slice(1)} (${key})`
 }))
 
-const COOLDOWN_OPTIONS = [
-  { value: '30', label: '30 segundos' },
-  { value: '60', label: '1 minuto' },
-  { value: '300', label: '5 minutos (Padrão)' },
-  { value: '600', label: '10 minutos' },
-  { value: '1800', label: '30 minutos' },
-  { value: 'custom', label: 'Outro' }
+const COOLDOWN_PRESETS = [
+  { label: '30s', seconds: 30 },
+  { label: '1m', seconds: 60 },
+  { label: '5m', seconds: 300 },
+  { label: '15m', seconds: 900 }
 ]
+
+function formatCooldown(sec?: number): string {
+  if (!sec || isNaN(sec) || sec <= 0) return '5 min'
+  if (sec % 60 === 0) {
+    return `${sec / 60} min`
+  }
+  if (sec >= 60) {
+    const m = Math.floor(sec / 60)
+    const s = sec % 60
+    return s > 0 ? `${m}m ${s}s` : `${m} min`
+  }
+  return `${sec}s`
+}
 
 function formatTriggerPortuguese(t: MonitorTriggerInfo): string {
   switch (t.type) {
@@ -3901,7 +3994,7 @@ interface AddEditMonitorModalProps {
   onClose: () => void
   cameras: CameraInfo[]
   initialMonitor?: MonitorInfo | null
-  onSave: () => Promise<void> | void
+  onSave: (updated?: Partial<MonitorInfo>) => Promise<void> | void
 }
 
 const EVENT_PLACEHOLDERS = [
@@ -4399,19 +4492,12 @@ function AddEditMonitorModal({
 }: AddEditMonitorModalProps): JSX.Element | null {
   if (!isOpen) return null
 
-  const initCooldown = initialMonitor?.cooldownSec || 300
-  const isPreset = ['30', '60', '300', '600', '1800'].includes(String(initCooldown))
-
   const [cameraId, setCameraId] = useState<string>(
     initialMonitor?.cameraId || cameras[0]?.id || ''
   )
   const [label, setLabel] = useState<string>(initialMonitor?.label || '')
-  const [cooldownPreset, setCooldownPreset] = useState<string>(isPreset ? String(initCooldown) : 'custom')
-  const [customCooldownValue, setCustomCooldownValue] = useState<number>(
-    initCooldown % 60 === 0 ? initCooldown / 60 : initCooldown
-  )
-  const [customCooldownUnit, setCustomCooldownUnit] = useState<'sec' | 'min'>(
-    initCooldown % 60 === 0 && initCooldown >= 60 ? 'min' : 'sec'
+  const [cooldownSec, setCooldownSec] = useState<number>(
+    initialMonitor?.cooldownSec !== undefined ? initialMonitor.cooldownSec : 60
   )
   const [actions, setActions] = useState<MonitorActionUI[]>(initialMonitor?.actions || [])
 
@@ -4448,6 +4534,7 @@ function AddEditMonitorModal({
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const isBackdropMouseDown = useRef(false)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -4456,13 +4543,7 @@ function AddEditMonitorModal({
       return
     }
 
-    let finalCooldown = 300
-    if (cooldownPreset === 'custom') {
-      const val = Math.max(1, Number(customCooldownValue) || 1)
-      finalCooldown = customCooldownUnit === 'min' ? val * 60 : val
-    } else {
-      finalCooldown = Number(cooldownPreset) || 300
-    }
+    const finalCooldown = Math.max(1, Number(cooldownSec) || 60)
 
     let trigger: any = {}
 
@@ -4483,25 +4564,171 @@ function AddEditMonitorModal({
     setSubmitting(true)
     setError(null)
     try {
-      if (initialMonitor?.id) {
-        await command('update_monitoring', {
-          monitorId: initialMonitor.id,
+      const isAuto = initialMonitor?.isAutomation === true
+      const autoBaseId = initialMonitor?.id?.startsWith('auto-') ? initialMonitor.id.replace('auto-', '') : undefined
+      const existingWorkflow = initialMonitor?.automationWorkflow || null
+      const automationName = (label.trim() || initialMonitor?.label || '').replace(/^⚡\s*/, '').trim() || 'Monitoramento de câmera'
+
+      if (isAuto || autoBaseId || existingWorkflow?.id) {
+        // === Automation Hub path ===
+        const normalizedTriggerType = triggerType === 'person' ? 'object' : triggerType === 'animal' ? 'object' : triggerType
+        const camera = cameras.find((c) => c.id === cameraId)
+        const camName = camera?.name || initialMonitor?.cameraName || cameraId
+        const automationTriggerParams: Record<string, unknown> = {
+          camera: camName,
           cameraId,
-          triggers: [trigger],
-          cooldownSec: finalCooldown,
-          label: label.trim() || undefined,
-          actions: actions.length ? actions : undefined
+          cameraName: camName,
+          ...(normalizedTriggerType === 'motion' ? { triggeredBy: 'motion', sensitivity } : {}),
+          ...(normalizedTriggerType === 'object' ? { triggeredBy: 'object', className: objectClass, present: objectPresent } : {}),
+          ...(normalizedTriggerType === 'presence' ? { triggeredBy: 'presence', className: presenceTargetClass, event: presenceEvent, windowSec: Number(windowSec) || 10 } : {}),
+          ...(normalizedTriggerType === 'absence' ? { triggeredBy: 'absence', className: presenceTargetClass, event: presenceEvent, windowSec: Number(windowSec) || 10 } : {})
+        }
+        const automationConditions: AutomationWorkflowSnapshot['globalConditions'] = [
+          {
+            kind: 'trigger_field',
+            field: 'trigger.payload.cameraName',
+            operator: 'equals',
+            value: camName
+          }
+        ]
+        if (normalizedTriggerType !== 'motion') {
+          automationConditions.unshift({
+            kind: 'trigger_field',
+            field: 'trigger.payload.className',
+            operator: 'equals',
+            value: normalizedTriggerType === 'person' ? 'person' : normalizedTriggerType === 'animal' ? animalClass : normalizedTriggerType === 'object' ? objectClass : presenceTargetClass
+          })
+        }
+
+        const resolvedId = existingWorkflow?.id || autoBaseId
+        // Preserve external conditions (e.g. time_window) but replace vision camera & class filters
+        const existingConditions = existingWorkflow?.globalConditions || existingWorkflow?.conditions || existingWorkflow?.global_conditions || []
+        const preservedConditions = existingConditions.filter(
+          (c: any) => c.field !== 'trigger.payload.cameraName' && c.field !== 'trigger.payload.className'
+        )
+
+        const basePolicy: Record<string, unknown> = existingWorkflow?.policy && typeof existingWorkflow.policy === 'object'
+          ? { ...existingWorkflow.policy }
+          : {}
+        delete basePolicy.cooldownMinutes
+        basePolicy.cooldownSeconds = finalCooldown
+
+        const rawActions = Array.isArray(actions) && actions.length > 0
+          ? actions
+          : (existingWorkflow?.steps || existingWorkflow?.actions || [
+              {
+                id: 'show_overlay',
+                name: 'Exibir Overlay de Alerta',
+                type: 'action' as const,
+                provider: 'momai-vision',
+                action: 'momai-vision.show_overlay',
+                action_id: 'momai-vision.show_overlay',
+                params: {
+                  cameraId: '{{trigger.payload.cameraId}}',
+                  description: '{{trigger.payload.description}}',
+                  imageDataUri: '{{trigger.payload.imageDataUri}}'
+                }
+              }
+            ])
+        const normalizedSteps = rawActions.map((act: any, idx: number) => {
+          const actionId = act.action || act.action_id || (act.target && act.tool ? `${act.target}.${act.tool}` : act.id || 'system.notify')
+          const provider = act.provider || (actionId.includes('.') ? actionId.split('.')[0] : 'system')
+          return {
+            id: act.id || `step_${idx + 1}_${Date.now()}`,
+            name: act.name || `Ação ${idx + 1}`,
+            type: 'action' as const,
+            provider,
+            action: actionId,
+            action_id: actionId,
+            params: act.params || act.args || {}
+          }
         })
+
+        const automationPayload: AutomationWorkflowSnapshot = {
+          id: resolvedId,
+          name: automationName,
+          description: existingWorkflow?.description || automationName,
+          enabled: initialMonitor?.paused !== true,
+          trigger: {
+            id: 'momai-vision.vision_alert',
+            type: 'momai-vision.vision_alert',
+            provider: 'momai-vision',
+            params: automationTriggerParams,
+            config: automationTriggerParams
+          },
+          triggers: [
+            {
+              id: 'momai-vision.vision_alert',
+              type: 'momai-vision.vision_alert',
+              provider: 'momai-vision',
+              params: automationTriggerParams
+            }
+          ],
+          triggerMode: existingWorkflow?.triggerMode || 'any',
+          globalConditions: [...preservedConditions, ...automationConditions],
+          conditions: [...preservedConditions, ...automationConditions],
+          policy: basePolicy,
+          steps: normalizedSteps,
+          actions: normalizedSteps
+        }
+
+        const saveRes = await sdk.api.post('/automations', automationPayload)
+        if (saveRes && (saveRes as any).ok === false) {
+          throw new Error((saveRes as any).error || 'Falha ao salvar automação no Automation Hub')
+        }
       } else {
-        await command('start_monitoring', {
-          cameraId,
-          triggers: [trigger],
-          cooldownSec: finalCooldown,
-          label: label.trim() || undefined,
-          actions: actions.length ? actions : undefined
-        })
+        // === Legacy monitor path (mon-*) ===
+        let trigger: any = {}
+        if (triggerType === 'motion') {
+          trigger = { type: 'motion', sensitivity }
+        } else if (triggerType === 'object') {
+          trigger = { type: 'object', className: objectClass, present: objectPresent }
+        } else if (triggerType === 'person') {
+          trigger = { type: 'object', className: 'person', present: objectPresent }
+        } else if (triggerType === 'animal') {
+          trigger = { type: 'object', className: animalClass, present: objectPresent }
+        } else if (triggerType === 'presence') {
+          trigger = { type: 'presence', className: presenceTargetClass, event: presenceEvent, windowSec: Number(windowSec) || 10 }
+        } else if (triggerType === 'absence') {
+          trigger = { type: 'absence', className: presenceTargetClass, event: presenceEvent, windowSec: Number(windowSec) || 10 }
+        }
+
+        if (initialMonitor?.id) {
+          const cmdRes = await command('update_monitoring', {
+            monitorId: initialMonitor.id,
+            cameraId,
+            triggers: [trigger],
+            cooldownSec: finalCooldown,
+            label: label.trim() || undefined,
+            actions: actions.length ? actions : undefined
+          })
+          if (cmdRes && (cmdRes as any).ok === false) {
+            throw new Error((cmdRes as any).error || 'Falha ao atualizar monitoramento')
+          }
+        } else {
+          const cmdRes = await command('start_monitoring', {
+            cameraId,
+            triggers: [trigger],
+            cooldownSec: finalCooldown,
+            label: label.trim() || undefined,
+            actions: actions.length ? actions : undefined
+          })
+          if (cmdRes && (cmdRes as any).ok === false) {
+            throw new Error((cmdRes as any).error || 'Falha ao iniciar monitoramento')
+          }
+        }
       }
-      await onSave()
+
+      const targetCam = cameras.find((c) => c.id === cameraId)
+      const cleanLabel = label.trim() || initialMonitor?.label
+      await onSave({
+        id: initialMonitor?.id,
+        cooldownSec: finalCooldown,
+        label: cleanLabel ? (initialMonitor?.isAutomation && !cleanLabel.startsWith('⚡') ? `⚡ ${cleanLabel}` : cleanLabel) : undefined,
+        cameraId,
+        cameraName: targetCam?.name || initialMonitor?.cameraName || cameraId,
+        triggers: [trigger]
+      })
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -4516,8 +4743,13 @@ function AddEditMonitorModal({
         /* Two-col camera/name fields on wide-enough cards */
         .mv-mgrid-2 {
           display: grid;
-          grid-template-columns: 1fr;
+          grid-template-columns: minmax(0, 1fr);
           gap: 1.25rem;
+          width: 100%;
+        }
+        .mv-mgrid-2 > div {
+          min-width: 0;
+          max-width: 100%;
         }
         /* Footer actions: stack on narrow cards, row on wide cards */
         .mv-mmodal-actions {
@@ -4525,6 +4757,7 @@ function AddEditMonitorModal({
           flex-direction: column-reverse;
           align-items: stretch;
           gap: 0.75rem;
+          width: 100%;
         }
         .mv-mmodal-actions > button {
           width: 100%;
@@ -4532,7 +4765,7 @@ function AddEditMonitorModal({
         }
         @media (min-width: 640px) {
           .mv-mgrid-2 {
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
           }
           .mv-mmodal-actions {
             flex-direction: row;
@@ -4549,12 +4782,19 @@ function AddEditMonitorModal({
         aria-modal="true"
         aria-labelledby="vision-edit-monitor-title"
         className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/75 backdrop-blur-sm animate-fadeIn overflow-y-auto"
+        onMouseDown={(e) => {
+          isBackdropMouseDown.current = e.target === e.currentTarget
+        }}
         onClick={(e) => {
-          if (e.target === e.currentTarget) onClose()
+          if (e.target === e.currentTarget && isBackdropMouseDown.current) {
+            onClose()
+          }
+          isBackdropMouseDown.current = false
         }}
       >
         <div
           className="w-full max-w-xl bg-card border border-border/50 rounded-2xl shadow-2xl flex flex-col max-h-[min(88dvh,720px)] overflow-hidden my-auto"
+          onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="flex items-center justify-between px-6 py-4 border-b border-border/40 bg-sidebar shrink-0">
@@ -4575,7 +4815,7 @@ function AddEditMonitorModal({
             </button>
           </div>
 
-          <form onSubmit={handleSubmit} className="px-5 py-6 sm:px-8 space-y-6 overflow-y-auto custom-scrollbar flex-1">
+          <form onSubmit={handleSubmit} className="px-5 py-6 sm:px-8 space-y-6 overflow-y-auto overflow-x-hidden custom-scrollbar flex-1 w-full max-w-full">
             {error ? (
               <div className="p-3 text-xs text-red-600 dark:text-red-400 bg-red-500/10 border border-red-500/30 rounded-xl font-medium">
                 {error}
@@ -4590,7 +4830,7 @@ function AddEditMonitorModal({
                 <select
                   value={cameraId}
                   onChange={(e) => setCameraId(e.target.value)}
-                  className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500 font-medium"
+                  className="w-full max-w-full truncate bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500 font-medium"
                 >
                   {cameraId && !cameras.some((c) => c.id === cameraId) && (
                     <option key={cameraId} value={cameraId}>
@@ -4798,42 +5038,47 @@ function AddEditMonitorModal({
               </div>
             )}
 
-            <div>
-              <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                Intervalo mínimo entre Alertas (Cooldown)
+            <div className="w-full max-w-full">
+              <label className="block text-xs font-semibold text-text mb-1.5">
+                Pausar após disparar (Cooldown)
               </label>
-              <select
-                value={cooldownPreset}
-                onChange={(e) => setCooldownPreset(e.target.value)}
-                className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500 font-medium"
-              >
-                {COOLDOWN_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-
-              {cooldownPreset === 'custom' && (
-                <div className="flex items-center gap-2 mt-2 bg-white/[0.03] p-3 rounded-xl border border-border/60 animate-fadeIn">
-                  <input
-                    type="number"
-                    min={1}
-                    max={86400}
-                    value={customCooldownValue}
-                    onChange={(e) => setCustomCooldownValue(Number(e.target.value) || 1)}
-                    className="flex-1 bg-input border border-border rounded-xl px-3 py-1.5 text-sm text-text focus:outline-none focus:border-emerald-500 font-medium text-center"
-                  />
-                  <select
-                    value={customCooldownUnit}
-                    onChange={(e) => setCustomCooldownUnit(e.target.value as 'sec' | 'min')}
-                    className="w-32 bg-input border border-border rounded-xl px-3 py-1.5 text-sm text-text focus:outline-none focus:border-emerald-500 font-medium"
-                  >
-                    <option value="sec">Segundos</option>
-                    <option value="min">Minutos</option>
-                  </select>
+              <div className="flex items-center gap-2 max-w-full flex-wrap sm:flex-nowrap">
+                <input
+                  type="number"
+                  min={1}
+                  max={86400}
+                  value={cooldownSec || ''}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10)
+                    setCooldownSec(isNaN(val) ? 0 : Math.max(0, val))
+                  }}
+                  onBlur={() => {
+                    if (!cooldownSec || cooldownSec < 1) {
+                      setCooldownSec(60)
+                    }
+                  }}
+                  className="flex-1 min-w-[90px] bg-input border border-border/40 rounded-xl px-4 py-2 text-sm text-text font-medium outline-none focus:border-accent transition-colors [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                />
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {COOLDOWN_PRESETS.map((preset) => {
+                    const isSelected = cooldownSec === preset.seconds
+                    return (
+                      <button
+                        key={preset.seconds}
+                        type="button"
+                        onClick={() => setCooldownSec(preset.seconds)}
+                        className={`px-3 py-2 rounded-xl text-xs transition-all cursor-pointer shrink-0 ${
+                          isSelected
+                            ? 'bg-accent text-white font-bold shadow-sm'
+                            : 'bg-input/60 hover:bg-input border border-border/40 text-text-muted hover:text-text font-medium'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    )
+                  })}
                 </div>
-              )}
+              </div>
             </div>
 
             <div className="mv-mmodal-actions pt-4 border-t border-border/70 shrink-0">
@@ -5071,7 +5316,18 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         fetchActiveAutomationTriggers()
       ])
       if (statusRes?.detectionZones) {
-        setConfig((prev) => ({ ...prev, detectionZones: statusRes.detectionZones }))
+        setConfig((prev) => {
+          const currentStr = JSON.stringify(prev.detectionZones || {})
+          const newStr = JSON.stringify(statusRes.detectionZones || {})
+          if (currentStr === newStr) return prev
+          const next = { ...prev, detectionZones: statusRes.detectionZones }
+          try {
+            if (typeof localStorage !== 'undefined') {
+              localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+            }
+          } catch {}
+          return next
+        })
       }
       const fetchedCams = camRes.cameras || []
       setCameras(fetchedCams)
@@ -5083,8 +5339,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       if (Array.isArray(activeTriggersRes) && activeTriggersRes.length > 0) {
         const autoMons: MonitorInfo[] = activeTriggersRes.map((auto: any) => {
           const trig = auto.trigger || {}
+          const trigParams = trig.params || trig.config || {}
           const camCond = (auto.global_conditions || []).find((c: any) => c.field?.toLowerCase().includes('camera'))
-          const rawCam = trig.trigger_config?.camera || trig.params?.camera || trig.camera || camCond?.value || ''
+          const rawCam = trigParams.camera || trigParams.cameraName || trig.trigger_config?.camera || trig.camera || camCond?.value || ''
           const cam = rawCam
             ? fetchedCams.find(
                 (c) =>
@@ -5098,23 +5355,81 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           const camId = cam ? cam.id : (rawCam || fetchedCams[0]?.id || 'webcam:0')
           const camName = cam ? cam.name : (rawCam || camId)
           const labelName = auto.automationName || 'Automação Hub'
+
+          // Parse trigger type from automation params for the modal
+          const rawType = String(trigParams.triggeredBy || trig.id || trig.type || '').toLowerCase()
+          const parsedClassName = trigParams.className || ''
+          let parsedTriggerType = 'motion'
+          if (rawType === 'object' || rawType.includes('object')) {
+            if (parsedClassName === 'person') parsedTriggerType = 'person'
+            else if (ANIMAL_KEYS.includes(parsedClassName)) parsedTriggerType = 'animal'
+            else parsedTriggerType = 'object'
+          } else if (rawType === 'presence' || rawType.includes('presence')) {
+            parsedTriggerType = 'presence'
+          } else if (rawType === 'absence' || rawType.includes('absence')) {
+            parsedTriggerType = 'absence'
+          } else {
+            parsedTriggerType = 'motion'
+          }
+
+          // Extract cooldown from policy
+          const policy = auto.policy && typeof auto.policy === 'object' ? auto.policy : {}
+          const cooldownFromPolicy = policy.cooldownSeconds !== undefined && policy.cooldownSeconds !== null
+            ? Number(policy.cooldownSeconds)
+            : policy.cooldownMinutes !== undefined && policy.cooldownMinutes !== null
+              ? Number(policy.cooldownMinutes) * 60
+              : 300
+
+          const automationWorkflow: AutomationWorkflowSnapshot = {
+            id: auto.automationId,
+            name: auto.automationName || labelName,
+            description: auto.description || '',
+            enabled: Boolean(auto.enabled),
+            trigger: trig,
+            triggers: Array.isArray(auto.triggers) ? auto.triggers : [],
+            triggerMode: auto.triggerMode || 'any',
+            globalConditions: Array.isArray(auto.global_conditions) ? auto.global_conditions : [],
+            conditions: Array.isArray(auto.conditions) ? auto.conditions : undefined,
+            global_conditions: Array.isArray(auto.global_conditions) ? auto.global_conditions : undefined,
+            policy: Object.keys(policy).length > 0 ? policy : undefined,
+            steps: Array.isArray(auto.actions) ? auto.actions : [],
+            actions: Array.isArray(auto.actions) ? auto.actions : undefined
+          }
           return {
             id: `auto-${auto.automationId}`,
             cameraId: camId,
             cameraName: camName,
-            triggers: [{ type: trig.id || trig.type || 'vision:detection' }],
+            triggers: [{
+              type: parsedTriggerType,
+              className: parsedClassName || undefined,
+              sensitivity: trigParams.sensitivity || undefined,
+              present: trigParams.present !== undefined ? trigParams.present : undefined,
+              event: trigParams.event || undefined,
+              windowSec: trigParams.windowSec || undefined
+            }],
+            cooldownSec: cooldownFromPolicy,
             label: `⚡ ${labelName}`,
             createdAt: Date.now(),
             paused: !auto.enabled,
             isAutomation: true,
-            actions: auto.actions || []
+            actions: auto.actions || [],
+            automationWorkflow
           }
         })
-        const existingIds = new Set(combinedMonitors.map((m) => m.id))
+        const autoMonsMap = new Map<string, MonitorInfo>()
         for (const am of autoMons) {
-          if (!existingIds.has(am.id)) {
-            combinedMonitors.push(am)
+          autoMonsMap.set(am.id, am)
+        }
+        combinedMonitors = combinedMonitors.map((m) => {
+          if (autoMonsMap.has(m.id)) {
+            const enriched = autoMonsMap.get(m.id)!
+            autoMonsMap.delete(m.id)
+            return enriched
           }
+          return m
+        })
+        for (const am of autoMonsMap.values()) {
+          combinedMonitors.push(am)
         }
       }
 
@@ -5273,6 +5588,35 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     }
   }, [poll, applyDetections])
 
+  // Returns to the main page (closes expanded camera, modals, and resets tab)
+  // when the user clicks the MomAI Vision icon on the lateral sidebar.
+  useEffect(() => {
+    const handleNavClick = (data?: { extensionId?: string }) => {
+      if (data?.extensionId && data.extensionId !== EXT_ID) return
+      setExpandedCamera(null)
+      setEditingZoneCameraId(null)
+      setExpandedPrint(null)
+      setExpandedAlert(null)
+      setIsModalOpen(false)
+      setIsMonitorModalOpen(false)
+      setEditingMonitor(null)
+      setActiveTab('cameras')
+    }
+
+    const unsub = sdk.events.subscribe<{ extensionId?: string }>('extension_nav_click', handleNavClick)
+
+    const handleWindowClick = (e: Event) => {
+      const customEv = e as CustomEvent<{ extensionId?: string }>
+      handleNavClick(customEv.detail)
+    }
+    window.addEventListener('momai:extension-nav-click', handleWindowClick)
+
+    return () => {
+      unsub()
+      window.removeEventListener('momai:extension-nav-click', handleWindowClick)
+    }
+  }, [])
+
   const takeSnapshot = useCallback(
     async (cameraId: string) => {
       setBusy(true)
@@ -5309,20 +5653,48 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     async (cameraId: string, points: Point[]) => {
       const current = config.detectionZones || {}
       const updated = { ...current, [cameraId]: points }
-      await saveSettings({ detectionZones: updated })
+      setConfig((prev) => {
+        const next = { ...prev, detectionZones: updated }
+        try {
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+          }
+        } catch {}
+        return next
+      })
       setEditingZoneCameraId(null)
+      try {
+        await command('configure', { detectionZones: updated })
+      } catch (err) {
+        console.error('[Vision] Failed to save detection zone:', err)
+        setError(err instanceof Error ? err.message : String(err))
+      }
     },
-    [config.detectionZones, saveSettings]
+    [config.detectionZones]
   )
 
   const handleClearCameraZone = useCallback(
     async (cameraId: string) => {
       const current = { ...(config.detectionZones || {}) }
       delete current[cameraId]
-      await saveSettings({ detectionZones: current })
+      setConfig((prev) => {
+        const next = { ...prev, detectionZones: current }
+        try {
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+          }
+        } catch {}
+        return next
+      })
       setEditingZoneCameraId(null)
+      try {
+        await command('configure', { detectionZones: current })
+      } catch (err) {
+        console.error('[Vision] Failed to clear detection zone:', err)
+        setError(err instanceof Error ? err.message : String(err))
+      }
     },
-    [config.detectionZones, saveSettings]
+    [config.detectionZones]
   )
 
   const toggleCameraSelection = useCallback(
@@ -5719,7 +6091,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           </div>
 
 {!expandedCamera && (
-          <div className="mt-8 pt-4">
+          <div className="mt-3 pt-1">
             <div className="flex items-center gap-2.5 mb-4">
               <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(52,211,153,0.5)]" />
               <h3 className="text-lg font-bold text-text tracking-tight">
@@ -5767,29 +6139,27 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               <div className="space-y-4">
                 <div className="grid grid-cols-1 gap-3">
                   {activeMonitors.map((m) => {
-                    const formattedTriggers = m.triggers.map(formatTriggerPortuguese).filter(Boolean)
                     return (
                       <div
                         key={m.id}
-                        className="flex items-center justify-between p-4 gap-4 rounded-xl bg-card border border-border/40 shadow-sm hover:border-border transition-all"
+                        className="flex items-center justify-between p-4 gap-4 rounded-xl bg-card border border-border/40 shadow-sm hover:border-border transition-all overflow-hidden"
                       >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm font-semibold text-text truncate">
+                        <div className="min-w-0 flex-1 overflow-hidden">
+                          <div className="flex items-center gap-2 flex-wrap min-w-0">
+                            <span className="text-sm font-semibold text-text truncate max-w-full block">
                               {m.label || m.cameraName || m.cameraId}
                             </span>
                             {m.cameraName && m.label && (
-                              <span className="text-xs text-text-muted font-normal">
+                              <span className="text-xs text-text-muted font-normal truncate max-w-full block">
                                 · {formatCameraName(m.cameraName, 'webcam')}
                               </span>
                             )}
+                            {m.cooldownSec ? (
+                              <span className="text-xs text-text-muted font-normal shrink-0">
+                                · Intervalo: {formatCooldown(m.cooldownSec)}
+                              </span>
+                            ) : null}
                           </div>
-                          {(formattedTriggers.length > 0 || m.cooldownSec) && (
-                            <p className="text-xs text-text-muted mt-1">
-                              {formattedTriggers.join(' · ')}
-                              {m.cooldownSec ? `${formattedTriggers.length > 0 ? ' · ' : ''}Cooldown: ${m.cooldownSec}s` : ''}
-                            </p>
-                          )}
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
                           <button
@@ -5803,10 +6173,24 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                           </button>
                           <button
                             onClick={async () => {
+                              const prevMonitors = monitors
+                              const updated = prevMonitors.map((item) => (item.id === m.id ? { ...item, paused: true } : item))
+                              setMonitors(updated)
+                              try {
+                                if (typeof localStorage !== 'undefined') {
+                                  localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
+                                }
+                              } catch {}
                               try {
                                 await command('pause_monitoring', { monitorId: m.id })
                                 void refresh()
                               } catch (err) {
+                                setMonitors(prevMonitors)
+                                try {
+                                  if (typeof localStorage !== 'undefined') {
+                                    localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
+                                  }
+                                } catch {}
                                 setError(err instanceof Error ? err.message : String(err))
                               }
                             }}
@@ -5816,10 +6200,24 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                           </button>
                           <button
                             onClick={async () => {
+                              const prevMonitors = monitors
+                              const updated = prevMonitors.filter((item) => item.id !== m.id)
+                              setMonitors(updated)
+                              try {
+                                if (typeof localStorage !== 'undefined') {
+                                  localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
+                                }
+                              } catch {}
                               try {
                                 await command('stop_monitoring', { monitorId: m.id })
                                 void refresh()
                               } catch (err) {
+                                setMonitors(prevMonitors)
+                                try {
+                                  if (typeof localStorage !== 'undefined') {
+                                    localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
+                                  }
+                                } catch {}
                                 setError(err instanceof Error ? err.message : String(err))
                               }
                             }}
@@ -5836,7 +6234,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                     )
                   })}
 
-                  {/* Card Tracejado para Adicionar Monitoramento Abaixo */}
+                  {/* Card para Adicionar Monitoramento Abaixo */}
                   <button
                     type="button"
                     onClick={() => {
@@ -5848,9 +6246,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                         window.parent.dispatchEvent(evt)
                       }
                     }}
-                    className="group flex items-center justify-center gap-2 p-3.5 rounded-xl border border-dashed border-border/50 hover:border-emerald-500/50 bg-input/20 hover:bg-input/50 transition-all duration-200 cursor-pointer text-text-muted hover:text-text"
+                    className="group flex items-center justify-center gap-2 p-3 rounded-xl bg-input/20 hover:bg-input/50 transition-all duration-200 cursor-pointer text-text-muted hover:text-text"
                   >
-                    <div className="w-6 h-6 rounded-lg bg-card border border-border/40 text-emerald-400 flex items-center justify-center group-hover:scale-105 transition-transform">
+                    <div className="w-6 h-6 rounded-lg bg-card text-emerald-400 flex items-center justify-center group-hover:scale-105 transition-transform">
                       <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                         <path d="M12 5v14M5 12h14" />
                       </svg>
@@ -5860,42 +6258,55 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 </div>
 
                 {pausedMonitors.length > 0 && (
-                  <div className="pt-4 border-t border-border/20">
-                    <h4 className="text-xs font-semibold text-text-muted mb-2.5 uppercase tracking-wider">
+                  <div className="-mt-2">
+                    <h4 className="text-xs font-semibold text-text-muted mb-1.5 uppercase tracking-wider">
                       Pausados ({pausedMonitors.length})
                     </h4>
                     <div className="grid grid-cols-1 gap-2.5 opacity-80">
                       {pausedMonitors.map((m) => {
-                        const formattedTriggers = m.triggers.map(formatTriggerPortuguese).filter(Boolean)
                         return (
                           <div
                             key={m.id}
-                            className="flex items-center justify-between p-3.5 gap-4 rounded-xl bg-card/60 border border-border/30"
+                            className="flex items-center justify-between p-3.5 gap-4 rounded-xl bg-card/60 border border-border/30 overflow-hidden"
                           >
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2">
-                                <span className="text-sm font-medium text-text truncate">
+                            <div className="min-w-0 flex-1 overflow-hidden">
+                              <div className="flex items-center gap-2 flex-wrap min-w-0">
+                                <span className="text-sm font-medium text-text truncate max-w-full block">
                                   {m.label || m.cameraName || m.cameraId}
                                 </span>
                                 {m.cameraName && m.label && (
-                                  <span className="text-xs text-text-muted">
+                                  <span className="text-xs text-text-muted truncate max-w-full block">
                                     · {formatCameraName(m.cameraName, 'webcam')}
                                   </span>
                                 )}
+                                {m.cooldownSec ? (
+                                  <span className="text-xs text-text-muted shrink-0">
+                                    · Intervalo: {formatCooldown(m.cooldownSec)}
+                                  </span>
+                                ) : null}
                               </div>
-                              {formattedTriggers.length > 0 && (
-                                <p className="text-xs text-text-muted mt-0.5">
-                                  {formattedTriggers.join(' · ')}
-                                </p>
-                              )}
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
                               <button
                                 onClick={async () => {
+                                  const prevMonitors = monitors
+                                  const updated = prevMonitors.map((item) => (item.id === m.id ? { ...item, paused: false } : item))
+                                  setMonitors(updated)
+                                  try {
+                                    if (typeof localStorage !== 'undefined') {
+                                      localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
+                                    }
+                                  } catch {}
                                   try {
                                     await command('resume_monitoring', { monitorId: m.id })
                                     void refresh()
                                   } catch (err) {
+                                    setMonitors(prevMonitors)
+                                    try {
+                                      if (typeof localStorage !== 'undefined') {
+                                        localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
+                                      }
+                                    } catch {}
                                     setError(err instanceof Error ? err.message : String(err))
                                   }
                                 }}
@@ -5914,10 +6325,24 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                               </button>
                               <button
                                 onClick={async () => {
+                                  const prevMonitors = monitors
+                                  const updated = prevMonitors.filter((item) => item.id !== m.id)
+                                  setMonitors(updated)
+                                  try {
+                                    if (typeof localStorage !== 'undefined') {
+                                      localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
+                                    }
+                                  } catch {}
                                   try {
                                     await command('stop_monitoring', { monitorId: m.id })
                                     void refresh()
                                   } catch (err) {
+                                    setMonitors(prevMonitors)
+                                    try {
+                                      if (typeof localStorage !== 'undefined') {
+                                        localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
+                                      }
+                                    } catch {}
                                     setError(err instanceof Error ? err.message : String(err))
                                   }
                                 }}
@@ -6222,7 +6647,14 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         }}
         cameras={cameras}
         initialMonitor={editingMonitor}
-        onSave={() => void poll()}
+        onSave={(updated) => {
+          if (updated?.id) {
+            setMonitors((prev) =>
+              prev.map((m) => (m.id === updated.id ? { ...m, ...updated } : m))
+            )
+          }
+          void poll()
+        }}
       />
 
       <AddCameraModal
@@ -6260,81 +6692,81 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       />
 
       {/* Standardized Context Menu */}
-      {contextMenu ? (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          onClose={() => setContextMenu(null)}
-          items={
-            contextMenu.target.type === 'camera'
-              ? [
-                  {
-                    id: 'snapshot',
-                    label: 'Tirar print',
-                    onClick: () => void takeSnapshot(contextMenu.target.camera.id)
-                  },
-                  {
-                    id: 'expand',
-                    label: 'Ampliar imagem',
-                    onClick: () => handleExpandCamera(contextMenu.target.camera)
-                  },
-                  {
-                    id: 'zone',
-                    label:
-                      config.detectionZones?.[contextMenu.target.camera.id] &&
-                      config.detectionZones[contextMenu.target.camera.id].length >= 3
-                        ? 'Editar área de monitoramento'
-                        : 'Definir área de monitoramento',
-                    onClick: () => handleToggleEditZone(contextMenu.target.camera.id)
-                  },
-                  {
-                    id: 'monitor',
-                    label: 'Criar monitoramento',
-                    onClick: () => {
-                      setEditingMonitor({
-                        id: '',
-                        cameraId: contextMenu.target.camera.id,
-                        cameraName: contextMenu.target.camera.name,
-                        triggers: []
-                      })
-                      setIsMonitorModalOpen(true)
-                    }
-                  },
-                  {
-                    id: 'reload',
-                    label: 'Recarregar câmera',
-                    onClick: () => void handleReloadCamera(contextMenu.target.camera.id)
-                  },
-                  {
-                    id: 'remove',
-                    label: contextMenu.target.camera.source === 'ip' ? 'Remover câmera IP' : 'Remover da exibição',
-                    danger: true,
-                    onClick: () => void handleRemoveCamera(contextMenu.target.camera.id)
-                  }
-                ]
-              : [
-                  {
-                    id: 'copy',
-                    label: 'Copiar',
-                    shortcut: 'Ctrl+C',
-                    onClick: () => void handleCopyImage(contextMenu.target.imgSrc)
-                  },
-                  {
-                    id: 'delete',
-                    label: 'Excluir',
-                    shortcut: 'Del',
-                    danger: true,
-                    onClick: () => {
-                      if (contextMenu.target.type !== 'camera') {
-                        void handleDeleteFromContextMenu(contextMenu.target)
-                      }
-                    }
-                  }
-                ]
-          }
-          minWidth={170}
-        />
-      ) : null}
+      {contextMenu ? (() => {
+        const target = contextMenu.target
+        const items = target.type === 'camera'
+          ? [
+              {
+                id: 'snapshot',
+                label: 'Tirar print',
+                onClick: () => void takeSnapshot(target.camera.id)
+              },
+              {
+                id: 'expand',
+                label: 'Ampliar imagem',
+                onClick: () => handleExpandCamera(target.camera)
+              },
+              {
+                id: 'zone',
+                label:
+                  config.detectionZones?.[target.camera.id] &&
+                  config.detectionZones[target.camera.id].length >= 3
+                    ? 'Editar área de monitoramento'
+                    : 'Definir área de monitoramento',
+                onClick: () => handleToggleEditZone(target.camera.id)
+              },
+              {
+                id: 'monitor',
+                label: 'Criar monitoramento',
+                onClick: () => {
+                  setEditingMonitor({
+                    id: '',
+                    cameraId: target.camera.id,
+                    cameraName: target.camera.name,
+                    triggers: []
+                  })
+                  setIsMonitorModalOpen(true)
+                }
+              },
+              {
+                id: 'reload',
+                label: 'Recarregar câmera',
+                onClick: () => void handleReloadCamera()
+              },
+              {
+                id: 'remove',
+                label: target.camera.source === 'ip' ? 'Remover câmera IP' : 'Remover da exibição',
+                danger: true,
+                onClick: () => void handleRemoveCamera(target.camera.id)
+              }
+            ]
+          : [
+              {
+                id: 'copy',
+                label: 'Copiar',
+                shortcut: 'Ctrl+C',
+                onClick: () => void handleCopyImage(target.imgSrc)
+              },
+              {
+                id: 'delete',
+                label: 'Excluir',
+                shortcut: 'Del',
+                danger: true,
+                onClick: () => {
+                  void handleDeleteFromContextMenu(target)
+                }
+              }
+            ]
+        return (
+          <ContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onClose={() => setContextMenu(null)}
+            items={items}
+            minWidth={170}
+          />
+        )
+      })() : null}
 
       {/* Expanded Alert Lightbox Modal */}
       {expandedAlert ? (

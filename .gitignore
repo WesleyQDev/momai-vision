@@ -5,3 +5,5 @@ runtime.js
 snapshots/
 *.log
 *_test_frame.jpg
+
+*.zip

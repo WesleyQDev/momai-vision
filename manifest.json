@@ -226,8 +226,56 @@
           "limit": { "type": "number" }
         }
       }
+    },
+    {
+      "name": "show_overlay",
+      "description": "Exibe o overlay/card flutuante visual da câmera com a imagem capturada e marcações de detecção (ação padrão do MomAI Vision para alertas visuais).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cameraId": {
+            "type": "string",
+            "description": "ID ou nome da câmera. Pode usar {{trigger.payload.cameraId}} ou {{trigger.payload.cameraName}}."
+          },
+          "description": {
+            "type": "string",
+            "description": "Descrição do alerta. Pode usar {{trigger.payload.description}}."
+          },
+          "imageDataUri": {
+            "type": "string",
+            "description": "Imagem em base64 do alerta. Pode usar {{trigger.payload.imageDataUri}}."
+          }
+        }
+      }
     }
   ],
+  "capabilities": {
+    "actions": [
+      {
+        "id": "show_overlay",
+        "name": "Exibir Overlay de Alerta (Vision)",
+        "description": "Exibe a janela flutuante nativa da MomAI Vision com a foto do alerta e caixas delimitadoras sobre os objetos detectados.",
+        "dangerLevel": "low",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "cameraId": {
+              "type": "string",
+              "description": "ID da câmera (ex: {{trigger.payload.cameraId}})"
+            },
+            "description": {
+              "type": "string",
+              "description": "Descrição do alerta (ex: {{trigger.payload.description}})"
+            },
+            "imageDataUri": {
+              "type": "string",
+              "description": "Foto capturada da cena (ex: {{trigger.payload.imageDataUri}})"
+            }
+          }
+        }
+      }
+    ]
+  },
   "toolPriority": {
     "label": "VISAO",
     "rule": "usar ferramentas de visao/camera quando o usuario falar de camera, ver, enxergar, monitorar, vigiar, movimento, encomenda, deteccao ou pedir o que a camera esta vendo."
