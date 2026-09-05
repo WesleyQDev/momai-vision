@@ -8,8 +8,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
 import ContextMenu from './components/ContextMenu'
-import { ptLabel, triggerLabel } from './vision/labels'
+import { localizedClassLabel, localizedTriggerLabel, ptLabel } from './vision/labels'
 import { classColor } from './vision/theme-color'
+import { useI18n } from './hooks/useI18n'
 import visionIconPng from '../icon.png'
 
 const sdk = getSDK()
@@ -170,32 +171,46 @@ async function pauseMonitor(monitorId: string | undefined, onClose?: () => void)
   onClose?.()
 }
 
-function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
+export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
+  const { t } = useI18n()
   const [stopping, setStopping] = useState(false)
   const [expanded, setExpanded] = useState(false)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const isOverlay = typeof data?.onClose === 'function'
   const isSnapshot = data?.triggeredBy === 'snapshot'
-  const effectiveImageUri =
-    (typeof data?.imageDataUri === 'string' &&
-      !data.imageDataUri.includes('{{') &&
-      data.imageDataUri.trim()) ||
-    (data?.snapshotId ? `/media/camera/snapshot/${data.snapshotId}` : '')
+  const [effectiveImageUri, setEffectiveImageUri] = useState<string | undefined>(data?.imageDataUri)
 
-  // In the floating overlay, "ampliar" re-opens the window sized to the
-  // photo's real aspect ratio (measured from the frame) so the image fills the
-  // whole window edge-to-edge — no black bars. In chat it just enlarges the card.
+  useEffect(() => {
+    if (data?.imageDataUri) {
+      setEffectiveImageUri(data.imageDataUri)
+      return
+    }
+    if (!data?.snapshotId) return
+    let cancelled = false
+    sdk.api
+      .get<{ dataUri?: string }>(`/extensions/${EXT_ID}/snapshot/${data.snapshotId}`)
+      .then((res) => {
+        if (!cancelled && res.ok && res.data?.dataUri) {
+          setEffectiveImageUri(res.data.dataUri)
+        }
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [data?.imageDataUri, data?.snapshotId])
+
   const toggleExpand = () => {
     const next = !expanded
     setExpanded(next)
-    if (!isOverlay || typeof (window as any).api?.openOverlay !== 'function') return
-    const { onClose: _ignored, ...cleanData } = (data || {}) as AlertData
+    if (!isOverlay) return
+    const cleanData = data ? { ...data, onClose: undefined } : undefined
     const resize = (aspect: number) => {
-      const maxW = 1280
-      const maxH = 720
-      const screenW = window.screen?.availWidth || maxW
-      const screenH = window.screen?.availHeight || maxH
-      let w = Math.min(maxW, screenW - 40)
+      const screenW = (window as any).screen?.availWidth || 1920
+      const screenH = (window as any).screen?.availHeight || 1080
+      const maxW = Math.round(screenW * 0.85)
+      const maxH = Math.round(screenH * 0.85)
+      let w = Math.min(1080, maxW)
       let h = Math.round(w / aspect)
       if (h > Math.min(maxH, screenH - 80)) {
         h = Math.max(240, Math.min(maxH, screenH - 80))
@@ -205,8 +220,8 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         skillId: EXT_ID,
         panel: 'dist/panel.js',
         panelType: 'extension-panel',
-        overlayId: cleanData.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
-        overlay_id: cleanData.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
+        overlayId: cleanData?.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
+        overlay_id: cleanData?.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
         overlaySize: { width: w, height: h },
         strategy: 'stack',
         structuredResponse: { type: 'vision_alert', data: cleanData }
@@ -217,15 +232,14 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         skillId: EXT_ID,
         panel: 'dist/panel.js',
         panelType: 'extension-panel',
-        overlayId: cleanData.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
-        overlay_id: cleanData.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
+        overlayId: cleanData?.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
+        overlay_id: cleanData?.cameraId ? `vision-cam-${cleanData.cameraId}` : undefined,
         overlaySize: { width: 480, height: 560 },
         strategy: 'stack',
         structuredResponse: { type: 'vision_alert', data: cleanData }
       })
       return
     }
-    // Measure the actual frame aspect so the window matches it (no bars/crop).
     if (effectiveImageUri) {
       const img = new Image()
       img.onload = () => {
@@ -253,14 +267,14 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
             objectFit="object-contain"
           />
         ) : (
-          <p className="text-sm text-gray-400">Sem imagem.</p>
+          <p className="text-sm text-gray-400">{t('gallery.emptyTitle')}</p>
         )}
         <button
           onClick={toggleExpand}
           className="absolute top-3 right-3 rounded-full bg-black/60 hover:bg-black/80 text-gray-300 p-2 z-20"
           style={{ WebkitAppRegion: 'no-drag' } as any}
-          aria-label="Reduzir print"
-          title="Reduzir print"
+          aria-label={t('panel.viewSnapshot')}
+          title={t('panel.viewSnapshot')}
         >
           <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7" />
@@ -270,25 +284,11 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
     )
   }
 
-  if (isSnapshot && !expanded) {
-    return (
-      <div className="w-full max-w-md rounded-xl border border-white/10 bg-zinc-900/95 text-gray-100 shadow-lg overflow-hidden">
-        <div className="relative w-full aspect-video bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
-          <AlertCanvasOverlay
-            imageDataUri={effectiveImageUri}
-            boxes={data?.boxes}
-            objectFit="object-cover"
-          />
-        </div>
-      </div>
-    )
-  }
-
-  const title = data?.cameraName || 'MomAI Vision'
+  const title = data?.cameraName || t('name') || 'MomAI Vision'
   const subtitle = data?.className
-    ? `${data.cameraName || 'Câmera'} · ${ptLabel(data.className)}${data.confidence ? ` ${Math.round(data.confidence * 100)}%` : ''}`
+    ? `${data.cameraName || t('nav.cameras')} · ${localizedClassLabel(data.className, t)}${data.confidence ? ` ${Math.round(data.confidence * 100)}%` : ''}`
     : isSnapshot
-      ? 'Snapshot'
+      ? t('triggers.snapshot')
       : data?.cameraName || ''
 
   return (
@@ -301,7 +301,6 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         setMenu({ x: e.clientX, y: e.clientY })
       }}
     >
-      {/* Header doubles as the drag handle in the floating overlay window. */}
       <div
         className="flex items-center justify-between px-4 py-2.5 bg-zinc-800/70"
         style={isOverlay ? ({ WebkitAppRegion: 'drag' } as any) : undefined}
@@ -323,8 +322,8 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
             <button
               onClick={toggleExpand}
               className="rounded-full p-1.5 text-gray-400 hover:bg-white/10 hover:text-white transition-colors"
-              title={expanded ? 'Reduzir print' : 'Ampliar print'}
-              aria-label={expanded ? 'Reduzir print' : 'Ampliar print'}
+              title={t('panel.viewSnapshot')}
+              aria-label={t('panel.viewSnapshot')}
             >
               {expanded ? (
                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -341,7 +340,7 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
             <button
               onClick={data?.onClose}
               className="rounded-full p-1.5 text-gray-400 hover:bg-white/10 hover:text-white transition-colors"
-              aria-label="Fechar"
+              aria-label={t('common.close')}
             >
               <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
                 <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
@@ -362,7 +361,7 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
               : { aspectRatio: '16 / 9', ...(isOverlay ? { WebkitAppRegion: 'no-drag' } : {}) }
           }
           onClick={toggleExpand}
-          title={expanded ? 'Reduzir print' : 'Ampliar print'}
+          title={t('panel.viewSnapshot')}
         >
           <AlertCanvasOverlay
             imageDataUri={effectiveImageUri}
@@ -377,10 +376,10 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
       >
         <p className="text-sm text-gray-300">
-          {data?.description || (isSnapshot ? 'Snapshot capturado' : 'Alerta da câmera')}
+          {data?.description || (isSnapshot ? t('triggers.snapshot') : t('alerts.title'))}
         </p>
         {data?.triggeredBy && !isSnapshot ? (
-          <p className="mt-1 text-xs text-gray-500">{formatTime(data.ts)} · {triggerLabel(data)}</p>
+          <p className="mt-1 text-xs text-gray-500">{formatTime(data.ts)} · {localizedTriggerLabel(data, t)}</p>
         ) : null}
         <div
           className="mt-3 flex gap-2"
@@ -399,7 +398,7 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
             className="flex-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-medium py-2 transition-colors cursor-pointer"
             style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
           >
-            Abrir MomAI
+            {t('panel.openDashboard')}
           </button>
           {data?.monitorId ? (
             <button
@@ -414,7 +413,7 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
               <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M6 5h4v14H6zM14 5h4v14h-4z" />
               </svg>
-              {stopping ? 'Pausando...' : 'Pausar monitoramento'}
+              {stopping ? t('common.loading') : t('monitoring.paused')}
             </button>
           ) : null}
         </div>
@@ -429,52 +428,27 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
               ? [
                   {
                     id: 'expand',
-                    label: expanded ? 'Reduzir print' : 'Ampliar print',
+                    label: t('panel.viewSnapshot'),
                     onClick: toggleExpand
                   }
                 ]
               : []),
             {
               id: 'copy-desc',
-              label: 'Copiar descrição',
+              label: t('common.confirm'),
               onClick: () => {
                 try {
                   void navigator.clipboard?.writeText?.(
-                    data?.description || (isSnapshot ? 'Snapshot capturado' : 'Alerta da câmera')
+                    data?.description || (isSnapshot ? t('triggers.snapshot') : t('alerts.title'))
                   )
                 } catch {}
               }
             },
-            ...(data?.cameraName
-              ? [
-                  {
-                    id: 'copy-camera',
-                    label: 'Copiar câmera',
-                    onClick: () => {
-                      try {
-                        void navigator.clipboard?.writeText?.(data?.cameraName || '')
-                      } catch {}
-                    }
-                  }
-                ]
-              : []),
-            ...(data?.monitorId
-              ? [
-                  {
-                    id: 'pause',
-                    label: 'Pausar monitoramento',
-                    onClick: () => {
-                      setStopping(true)
-                      void pauseMonitor(data.monitorId, data.onClose).catch(() => setStopping(false))
-                    }
-                  }
-                ]
-              : []),
             ...(typeof data?.onClose === 'function'
               ? [
                   {
                     id: 'close',
-                    label: 'Fechar',
+                    label: t('common.close'),
                     onClick: () => data?.onClose?.()
                   }
                 ]
@@ -488,14 +462,13 @@ function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
 
 sdk.registry.registerRenderer('vision_alert', VisionAlertCard)
 
-export { VisionAlertCard }
-
 interface Status {
   monitors?: Array<{ id: string; cameraName?: string; triggers?: Array<{ type: string }>; createdAt?: number }>
   cameras?: Record<string, { online: boolean; monitors: number }>
 }
 
 export default function VisionPanel(props: { data?: unknown }): JSX.Element {
+  const { t } = useI18n()
   const [status, setStatus] = useState<Status | null>(null)
   const [monitorMenu, setMonitorMenu] = useState<{
     x: number
@@ -530,16 +503,16 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
         <span className="text-emerald-400">
           <VisionIcon />
         </span>
-        <h3 className="text-sm font-semibold">MomAI Vision</h3>
+        <h3 className="text-sm font-semibold">{t('name')}</h3>
       </div>
       <div className="grid grid-cols-2 gap-2 mb-3">
         <div className="rounded-xl bg-white/5 p-3">
           <p className="text-lg font-bold text-emerald-400">{Object.keys(cameras).length}</p>
-          <p className="text-xs text-gray-400">câmeras ({onlineCount} online)</p>
+          <p className="text-xs text-gray-400">{t('nav.cameras')} ({onlineCount} {t('cameras.statusOnline')})</p>
         </div>
         <div className="rounded-xl bg-white/5 p-3">
           <p className="text-lg font-bold text-emerald-400">{monitors.length}</p>
-          <p className="text-xs text-gray-400">monitors ativos</p>
+          <p className="text-xs text-gray-400">{t('monitoring.active')}</p>
         </div>
       </div>
       {monitors.length > 0 ? (
@@ -557,7 +530,7 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
               <div className="min-w-0">
                 <p className="text-xs font-medium truncate">{m.cameraName || m.id}</p>
                 <p className="text-[11px] text-gray-400">
-                  {m.triggers?.map((t) => t.type).join(', ') || '—'}
+                  {m.triggers?.map((tr) => tr.type).join(', ') || '—'}
                 </p>
               </div>
               <span className="ml-2 shrink-0 w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -565,7 +538,7 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
           ))}
         </ul>
       ) : (
-        <p className="text-xs text-gray-400">Nenhum monitor ativo.</p>
+        <p className="text-xs text-gray-400">{t('monitoring.emptyTitle')}</p>
       )}
       {monitorMenu && (
         <ContextMenu
@@ -573,31 +546,9 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
           y={monitorMenu.y}
           onClose={() => setMonitorMenu(null)}
           items={[
-            ...(monitorMenu.cameraName
-              ? [
-                  {
-                    id: 'copy-name',
-                    label: 'Copiar nome da câmera',
-                    onClick: () => {
-                      try {
-                        void navigator.clipboard?.writeText?.(monitorMenu.cameraName || '')
-                      } catch {}
-                    }
-                  }
-                ]
-              : []),
-            {
-              id: 'copy-id',
-              label: 'Copiar ID do monitor',
-              onClick: () => {
-                try {
-                  void navigator.clipboard?.writeText?.(monitorMenu.id)
-                } catch {}
-              }
-            },
             {
               id: 'pause',
-              label: 'Pausar monitoramento',
+              label: t('monitoring.paused'),
               onClick: () => {
                 void pauseMonitor(monitorMenu.id).catch(() => {})
               }

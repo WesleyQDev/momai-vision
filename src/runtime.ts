@@ -1364,7 +1364,7 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
   lastAutomationSyncTs = now
 
   try {
-    const activeTriggers = await fetchHostActiveTriggers()
+    const activeTriggers = await fetchHostActiveTriggers(true)
     if (!Array.isArray(activeTriggers)) {
       autoMonitorsCache = []
       lastAutomationSyncOkTs = now
@@ -1375,7 +1375,8 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
     const synced: ActiveMonitor[] = []
 
     for (const auto of activeTriggers) {
-      if (!auto || auto.enabled === false) continue
+      if (!auto) continue
+      const isPaused = auto.enabled === false
       const trig = auto.trigger || {}
       const camCond = (auto.global_conditions || []).find(
         (c: any) => c.field?.toLowerCase().includes('camera') || c.field?.toLowerCase().includes('câmera')
@@ -1458,7 +1459,7 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
         triggers: [triggerObj],
         label: `⚡ ${auto.automationName || 'Automação Hub'}`,
         createdAt: Date.now(),
-        paused: false,
+        paused: isPaused,
         actions: auto.actions || []
       }
       if (timing.cooldownSec !== null && timing.cooldownSec !== undefined)
@@ -1467,14 +1468,16 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
 
       synced.push({ config, state })
 
-      if (cam) {
+      if (cam && !isPaused) {
         if (cam.source === 'webcam') void ensureWebcamWatch(cam.id).catch(() => {})
         if (cam.source === 'ip') void startMjpeg(cam).catch(() => {})
         ensureCameraTicker(cam.id)
+      } else if (cam && isPaused) {
+        stopCameraTickerIfIdle(cam.id)
       }
     }
 
-    // Automação pausada/excluída direto no hub (sem passar pelas tools):
+    // Automação excluída direto no hub (sem passar pelas tools):
     // se o monitor sumiu do sync, fecha o overlay dele se estiver aberto —
     // senão a janela flutuante continua na tela com o último alerta.
     const removed = autoMonitorsCache.filter((m) => !synced.some((s) => s.config.id === m.config.id))
@@ -2649,9 +2652,10 @@ async function toolPauseMonitoring(args: { monitorId?: string; all?: boolean }):
       bridge?.log(`[vision] pause_monitoring: toggle error for automation ${autoId}: ${err instanceof Error ? err.message : String(err)}`)
       return { ok: false, error: 'Falha ao pausar a automação. Backend inacessível.' }
     }
-    // Remove do cache imediatamente: o ticker não pode disparar alertas/overlay
-    // enquanto a automação está pausada (o próximo sync também a excluiria).
-    autoMonitorsCache = autoMonitorsCache.filter((m) => m.config.id !== args.monitorId)
+    // Marca como pausado no cache imediatamente: a UI exibe o card na seção de pausados
+    if (targetAuto) {
+      targetAuto.config.paused = true
+    }
     if (camId) {
       stopCameraTickerIfIdle(camId)
     }
@@ -2686,6 +2690,8 @@ async function toolPauseMonitoring(args: { monitorId?: string; all?: boolean }):
 async function toolResumeMonitoring(args: { monitorId?: string; all?: boolean }): Promise<unknown> {
   if (args.monitorId?.startsWith('auto-')) {
     const autoId = args.monitorId.replace('auto-', '')
+    const targetAuto = autoMonitorsCache.find((m) => m.config.id === args.monitorId)
+    const camId = targetAuto?.config.cameraId
     try {
       const res = await hostFetch(`/automations/${autoId}/toggle`, {
         method: 'PATCH',
@@ -2698,6 +2704,17 @@ async function toolResumeMonitoring(args: { monitorId?: string; all?: boolean })
     } catch (err) {
       bridge?.log(`[vision] resume_monitoring: toggle error for automation ${autoId}: ${err instanceof Error ? err.message : String(err)}`)
       return { ok: false, error: 'Falha ao retomar a automação. Backend inacessível.' }
+    }
+    if (targetAuto) {
+      targetAuto.config.paused = false
+      if (camId) {
+        const cam = findCamera(camId)
+        if (cam) {
+          if (cam.source === 'webcam') await ensureWebcamWatch(cam.id)
+          if (cam.source === 'ip') await startMjpeg(cam)
+          ensureCameraTicker(cam.id)
+        }
+      }
     }
     // Força o próximo sync a rodar já no próximo tick, reativando o monitor o
     // quanto antes (o rate-limit do cache é de 3s).
@@ -2815,14 +2832,14 @@ async function getStatusData(): Promise<
   return status
 }
 
-async function fetchHostActiveTriggers(): Promise<any[]> {
+async function fetchHostActiveTriggers(includeDisabled = true): Promise<any[]> {
   // Usa o mesmo padrão de hostFetch do worker: base MOMAI_API_URL + token
   // MOMAI_SESSION_TOKEN + header x-extension-id. Antes era um fetch puro sem
   // Authorization (o node-core rejeitava sem sessão) e, sem env, varria
   // portas fixas 8050/8100/8000/8200 — o fallback agora é 8050 (node-core).
   try {
     const res = await withTimeout(
-      hostFetch('/automations/active-triggers?provider=vision'),
+      hostFetch(`/automations/active-triggers?provider=vision${includeDisabled ? '&include_disabled=true' : ''}`),
       2500,
       'active-triggers'
     )

@@ -4,6 +4,51 @@
   "version": "1.3.4",
   "is_official": true,
   "description": "Veja suas câmeras, receba alertas de movimento e pergunte o que está acontecendo.",
+  "category": "utility",
+  "tags": ["camera", "cctv", "vision", "detection", "security", "rtsp", "onvif"],
+  "readme": {
+    "pt-BR": "README.md",
+    "en-US": "README.en-US.md",
+    "es": "README.es.md"
+  },
+  "locales": {
+    "pt-BR": {
+      "name": "MomAI Vision",
+      "description": "Veja suas câmeras, receba alertas de movimento e pergunte o que está acontecendo.",
+      "category": "utility",
+      "tags": ["câmera", "cftv", "visão", "detecção", "segurança", "rtsp", "onvif"]
+    },
+    "en-US": {
+      "name": "MomAI Vision",
+      "description": "View your cameras, receive motion alerts, and ask what is happening.",
+      "category": "utility",
+      "tags": ["camera", "cctv", "vision", "detection", "security", "rtsp", "onvif"]
+    },
+    "es": {
+      "name": "MomAI Vision",
+      "description": "Vea sus cámaras, reciba alertas de movimiento y pregunte qué está sucediendo.",
+      "category": "utility",
+      "tags": ["cámara", "cctv", "visión", "detección", "seguridad", "rtsp", "onvif"]
+    },
+    "de": {
+      "name": "MomAI Vision",
+      "description": "Sehen Sie Ihre Kameras, erhalten Sie Bewegungsalarme und fragen Sie, was gerade passiert.",
+      "category": "utility",
+      "tags": ["kamera", "cctv", "vision", "erkennung", "sicherheit", "rtsp", "onvif"]
+    },
+    "fr": {
+      "name": "MomAI Vision",
+      "description": "Visualisez vos caméras, recevez des alertes de mouvement et demandez ce qui se passe.",
+      "category": "utility",
+      "tags": ["caméra", "cctv", "vision", "détection", "sécurité", "rtsp", "onvif"]
+    },
+    "it": {
+      "name": "MomAI Vision",
+      "description": "Visualizza le tue telecamere, ricevi avvisi di movimento e chiedi cosa sta succedendo.",
+      "category": "utility",
+      "tags": ["telecamera", "cctv", "visione", "rilevamento", "sicurezza", "rtsp", "onvif"]
+    }
+  },
   "author": "WesleyQDev",
   "icon": "icon.png",
   "icon_url": "https://raw.githubusercontent.com/WesleyQDev/momai-vision/main/icon.png",

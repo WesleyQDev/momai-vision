@@ -10,8 +10,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { getSDK } from 'momai:sdk'
-import { ptLabel, PT_CLASS, triggerLabel } from './vision/labels'
+import { ptLabel, PT_CLASS, triggerLabel, localizedClassLabel, localizedTriggerLabel } from './vision/labels'
 import { AlertCanvasOverlay } from './panel'
+import { useI18n } from './hooks/useI18n'
 import { classColor } from './vision/theme-color'
 import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
 import { filterDetectionsInZone, orderPointsClockwise, createBoxFromCorners, simplifyPolygon, type Point } from './vision/zone'
@@ -20,6 +21,8 @@ import ContextMenu from './components/ContextMenu'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
+
+type TranslateFn = (key: string, vars?: Record<string, string | number>) => string
 
 /**
  * Reflects whether the MomAI host window is maximized. Same contract the host
@@ -239,14 +242,20 @@ function cameraPlaceholderStatus(
   reloading: boolean,
   error: string | null,
   isSlow: boolean,
-  isUnavailable: boolean
+  isUnavailable: boolean,
+  translate?: TranslateFn
 ): string {
-  if (isUnavailable) return 'Sem sinal'
-  if (error) return 'Sem sinal'
-  if (isSlow) return 'Conectando...'
-  if (reloading) return 'Conectando...'
-  if (camera.online) return 'Iniciando...'
-  return 'Conectando...'
+  const text = (key: string, fallback: string): string => {
+    if (!translate) return fallback
+    const translated = translate(key)
+    return translated && translated !== key ? translated : fallback
+  }
+  if (isUnavailable) return text('cameras.noSignal', 'Sem sinal')
+  if (error) return text('cameras.noSignal', 'Sem sinal')
+  if (isSlow) return text('cameras.connecting', 'Conectando...')
+  if (reloading) return text('cameras.connecting', 'Conectando...')
+  if (camera.online) return text('cameras.starting', 'Iniciando...')
+  return text('cameras.connecting', 'Conectando...')
 }
 
 function cameraPlaceholderSubtitle(
@@ -262,18 +271,23 @@ function cameraPlaceholderSubtitle(
   return null
 }
 
-function formatTime(ts?: number): string {
+function formatTime(ts?: number, locale?: string): string {
   if (!ts) return ''
+  const tag = locale || 'pt-BR'
   const d = new Date(ts)
-  const dateStr = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' })
-  const timeStr = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  const dateStr = d.toLocaleDateString(tag, { day: '2-digit', month: '2-digit', year: 'numeric' })
+  const timeStr = d.toLocaleTimeString(tag, { hour: '2-digit', minute: '2-digit' })
   return `${dateStr} ${timeStr}`
 }
 
 // Formata o nome de exibição da câmera: simplifica identificadores longos
 // de webcam/USB como "USB2.0 PC CAMERA (1bcf:28c1)" para "USB 2.0".
-function formatCameraName(name?: string | null, source?: string): string {
-  if (!name) return 'Câmera'
+function formatCameraName(name?: string | null, source?: string, translate?: TranslateFn): string {
+  if (!name) {
+    if (!translate) return 'Câmera'
+    const translated = translate('cameras.fallbackName')
+    return translated && translated !== 'cameras.fallbackName' ? translated : 'Câmera'
+  }
   if (source === 'webcam' || /usb/i.test(name)) {
     const match = name.match(/usb\s*(\d+(?:[.,]\d+)?)/i)
     if (match) {
@@ -924,7 +938,7 @@ function CustomSelect<T extends string = string>({
   value,
   onChange,
   options,
-  placeholder = 'Selecione...',
+  placeholder,
   className = '',
   size = 'md',
   direction = 'down'
@@ -937,6 +951,7 @@ function CustomSelect<T extends string = string>({
   size?: 'sm' | 'md'
   direction?: 'up' | 'down'
 }): JSX.Element {
+  const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
@@ -994,6 +1009,8 @@ function CustomSelect<T extends string = string>({
     }
   }, [open, close])
 
+  const resolvedPlaceholder = placeholder ?? t('common.select')
+
   const selectedOption = options.find((o) => o.value === value)
 
   return (
@@ -1006,7 +1023,7 @@ function CustomSelect<T extends string = string>({
       >
         <span className="flex items-center gap-2 truncate">
           {selectedOption?.icon}
-          <span className="truncate">{selectedOption?.label || placeholder}</span>
+          <span className="truncate">{selectedOption?.label || resolvedPlaceholder}</span>
         </span>
         <svg
           className={`w-3.5 h-3.5 text-text-muted shrink-0 transition-transform duration-200 ${open ? 'rotate-180 text-emerald-400' : ''}`}
@@ -1089,6 +1106,7 @@ function SvgBoxOverlay({
   fit?: 'cover' | 'contain'
   zone?: Point[] | null
 }): JSX.Element | null {
+  const { t } = useI18n()
   const visibleBoxes = useMemo(() => {
     if (!zone || zone.length < 3) return boxes
     return filterDetectionsInZone(boxes, zone)
@@ -1133,7 +1151,7 @@ function SvgBoxOverlay({
                 x={x1 + 3} y={Math.max(tagH - 3, y1 - 3)}
                 fill="#0a0a0a" fontSize={fontSize} fontWeight="600" fontFamily="sans-serif"
               >
-                {ptLabel(box.className)} {Math.round(box.confidence * 100)}%
+                {localizedClassLabel(box.className, t)} {Math.round(box.confidence * 100)}%
               </text>
             </g>
           )
@@ -1157,7 +1175,7 @@ function SvgBoxOverlay({
               x={`${x1 + 0.5}%`} y={`${Math.max(2.8, y1 - 1)}%`}
               fill="#0a0a0a" fontSize="11" fontWeight="600" fontFamily="sans-serif"
             >
-              {ptLabel(box.className)} {Math.round(box.confidence * 100)}%
+              {localizedClassLabel(box.className, t)} {Math.round(box.confidence * 100)}%
             </text>
           </g>
         )
@@ -1195,6 +1213,7 @@ function ZoneOverlay({
   onCancel?: () => void
   onUndo?: () => void
 }): JSX.Element | null {
+  const { t } = useI18n()
   const hasSavedZone = Boolean(zone && zone.length >= 3)
   const isContain = fit === 'contain' && Boolean(frameDims?.w && frameDims?.h)
   const isCompact = fit === 'cover'
@@ -1478,7 +1497,7 @@ function ZoneOverlay({
                 type="button"
                 onClick={() => setIsDropdownOpen((v) => !v)}
                 className="h-5 px-1 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-[9px] border border-white/10 transition-all flex items-center gap-0.5 cursor-pointer"
-                title="Escolher ferramenta de desenho"
+                title={t('monitoring.zoneEditor.drawTool')}
               >
                 <span>
                   {drawMode === 'freehand' ? '✏️' : drawMode === 'box' ? '▢' : '📍'}
@@ -1495,21 +1514,21 @@ function ZoneOverlay({
                     onClick={() => { setDrawMode('freehand'); setIsDropdownOpen(false) }}
                     className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'freehand' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
                   >
-                    <span>✏️</span> <span>Lápis livre</span>
+                    <span>✏️</span> <span>{t('monitoring.zoneEditor.freehand')}</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => { setDrawMode('box'); setIsDropdownOpen(false) }}
                     className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'box' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
                   >
-                    <span>▢</span> <span>Retângulo</span>
+                    <span>▢</span> <span>{t('monitoring.zoneEditor.box')}</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => { setDrawMode('points'); setIsDropdownOpen(false) }}
                     className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'points' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
                   >
-                    <span>📍</span> <span>Pontos</span>
+                    <span>📍</span> <span>{t('monitoring.zoneEditor.points')}</span>
                   </button>
                 </div>
               ) : null}
@@ -1520,7 +1539,7 @@ function ZoneOverlay({
                 type="button"
                 onClick={onUndo}
                 className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white font-medium text-[9px] border border-white/10 transition-all flex items-center justify-center active:scale-90 cursor-pointer"
-                title="Desfazer último ponto"
+                title={t('monitoring.zoneEditor.undo')}
               >
                 <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M3 7v6h6" />
@@ -1534,7 +1553,7 @@ function ZoneOverlay({
                 type="button"
                 onClick={onClear}
                 className="w-5 h-5 rounded bg-white/10 hover:bg-red-500/30 text-red-400 font-medium text-[9px] border border-white/10 transition-all flex items-center justify-center active:scale-90 cursor-pointer"
-                title="Limpar área demarcada"
+                title={t('monitoring.zoneEditor.clear')}
               >
                 <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -1547,7 +1566,7 @@ function ZoneOverlay({
                 type="button"
                 onClick={onCancel}
                 className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white/80 hover:text-white font-bold text-[9px] border border-white/10 transition-all flex items-center justify-center active:scale-90 cursor-pointer"
-                title="Cancelar edição de área"
+                title={t('monitoring.zoneEditor.cancelEdit')}
               >
                 <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="18" y1="6" x2="6" y2="18" />
@@ -1566,12 +1585,12 @@ function ZoneOverlay({
                     ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 cursor-pointer'
                     : 'bg-white/5 text-white/30 border-white/10 cursor-not-allowed'
                 }`}
-                title={draftPoints.length >= 3 ? 'Salvar área demarcada' : 'Desenhe uma área com pelo menos 3 pontos'}
+                title={draftPoints.length >= 3 ? t('monitoring.zoneEditor.saveReady') : t('monitoring.zoneEditor.saveNeedPoints')}
               >
                 <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
-                <span>Salvar</span>
+                <span>{t('common.save')}</span>
               </button>
             ) : null}
           </div>
@@ -1584,10 +1603,10 @@ function ZoneOverlay({
                 type="button"
                 onClick={() => setIsDropdownOpen((v) => !v)}
                 className="px-3 py-1.5 rounded-xl bg-input/60 hover:bg-input text-text font-bold text-xs border border-border/40 transition-colors flex items-center gap-2 shadow-sm"
-                title="Escolher ferramenta de seleção de área"
+                title={t('monitoring.zoneEditor.selectTool')}
               >
                 <span>
-                  {drawMode === 'freehand' ? '✏️ Lápis livre' : drawMode === 'box' ? '▢ Retângulo' : '📍 Pontos'}
+                  {drawMode === 'freehand' ? `✏️ ${t('monitoring.zoneEditor.freehand')}` : drawMode === 'box' ? `▢ ${t('monitoring.zoneEditor.box')}` : `📍 ${t('monitoring.zoneEditor.points')}`}
                 </span>
                 <svg className={`w-3 h-3 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <path d="M6 9l6 6 6-6" />
@@ -1603,8 +1622,8 @@ function ZoneOverlay({
                   >
                     <span className="text-sm">✏️</span>
                     <div>
-                      <div className="font-semibold">Lápis livre</div>
-                      <div className="text-[10px] text-text-muted">Desenhar trajeto contínuo</div>
+                      <div className="font-semibold">{t('monitoring.zoneEditor.freehand')}</div>
+                      <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.freehandHint')}</div>
                     </div>
                   </button>
                   <button
@@ -1614,8 +1633,8 @@ function ZoneOverlay({
                   >
                     <span className="text-sm">▢</span>
                     <div>
-                      <div className="font-semibold">Retângulo</div>
-                      <div className="text-[10px] text-text-muted">Arrastar caixa de 4 cantos</div>
+                      <div className="font-semibold">{t('monitoring.zoneEditor.box')}</div>
+                      <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.boxHint')}</div>
                     </div>
                   </button>
                   <button
@@ -1625,8 +1644,8 @@ function ZoneOverlay({
                   >
                     <span className="text-sm">📍</span>
                     <div>
-                      <div className="font-semibold">Pontos</div>
-                      <div className="text-[10px] text-text-muted">Clicar ponto a ponto na tela</div>
+                      <div className="font-semibold">{t('monitoring.zoneEditor.points')}</div>
+                      <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.pointsHint')}</div>
                     </div>
                   </button>
                 </div>
@@ -1639,7 +1658,7 @@ function ZoneOverlay({
                 onClick={onUndo}
                 className="px-3 py-1 rounded-xl bg-transparent hover:bg-input text-text font-bold text-sm border border-border/40 transition-colors"
               >
-                Desfazer
+                {t('monitoring.zoneEditor.undoShort')}
               </button>
             ) : null}
 
@@ -1649,7 +1668,7 @@ function ZoneOverlay({
                 onClick={onClear}
                 className="px-3 py-1 rounded-xl bg-transparent hover:bg-red-500/20 text-red-500 hover:text-red-400 font-bold text-sm border border-border/40 transition-colors"
               >
-                Limpar
+                {t('monitoring.zoneEditor.clearShort')}
               </button>
             ) : null}
 
@@ -1659,7 +1678,7 @@ function ZoneOverlay({
                 onClick={onCancel}
                 className="px-3 py-1 rounded-xl bg-transparent hover:bg-input text-text font-bold text-sm border border-border/40 transition-colors"
               >
-                Cancelar
+                {t('common.cancel')}
               </button>
             ) : null}
 
@@ -1674,7 +1693,7 @@ function ZoneOverlay({
                     : 'bg-transparent text-text-muted/40 border-border/30 cursor-not-allowed'
                 }`}
               >
-                Salvar
+                {t('common.save')}
               </button>
             ) : null}
           </div>
@@ -1806,6 +1825,7 @@ const CameraCard = memo(function CameraCard({
   // duplicar a carga (2 fetchDirectFrame + 2 frame_pump por ciclo).
   suppressPump?: boolean
 }): JSX.Element {
+  const { t, locale } = useI18n()
   const cardRef = useRef<HTMLDivElement | null>(null)
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
@@ -2184,7 +2204,7 @@ const CameraCard = memo(function CameraCard({
       onError: () => {
         if (cancelled) return
         if (errorRef.current === null) {
-          errorRef.current = 'Sinal instável. Reconectando automaticamente...'
+          errorRef.current = t('cameras.unstable')
           setError(errorRef.current)
         }
       },
@@ -2208,7 +2228,7 @@ const CameraCard = memo(function CameraCard({
             onError: () => {
               if (cancelled) return
               if (errorRef.current === null) {
-                errorRef.current = 'Sinal instável. Reconectando automaticamente...'
+                errorRef.current = t('cameras.unstable')
                 setError(errorRef.current)
               }
             }
@@ -2252,7 +2272,7 @@ const CameraCard = memo(function CameraCard({
         onError: () => {
           if (cancelled) return
           if (errorRef.current === null) {
-            errorRef.current = 'Sinal instável. Reconectando automaticamente...'
+            errorRef.current = t('cameras.unstable')
             setError(errorRef.current)
           }
         }
@@ -2523,7 +2543,7 @@ const CameraCard = memo(function CameraCard({
       <div className="flex items-center justify-between gap-2 px-1 mb-1.5 min-w-0">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-xs font-semibold text-text-muted truncate" title={camera.name}>
-            {formatCameraName(camera.name, camera.source)}
+            {formatCameraName(camera.name, camera.source, t)}
           </span>
           {camera.monitors > 0 ? (
             <span className="text-[10px] font-medium text-text-muted/80 bg-input/60 rounded-full px-1.5 py-0.5 shrink-0">
@@ -2550,7 +2570,7 @@ const CameraCard = memo(function CameraCard({
               onExpand(camera)
             }
           }}
-          title={isEditingZone ? undefined : 'Dois cliques para ampliar'}
+          title={isEditingZone ? undefined : t('cameras.dblClickZoom')}
         >
           <canvas
             ref={frameCanvasRef}
@@ -2562,7 +2582,7 @@ const CameraCard = memo(function CameraCard({
               <span className="vision-eye-blink">
                 <VisionIcon className="w-5 h-5 text-text-muted" />
               </span>
-              <span className="font-medium leading-none">{cameraPlaceholderStatus(camera, reloading, error, isSlow, isUnavailable)}</span>
+              <span className="font-medium leading-none">{cameraPlaceholderStatus(camera, reloading, error, isSlow, isUnavailable, t)}</span>
             </div>
           )}
           {/* Bounding boxes — SVG overlay (filtrado por zona) */}
@@ -2621,10 +2641,10 @@ const CameraCard = memo(function CameraCard({
                 hoverTransform="rotate(-30deg) translateY(-2px) scale(1.2)"
                 title={
                   isEditingZone
-                    ? 'Concluir ou cancelar demarcação da área'
+                    ? t('cameras.zoneFinishCancel')
                     : zone && zone.length >= 3
-                      ? 'Editar área de monitoramento (zona ativa)'
-                      : 'Definir área de monitoramento'
+                      ? t('cameras.zoneEditActive')
+                      : t('cameras.zoneDefine')
                 }
                 onClick={() => onToggleEditZone()}
                 icon={
@@ -2638,7 +2658,7 @@ const CameraCard = memo(function CameraCard({
             {onExpand ? (
               <CardHeaderActionButton
                 hoverTransform="scale(1.35)"
-                title="Ampliar imagem (tela cheia)"
+                title={t('cameras.expandImage')}
                 onClick={() => onExpand(camera)}
                 icon={
                   <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -2652,8 +2672,8 @@ const CameraCard = memo(function CameraCard({
                 hoverTransform="rotate(90deg) scale(1.2)"
                 title={
                   camera.source === 'ip'
-                    ? 'Remover câmera IP (cadastro e exibição)'
-                    : 'Fechar / Remover câmera da exibição'
+                    ? t('cameras.removeIpFull')
+                    : t('cameras.removeDisplay')
                 }
                 onClick={() => onRemove(camera.id)}
                 icon={
@@ -2670,7 +2690,7 @@ const CameraCard = memo(function CameraCard({
       <div className="flex items-center justify-between px-3 py-2 bg-card/95 shrink-0 border-t border-border/30">
         <span className="text-[11px] text-text-muted font-medium px-1 flex items-center gap-1.5">
           <span className={`w-1.5 h-1.5 rounded-full ${camera.online ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-          {camera.source === 'webcam' ? 'Webcam' : 'MJPEG / IP'}
+          {camera.source === 'webcam' ? t('cameras.optWebcam') : t('cameras.mjpegTag')}
         </span>
 
         <div className="flex items-center gap-1.5 shrink-0">
@@ -2679,8 +2699,8 @@ const CameraCard = memo(function CameraCard({
             disabled={reloading}
             onClick={() => void handleReloadCamera()}
             className="w-7 h-7 rounded-lg bg-input hover:bg-card border border-border/40 text-text transition-all flex items-center justify-center shadow-md active:scale-95 disabled:opacity-70"
-            title="Recarregar câmera"
-            aria-label="Recarregar câmera"
+            title={t('cameras.reload')}
+            aria-label={t('cameras.reload')}
           >
             <svg
               className={`w-3.5 h-3.5 ${reloading ? 'animate-spin' : ''}`}
@@ -2711,7 +2731,7 @@ const CameraCard = memo(function CameraCard({
                 <svg className={`w-3.5 h-3.5 ${isEditingZone ? "text-sky-400" : "text-white"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
                   <path d="M20 6L9 17l-5-5" />
                 </svg>
-                Print salvo!
+                {t('cameras.printSaved')}
               </>
             ) : printStatus === 'capturing' ? (
               <>
@@ -2719,7 +2739,7 @@ const CameraCard = memo(function CameraCard({
                   <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
                   <path d="M12 2a10 10 0 0 1 10 10" />
                 </svg>
-                Capturando...
+                {t('cameras.capturing')}
               </>
             ) : (
               <>
@@ -2727,7 +2747,7 @@ const CameraCard = memo(function CameraCard({
                   <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                   <circle cx="12" cy="13" r="4" />
                 </svg>
-                Tirar print
+                {t('cameras.takeSnapshot')}
               </>
             )}
           </button>
@@ -2743,6 +2763,7 @@ const CameraCard = memo(function CameraCard({
 // ---------------------------------------------------------------------------
 
 function AddCameraCard({ onClick }: { onClick: () => void }): JSX.Element {
+  const { t } = useI18n()
   return (
     <div className="flex flex-col min-w-0 h-full">
       <div className="h-[21px] mb-1.5" />
@@ -2757,10 +2778,10 @@ function AddCameraCard({ onClick }: { onClick: () => void }): JSX.Element {
           </svg>
         </div>
         <span className="text-[13px] font-semibold text-text tracking-tight">
-          Adicionar Câmera
+          {t('cameras.add')}
         </span>
         <span className="text-[11px] text-text-muted mt-1 leading-snug">
-          Webcam ou IP
+          {t('cameras.addCardSubtitle')}
         </span>
       </button>
     </div>
@@ -2780,6 +2801,7 @@ function AddCameraModal({
   selectedCameraIds: string[]
   onConfirm: (webcamIds: string[], ipDrafts: Array<{ name: string; url: string }>) => Promise<void>
 }): JSX.Element | null {
+  const { t } = useI18n()
   const isMaximized = useWindowMaximized()
   const [activeTab, setActiveTab] = useState<'webcam' | 'ip'>('webcam')
   const [selectedWebcamId, setSelectedWebcamId] = useState<string>('')
@@ -2834,11 +2856,11 @@ function AddCameraModal({
     if (!url) return
     const id = `ip:${url}`
     if (ipCameras.some((c) => c.id === id)) {
-      setModalError('Esta câmera IP já está cadastrada.')
+      setModalError(t('cameras.addModal.alreadyRegistered'))
       return
     }
     if (pendingIpDrafts.some((d) => `ip:${d.url}` === id)) {
-      setModalError('Esta câmera IP já está na lista de seleção.')
+      setModalError(t('cameras.addModal.alreadyStaged'))
       return
     }
     setPendingIpDrafts((prev) => [...prev, { name: ipName.trim(), url }])
@@ -2875,7 +2897,7 @@ function AddCameraModal({
           const timer = setTimeout(
             () =>
               reject(
-                new Error('Tempo esgotado ao adicionar. Verifique a conexão e tente novamente.')
+                new Error(t('cameras.addModal.addTimeout'))
               ),
             COMMAND_TIMEOUT_MS
           )
@@ -2896,11 +2918,11 @@ function AddCameraModal({
       const url = ipUrl.trim()
       const id = `ip:${url}`
       if (ipCameras.some((c) => c.id === id)) {
-        setModalError('Esta câmera IP já está cadastrada.')
+        setModalError(t('cameras.addModal.alreadyRegistered'))
         return
       }
       if (pendingIpDrafts.some((d) => `ip:${d.url}` === id)) {
-        setModalError('Esta câmera IP já está na lista de seleção.')
+        setModalError(t('cameras.addModal.alreadyStaged'))
         return
       }
       const nextIps = [...pendingIpDrafts, { name: ipName.trim(), url }]
@@ -2910,7 +2932,7 @@ function AddCameraModal({
     if (pendingCount === 0) {
       // Se há texto inválido/incompleto, avisa em vez de silenciar
       if (hasUnsavedIpInput) {
-        setModalError('Preencha uma URL válida (http://, https:// ou rtsp://) ou clique em Adicionar à seleção.')
+        setModalError(t('cameras.addModal.invalidUrl'))
         return
       }
       return
@@ -2920,7 +2942,7 @@ function AddCameraModal({
 
   const webcamOptions: CustomSelectOption[] = webcamCameras
     .filter((cam) => !selectedCameraIds.includes(cam.id) && !pendingWebcamIds.includes(cam.id))
-    .map((cam) => ({ value: cam.id, label: formatCameraName(cam.name, cam.source), badge: 'Disponível' }))
+    .map((cam) => ({ value: cam.id, label: formatCameraName(cam.name, cam.source, t), badge: t('cameras.addModal.available') }))
 
   return createPortal(
     <div
@@ -2943,7 +2965,7 @@ function AddCameraModal({
           <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-border/30 shrink-0">
             <button
               onClick={onClose}
-              aria-label="Voltar"
+              aria-label={t('common.back')}
               className="w-8 h-8 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
             >
               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2955,7 +2977,7 @@ function AddCameraModal({
                 <VisionIcon className="w-3.5 h-3.5 text-emerald-400" />
               </span>
               <h2 id="vision-camera-dialog-title" className="text-[14px] font-semibold text-text tracking-tight">
-                Adicionar Câmeras
+                {t('cameras.addModal.title')}
               </h2>
             </div>
             <span className="w-8 h-8 shrink-0" aria-hidden="true" />
@@ -2977,7 +2999,7 @@ function AddCameraModal({
                 <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                 <circle cx="12" cy="13" r="3.5" />
               </svg>
-              Webcam USB
+              {t('cameras.addModal.webcamTab')}
               <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'webcam' ? 'bg-input text-text' : 'bg-input/60 text-text-muted'}`}>{webcamCameras.length}</span>
             </button>
             <button
@@ -2995,7 +3017,7 @@ function AddCameraModal({
                 <path d="M12 3.5a15 15 0 0 1 3.8 8.5A15 15 0 0 1 12 20.5A15 15 0 0 1 8.2 12 15 15 0 0 1 12 3.5z" />
                 <path d="M3.5 12h17" />
               </svg>
-              Câmeras IP
+              {t('cameras.addModal.ipTab')}
               <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'ip' ? 'bg-input text-text' : 'bg-input/60 text-text-muted'}`}>{ipCameras.length}</span>
             </button>
           </div>
@@ -3005,16 +3027,16 @@ function AddCameraModal({
                 {activeTab === 'webcam' && (
                   <div className="animate-fadeIn overflow-visible">
                     <label className="text-[11px] font-medium text-text-muted block mb-2">
-                      Webcam disponível
+                      {t('cameras.addModal.webcamAvailable')}
                     </label>
 
                     {webcamCameras.length === 0 ? (
                       <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-6 text-center bg-input/20">
-                        Nenhuma webcam USB detectada.
+                        {t('cameras.addModal.noWebcam')}
                       </div>
                     ) : webcamOptions.length === 0 ? (
                       <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-6 text-center bg-input/20">
-                        Todas já estão na seleção.
+                        {t('cameras.addModal.allSelected')}
                       </div>
                     ) : (
                       <div className="relative overflow-visible z-30 max-w-[360px]">
@@ -3022,12 +3044,12 @@ function AddCameraModal({
                           value={selectedWebcamId}
                           onChange={handleSelectWebcam}
                           options={webcamOptions}
-                          placeholder="Selecione uma webcam..."
+                          placeholder={t('cameras.addModal.selectWebcam')}
                           size="sm"
                           direction="down"
                           className="w-full"
                         />
-                        <p className="text-[11px] text-text-muted mt-2">Selecione para adicionar.</p>
+                        <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.selectToAdd')}</p>
                       </div>
                     )}
                   </div>
@@ -3040,19 +3062,19 @@ function AddCameraModal({
                       <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.7fr] gap-3">
                         <div>
                           <label htmlFor="vision-ip-name" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                            Nome <span className="text-text-muted/60 font-normal">— opcional</span>
+                            {t('cameras.addModal.nameLabel')} <span className="text-text-muted/60 font-normal">{t('cameras.addModal.nameOptional')}</span>
                           </label>
                         <input
                           id="vision-ip-name"
                           value={ipName}
                           onChange={(e) => setIpName(e.target.value)}
-                          placeholder="Nome da câmera (ex.: Garagem, Entrada)"
+                          placeholder={t('cameras.addModal.namePlaceholder')}
                           className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
                         />
                       </div>
                       <div>
                         <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                          URL da câmera
+                          {t('cameras.addModal.urlLabel')}
                         </label>
                         <input
                           id="vision-ip-url"
@@ -3064,7 +3086,7 @@ function AddCameraModal({
                               handleStageIp()
                             }
                           }}
-                          placeholder="URL (http://ip:porta/video ou rtsp://user:pass@ip)"
+                          placeholder={t('cameras.addModal.urlPlaceholder')}
                           className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
                         />
                       </div>
@@ -3079,11 +3101,11 @@ function AddCameraModal({
                           <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <path d="M12 5v14M5 12h14" />
                           </svg>
-                          Adicionar à seleção
+                          {t('cameras.addModal.addToSelection')}
                         </button>
                       </div>
                       {hasUnsavedValidIp ? (
-                        <p className="text-[11px] text-text-muted text-center">Vai entrar ao confirmar — pode adicionar mais.</p>
+                        <p className="text-[11px] text-text-muted text-center">{t('cameras.addModal.addHint')}</p>
                       ) : null}
                     </div>
                   </div>
@@ -3092,8 +3114,8 @@ function AddCameraModal({
             {pendingCount > 0 && (
               <div className="rounded-xl border border-border/40 bg-input/30 overflow-hidden">
                 <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-border/30">
-                  <span className="text-[11px] font-semibold text-text">Revisão</span>
-                  <span className="text-[10px] text-text-muted">{pendingCount} {pendingCount === 1 ? 'câmera' : 'câmeras'} · confirmação única</span>
+                  <span className="text-[11px] font-semibold text-text">{t('cameras.addModal.review')}</span>
+                  <span className="text-[10px] text-text-muted">{pendingCount} {pendingCount === 1 ? t('cameras.addModal.cameraOne') : t('cameras.addModal.cameraOther')} · {t('cameras.addModal.confirmOnce')}</span>
                 </div>
                 <div className="max-h-[160px] overflow-y-auto custom-scrollbar">
                   <ul className="divide-y divide-border/20">
@@ -3116,7 +3138,7 @@ function AddCameraModal({
                           <button
                             type="button"
                             onClick={() => removePendingWebcam(id)}
-                            aria-label={`Remover ${cam?.name || id} da seleção`}
+                            aria-label={t('cameras.addModal.removeFromSelection', { name: cam?.name || id })}
                             className="w-6 h-6 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-red-400 flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
                           >
                             <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -3144,7 +3166,7 @@ function AddCameraModal({
                         <button
                           type="button"
                           onClick={() => removePendingIp(i)}
-                          aria-label={`Remover ${draft.name || draft.url} da seleção`}
+                          aria-label={t('cameras.addModal.removeFromSelection', { name: draft.name || draft.url })}
                           className="w-6 h-6 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-red-400 flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
                         >
                           <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -3172,7 +3194,7 @@ function AddCameraModal({
                 onClick={onClose}
                 className="rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-4 py-2 text-[11px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
               >
-                Cancelar
+                {t('common.cancel')}
               </button>
               <button
                 type="button"
@@ -3184,10 +3206,10 @@ function AddCameraModal({
                   }`}
               >
                 {submitting
-                  ? 'Adicionando...'
+                  ? t('cameras.addModal.adding')
                   : effectivePendingCount === 0
-                    ? 'Nenhuma câmera selecionada'
-                    : `Adicionar ${effectivePendingCount === 1 ? '1 câmera' : `${effectivePendingCount} câmeras`}`}
+                    ? t('cameras.addModal.noneSelected')
+                    : (effectivePendingCount === 1 ? t('cameras.addModal.confirmOne') : t('cameras.addModal.confirmMany', { count: effectivePendingCount }))}
               </button>
             </div>
           </div>
@@ -3226,6 +3248,7 @@ function ExpandedCameraModal({
   onSaveZone?: (points: Point[]) => void
   onClearZone?: () => void
 }): JSX.Element | null {
+  const { t, locale } = useI18n()
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const frameBoxRef = useRef<HTMLDivElement | null>(null)
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
@@ -3522,7 +3545,7 @@ function ExpandedCameraModal({
       onError: () => {
         if (cancelled) return
         if (errorRef.current === null) {
-          errorRef.current = 'Sinal instável. Reconectando automaticamente...'
+          errorRef.current = t('cameras.unstable')
           setError(errorRef.current)
         }
       },
@@ -3546,7 +3569,7 @@ function ExpandedCameraModal({
             onError: () => {
               if (cancelled) return
               if (errorRef.current === null) {
-                errorRef.current = 'Sinal instável. Reconectando automaticamente...'
+                errorRef.current = t('cameras.unstable')
                 setError(errorRef.current)
               }
             }
@@ -3580,7 +3603,7 @@ function ExpandedCameraModal({
         onError: () => {
           if (cancelled) return
           if (errorRef.current === null) {
-            errorRef.current = 'Sinal instável. Reconectando automaticamente...'
+            errorRef.current = t('cameras.unstable')
             setError(errorRef.current)
           }
         }
@@ -3617,8 +3640,8 @@ function ExpandedCameraModal({
           <div className="w-12 shrink-0" />
           <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 max-w-[45%] pointer-events-none">
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
-            <h2 className="text-base font-bold text-text truncate">{formatCameraName(camera.name, camera.source)}</h2>
-            <span className="text-xs text-text-muted shrink-0">({isWebcam ? 'Webcam' : 'IP / RTSP'})</span>
+            <h2 className="text-base font-bold text-text truncate">{formatCameraName(camera.name, camera.source, t)}</h2>
+            <span className="text-xs text-text-muted shrink-0">({isWebcam ? t('cameras.optWebcam') : t('cameras.ipSlashRtsp')})</span>
           </div>
           <div className="flex items-center gap-2 shrink-0 ml-auto z-10">
             {onToggleEditZone ? (
@@ -3632,17 +3655,17 @@ function ExpandedCameraModal({
                 }`}
                 title={
                   isEditingZone
-                    ? 'Concluir ou cancelar demarcação da área'
+                    ? t('cameras.zoneFinishCancel')
                     : zone && zone.length >= 3
-                      ? 'Editar área de monitoramento (zona ativa)'
-                      : 'Definir área de monitoramento'
+                      ? t('cameras.zoneEditActive')
+                      : t('cameras.zoneDefine')
                 }
               >
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.623l4.353-1.32a2 2 0 0 0 .83-.497z" />
                   <path d="m15 5 4 4" />
                 </svg>
-                <span>{isEditingZone ? 'Editando área...' : zone && zone.length >= 3 ? 'Área ativa' : 'Definir área'}</span>
+                <span>{isEditingZone ? t('monitoring.zoneEditor.editing') : zone && zone.length >= 3 ? t('monitoring.zoneEditor.activeState') : t('monitoring.zoneEditor.define')}</span>
               </button>
             ) : null}
             <button
@@ -3660,7 +3683,7 @@ function ExpandedCameraModal({
                   <svg className="w-3.5 h-3.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
                     <path d="M20 6L9 17l-5-5" />
                   </svg>
-                  Print salvo!
+                  {t('cameras.printSaved')}
                 </>
               ) : printStatus === 'capturing' ? (
                 <>
@@ -3668,7 +3691,7 @@ function ExpandedCameraModal({
                     <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
                     <path d="M12 2a10 10 0 0 1 10 10" />
                   </svg>
-                  Capturando...
+                  {t('cameras.capturing')}
                 </>
               ) : (
                 <>
@@ -3676,7 +3699,7 @@ function ExpandedCameraModal({
                     <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
                     <circle cx="12" cy="13" r="4" />
                   </svg>
-                  Tirar print
+                  {t('cameras.takeSnapshot')}
                 </>
               )}
             </button>
@@ -3701,7 +3724,7 @@ function ExpandedCameraModal({
               onClose()
             }
           }}
-          title={isEditingZone ? undefined : 'Dois cliques para fechar'}
+          title={isEditingZone ? undefined : t('cameras.dblClickClose')}
         >
           <canvas
             ref={frameCanvasRef}
@@ -3764,6 +3787,7 @@ function ExpandedPrintModal({
   onContextMenu?: (e: React.MouseEvent, snap: Snapshot) => void
   busy: boolean
 }): JSX.Element | null {
+  const { t, locale } = useI18n()
   if (!snap) return null
 
   const imgSrc =
@@ -3778,8 +3802,8 @@ function ExpandedPrintModal({
       <div className="h-full flex flex-col">
         <div className="flex items-center justify-between px-5 py-3 border-b border-white/10 bg-black/40 shrink-0">
           <div>
-            <h2 className="text-sm font-bold text-white">Print da Câmera</h2>
-            <p className="text-xs text-gray-400">{formatTime(snap.ts)}</p>
+            <h2 className="text-sm font-bold text-white">{t('gallery.cameraPrints')}</h2>
+            <p className="text-xs text-gray-400">{formatTime(snap.ts, locale)}</p>
           </div>
           <button
             onClick={onClose}
@@ -3796,18 +3820,18 @@ function ExpandedPrintModal({
           onContextMenu={(e) => onContextMenu?.(e, snap)}
           className="flex-1 min-h-0 relative bg-black flex items-center justify-center p-4 cursor-context-menu"
         >
-          <img src={imgSrc} alt={snap.description || 'Print'} className="max-w-full max-h-full object-contain" />
+          <img src={imgSrc} alt={snap.description || t('gallery.printAlt')} className="max-w-full max-h-full object-contain" />
         </div>
 
         <div className="px-4 py-3 bg-zinc-900 border-t border-white/10 flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <p className="text-xs text-gray-300 max-w-xl">{snap.description || 'Sem descrição.'}</p>
+          <p className="text-xs text-gray-300 max-w-xl">{snap.description || t('gallery.noDescription')}</p>
           <div className="flex items-center gap-2 shrink-0">
             <button
               disabled={busy}
               onClick={() => void onDescribe(snap.id)}
               className="text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3 py-1.5 transition-colors shrink-0"
             >
-              Descrever de novo
+              {t('gallery.describeAgain')}
             </button>
             <button
               disabled={busy}
@@ -3818,7 +3842,7 @@ function ExpandedPrintModal({
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
               </svg>
-              Excluir
+              {t('common.delete')}
             </button>
           </div>
         </div>
@@ -3840,6 +3864,7 @@ function ExpandedAlertModal({
   onClose: () => void
   onContextMenu?: (e: React.MouseEvent, alert: Alert) => void
 }): JSX.Element | null {
+  const { t, locale } = useI18n()
   if (!alert) return null
 
   const imgSrc =
@@ -3857,16 +3882,16 @@ function ExpandedAlertModal({
         <div className="flex items-center gap-2 min-w-0">
           <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
           <h2 className="text-sm font-bold text-white truncate">
-            {formatCameraName(alert.cameraName, 'webcam') || 'Câmera'}
-            {alert.className ? ` · ${ptLabel(alert.className)}` : ''}
+            {formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')}
+            {alert.className ? ` · ${localizedClassLabel(alert.className, t)}` : ''}
             {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
           </h2>
-          <span className="text-xs text-gray-400 shrink-0">({formatTime(alert.ts)})</span>
+          <span className="text-xs text-gray-400 shrink-0">({formatTime(alert.ts, locale)})</span>
         </div>
         <button
           onClick={onClose}
           className="text-gray-400 hover:text-white rounded-lg p-1.5 hover:bg-white/10 transition-colors"
-          title="Fechar"
+          title={t('common.close')}
         >
           <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <line x1="18" y1="6" x2="6" y2="18" />
@@ -3886,7 +3911,7 @@ function ExpandedAlertModal({
             objectFit="object-contain"
           />
         ) : (
-          <p className="text-sm text-gray-400">Sem imagem de alerta disponível.</p>
+          <p className="text-sm text-gray-400">{t('alerts.noImage')}</p>
         )}
       </div>
 
@@ -3894,7 +3919,7 @@ function ExpandedAlertModal({
         <div className="px-5 py-3 bg-zinc-900 border-t border-white/10 shrink-0 flex items-center gap-2">
           <p className="text-xs text-gray-300">{alert.description}</p>
           {alert.triggeredBy ? (
-            <span className="text-xs text-gray-500 shrink-0">{triggerLabel(alert)}</span>
+            <span className="text-xs text-gray-500 shrink-0">{localizedTriggerLabel(alert, t)}</span>
           ) : null}
         </div>
       ) : null}
@@ -3903,38 +3928,41 @@ function ExpandedAlertModal({
 }
 
 const TRIGGER_TYPES = [
-  { value: 'motion', label: 'Movimento (Detecção de Mudança na Câmera)' },
-  { value: 'object', label: 'Detecção de Objetos' },
-  { value: 'person', label: 'Pessoas' },
-  { value: 'animal', label: 'Animais' },
-  { value: 'presence', label: 'Presença Cumulativa / Permanência' },
-  { value: 'absence', label: 'Ausência / Desaparecimento da Cena' }
+  { value: 'motion', labelKey: 'monitoring.typeMotion' },
+  { value: 'object', labelKey: 'monitoring.typeObject' },
+  { value: 'person', labelKey: 'monitoring.typePeople' },
+  { value: 'animal', labelKey: 'monitoring.typeAnimals' },
+  { value: 'presence', labelKey: 'monitoring.typePresence' },
+  { value: 'absence', labelKey: 'monitoring.typeAbsence' }
 ]
 
 const SENSITIVITY_OPTIONS = [
-  { value: 'med', label: 'Média (Recomendado)' },
-  { value: 'low', label: 'Baixa (Apenas movimentos grandes)' },
-  { value: 'high', label: 'Alta (Qualquer movimento)' }
+  { value: 'med', labelKey: 'monitoring.sensMed' },
+  { value: 'low', labelKey: 'monitoring.sensLow' },
+  { value: 'high', labelKey: 'monitoring.sensHigh' }
 ]
 
 const ANIMAL_KEYS = ['dog', 'cat', 'bird', 'horse', 'sheep', 'cow', 'bear', 'elephant', 'zebra', 'giraffe']
 
-const ANIMAL_OBJECT_OPTIONS = ANIMAL_KEYS.map((key) => ({
-  value: key,
-  label: `${PT_CLASS[key] ? PT_CLASS[key].charAt(0).toUpperCase() + PT_CLASS[key].slice(1) : key} (${key})`
-}))
+function objectOptionLabel(key: string, translate?: TranslateFn): string {
+  const base = translate ? localizedClassLabel(key, translate) : ptLabel(key)
+  const label = base || key
+  return `${label.charAt(0).toUpperCase() + label.slice(1)} (${key})`
+}
 
-const INANIMATE_OBJECT_OPTIONS = Object.entries(PT_CLASS)
-  .filter(([key]) => key !== 'person' && !ANIMAL_KEYS.includes(key))
-  .map(([key, label]) => ({
-    value: key,
-    label: `${label.charAt(0).toUpperCase() + label.slice(1)} (${key})`
-  }))
+function animalObjectOptions(translate?: TranslateFn): Array<{ value: string; label: string }> {
+  return ANIMAL_KEYS.map((key) => ({ value: key, label: objectOptionLabel(key, translate) }))
+}
 
-const ALL_OBJECT_OPTIONS = Object.entries(PT_CLASS).map(([key, label]) => ({
-  value: key,
-  label: `${label.charAt(0).toUpperCase() + label.slice(1)} (${key})`
-}))
+function inanimateObjectOptions(translate?: TranslateFn): Array<{ value: string; label: string }> {
+  return Object.entries(PT_CLASS)
+    .filter(([key]) => key !== 'person' && !ANIMAL_KEYS.includes(key))
+    .map(([key]) => ({ value: key, label: objectOptionLabel(key, translate) }))
+}
+
+function allObjectOptions(translate?: TranslateFn): Array<{ value: string; label: string }> {
+  return Object.entries(PT_CLASS).map(([key]) => ({ value: key, label: objectOptionLabel(key, translate) }))
+}
 
 const COOLDOWN_PRESETS = [
   { label: '30s', seconds: 30 },
@@ -3956,36 +3984,43 @@ function formatCooldown(sec?: number): string {
   return `${sec}s`
 }
 
-function formatTriggerPortuguese(t: MonitorTriggerInfo): string {
-  switch (t.type) {
+function formatTriggerPortuguese(trigger: MonitorTriggerInfo, translate?: TranslateFn): string {
+  const pick = (key: string, fallback: string, vars?: Record<string, string | number>): string => {
+    if (!translate) return fallback
+    const translated = vars ? translate(key, vars) : translate(key)
+    return translated && translated !== key ? translated : fallback
+  }
+  const classLabel = (name?: string, fallback = ''): string =>
+    translate ? localizedClassLabel(name, translate) || fallback : ptLabel(name) || fallback
+  switch (trigger.type) {
     case 'motion':
-      return `Movimento (${t.sensitivity === 'high' ? 'Alta sensibilidade' : t.sensitivity === 'low' ? 'Baixa sensibilidade' : 'Sensibilidade média'})`
+      return `${pick('monitoring.sumMotion', 'Movimento')} (${trigger.sensitivity === 'high' ? pick('monitoring.sumHigh', 'Alta sensibilidade') : trigger.sensitivity === 'low' ? pick('monitoring.sumLow', 'Baixa sensibilidade') : pick('monitoring.sumMed', 'Sensibilidade média')})`
     case 'object':
-      if (t.className === 'person') {
-        return `Pessoas (${t.present === false ? 'Ausente' : 'Detectar presença'})`
+      if (trigger.className === 'person') {
+        return `${pick('monitoring.sumPeople', 'Pessoas')} (${trigger.present === false ? pick('monitoring.sumAbsent', 'Ausente') : pick('monitoring.sumDetectPresence', 'Detectar presença')})`
       }
-      if (ANIMAL_KEYS.includes(t.className || '')) {
-        return `Animal: ${ptLabel(t.className)} (${t.present === false ? 'Ausente' : 'Presente'})`
+      if (ANIMAL_KEYS.includes(trigger.className || '')) {
+        return `${pick('monitoring.sumAnimal', 'Animal')}: ${classLabel(trigger.className)} (${trigger.present === false ? pick('monitoring.sumAbsent', 'Ausente') : pick('monitoring.sumPresent', 'Presente')})`
       }
-      return `Objeto: ${ptLabel(t.className || 'objeto')} (${t.present === false ? 'Ausente' : 'Presente'})`
+      return `${pick('monitoring.sumObject', 'Objeto')}: ${classLabel(trigger.className, 'objeto')} (${trigger.present === false ? pick('monitoring.sumAbsent', 'Ausente') : pick('monitoring.sumPresent', 'Presente')})`
     case 'presence':
-      return `Presença: ${ptLabel(t.className || 'pessoa')} (${t.event === 'entered' ? 'Entrou' : t.event === 'left' ? 'Saiu' : 'Permaneceu'}${t.windowSec ? `, ${t.windowSec}s` : ''})`
+      return `${pick('monitoring.sumPresence', 'Presença')}: ${classLabel(trigger.className, 'pessoa')} (${trigger.event === 'entered' ? pick('monitoring.sumEntered', 'Entrou') : trigger.event === 'left' ? pick('monitoring.sumLeft', 'Saiu') : pick('monitoring.sumStayed', 'Permaneceu')}${trigger.windowSec ? `, ${trigger.windowSec}s` : ''})`
     case 'absence':
-      return `Ausência: ${ptLabel(t.className || 'pessoa')}${t.windowSec ? ` (${t.windowSec}s)` : ''}`
+      return `${pick('monitoring.sumAbsence', 'Ausência')}: ${classLabel(trigger.className, 'pessoa')}${trigger.windowSec ? ` (${trigger.windowSec}s)` : ''}`
     case 'scene':
-      return `Pergunta IA: "${t.question}"`
+      return pick('monitoring.sumAiQuestion', `Pergunta IA: "${trigger.question}"`, { question: trigger.question || '' })
     case 'periodic':
-      return `Resumo a cada ${t.everySec || 300}s`
+      return pick('monitoring.sumEvery', `Resumo a cada ${trigger.everySec || 300}s`, { sec: trigger.everySec || 300 })
     default:
       if (
-        !t.type ||
-        t.type === 'momai-vision.vision_alert' ||
-        t.type === 'vision_alert' ||
-        t.type === 'vision:detection'
+        !trigger.type ||
+        trigger.type === 'momai-vision.vision_alert' ||
+        trigger.type === 'vision_alert' ||
+        trigger.type === 'vision:detection'
       ) {
         return ''
       }
-      return t.type
+      return trigger.type
   }
 }
 
@@ -3997,16 +4032,46 @@ interface AddEditMonitorModalProps {
   onSave: (updated?: Partial<MonitorInfo>) => Promise<void> | void
 }
 
-const EVENT_PLACEHOLDERS = [
-  { token: '{cameraName}', label: 'Câmera' },
-  { token: '{description}', label: 'Descrição' },
-  { token: '{ts}', label: 'Horário' },
-  { token: '{event.imageDataUri}', label: 'Imagem' }
-]
+function eventPlaceholders(translate?: TranslateFn): Array<{ token: string; label: string }> {
+  const pick = (key: string, fallback: string): string => {
+    if (!translate) return fallback
+    const translated = translate(key)
+    return translated && translated !== key ? translated : fallback
+  }
+  return [
+    { token: '{cameraName}', label: pick('monitoring.phCamera', 'Câmera') },
+    { token: '{description}', label: pick('monitoring.phDescription', 'Descrição') },
+    { token: '{ts}', label: pick('monitoring.phTime', 'Horário') },
+    { token: '{event.imageDataUri}', label: pick('monitoring.phImage', 'Imagem') }
+  ]
+}
 
-// i18n pt-BR: traduz nomes de tools e campos para o seletor, mantendo o nome
-// técnico apenas como fallback.
-const TOOL_LABELS: Record<string, string> = {
+// Human-readable fallback labels (pt-BR) for tool and field names shown in
+// the action selector. The locale dictionary takes precedence when a
+// translate function is provided; the technical name stays as last resort.
+const TOOL_LABEL_KEYS: Record<string, string> = {
+  send_message: 'monitoring.tools.sendMessage',
+  list_contacts: 'monitoring.tools.listContacts',
+  add_contact: 'monitoring.tools.addContact',
+  remove_contact: 'monitoring.tools.removeContact',
+  get_stats: 'monitoring.tools.getStats',
+  get_history: 'monitoring.tools.getHistory',
+  get_wa_contacts: 'monitoring.tools.getWaContacts',
+  get_wa_groups: 'monitoring.tools.getWaGroups',
+  control_device: 'monitoring.tools.controlDevice',
+  set_light_color: 'monitoring.tools.setLightColor',
+  control_tv_remote: 'monitoring.tools.controlTv',
+  control_climate: 'monitoring.tools.controlClimate',
+  call_ha_service: 'monitoring.tools.callHa',
+  list_devices: 'monitoring.tools.listDevices',
+  query_device: 'monitoring.tools.queryDevice',
+  capture_snapshot: 'monitoring.tools.captureSnapshot',
+  start_monitoring: 'monitoring.tools.startMonitoring',
+  set_actions: 'monitoring.tools.setActions',
+  get_actions: 'monitoring.tools.getActions'
+}
+
+const TOOL_LABEL_FALLBACK: Record<string, string> = {
   send_message: 'Enviar mensagem',
   list_contacts: 'Listar contatos',
   add_contact: 'Adicionar contato',
@@ -4026,6 +4091,26 @@ const TOOL_LABELS: Record<string, string> = {
   start_monitoring: 'Iniciar monitoramento',
   set_actions: 'Configurar ações',
   get_actions: 'Ver ações'
+}
+
+const PARAM_LABEL_KEYS: Record<string, string> = {
+  contact: 'monitoring.params.contact',
+  message: 'monitoring.params.message',
+  image: 'monitoring.params.image',
+  media: 'monitoring.params.media',
+  device_name: 'monitoring.params.deviceName',
+  action: 'monitoring.params.action',
+  brightness: 'monitoring.params.brightness',
+  color: 'monitoring.params.color',
+  temperature: 'monitoring.params.temperature',
+  domain: 'monitoring.params.domain',
+  service: 'monitoring.params.service',
+  data: 'monitoring.params.data',
+  room: 'monitoring.params.room',
+  cameraId: 'monitoring.params.cameraId',
+  camera: 'monitoring.params.camera',
+  monitorId: 'monitoring.params.monitorId',
+  label: 'monitoring.params.label'
 }
 
 const PARAM_LABELS: Record<string, string> = {
@@ -4052,22 +4137,36 @@ function humanizeKey(key: string): string {
   return key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
-function toolLabel(name: string): string {
-  return TOOL_LABELS[name] || humanizeKey(name)
+function lookupLabel(
+  keys: Record<string, string>,
+  fallback: Record<string, string>,
+  name: string,
+  translate?: TranslateFn
+): string {
+  const key = keys[name]
+  if (translate && key) {
+    const translated = translate(key)
+    if (translated && translated !== key) return translated
+  }
+  return fallback[name] || humanizeKey(name)
 }
 
-function paramLabel(key: string): string {
-  return PARAM_LABELS[key] || humanizeKey(key)
+function toolLabel(name: string, translate?: TranslateFn): string {
+  return lookupLabel(TOOL_LABEL_KEYS, TOOL_LABEL_FALLBACK, name, translate)
+}
+
+function paramLabel(key: string, translate?: TranslateFn): string {
+  return lookupLabel(PARAM_LABEL_KEYS, PARAM_LABELS, key, translate)
 }
 
 // Formata os args de uma ação em texto legível, ex.: "Dispositivo: Luz, Cor: verde".
-function formatActionArgs(args?: Record<string, unknown>): string {
+function formatActionArgs(args?: Record<string, unknown>, translate?: TranslateFn): string {
   if (!args) return ''
   return Object.entries(args)
     .filter(([, v]) => !(typeof v === 'string' && !v.trim()))
     .map(([k, v]) => {
       const val = v && typeof v === 'object' ? JSON.stringify(v) : String(v)
-      return `${paramLabel(k)}: ${val}`
+      return `${paramLabel(k, translate)}: ${val}`
     })
     .join(' · ')
 }
@@ -4093,6 +4192,7 @@ function ActionEditor({
   onChange: (next: MonitorActionUI[]) => void
   footerButton?: boolean
 }): JSX.Element {
+  const { t } = useI18n()
   const [catalog, setCatalog] = useState<CatalogExt[]>([])
   const [showDraft, setShowDraft] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -4119,19 +4219,19 @@ function ActionEditor({
   }, [])
 
   const targetExt = catalog.find((e) => e.id === target)
-  const toolDef = targetExt?.tools?.find((t) => t.name === tool)
+  const toolDef = targetExt?.tools?.find((toolItem) => toolItem.name === tool)
 
   function selectTarget(nextTarget: string) {
     setTarget(nextTarget)
     const ext = catalog.find((e) => e.id === nextTarget)
-    const first = ext?.tools?.find((t) => t.name !== 'get_actions' && t.name !== 'set_actions') || ext?.tools?.[0]
+    const first = ext?.tools?.find((toolItem) => toolItem.name !== 'get_actions' && toolItem.name !== 'set_actions') || ext?.tools?.[0]
     setTool(first?.name || '')
     setDraftArgs(first ? defaultArgsFor(first) : {})
   }
 
   function selectTool(nextTool: string) {
     setTool(nextTool)
-    setDraftArgs(defaultArgsFor(targetExt?.tools?.find((t) => t.name === nextTool) as CatalogTool))
+    setDraftArgs(defaultArgsFor(targetExt?.tools?.find((toolItem) => toolItem.name === nextTool) as CatalogTool))
   }
 
   function defaultArgsFor(def: CatalogTool | undefined): Record<string, unknown> {
@@ -4187,7 +4287,7 @@ function ActionEditor({
     <div className="space-y-3">
       <div className={`${footerButton ? 'flex items-center' : 'flex items-center justify-between'}`}>
         <label className="block text-xs font-semibold text-text-muted">
-          Ações automáticas (o que fazer quando disparar)
+          {t('monitoring.actionsTitle')}
         </label>
         {!footerButton ? (
           <button
@@ -4195,15 +4295,14 @@ function ActionEditor({
             onClick={toggleDraft}
             className="text-[11px] font-medium text-emerald-400 hover:opacity-80 border border-emerald-500/30 hover:border-emerald-500 px-2.5 py-1 rounded-lg transition-colors"
           >
-            {showDraft ? 'Cancelar' : '+ Adicionar ação'}
+            {showDraft ? t('common.cancel') : t('monitoring.addActionPlus')}
           </button>
         ) : null}
       </div>
 
       {actions.length === 0 && !showDraft ? (
         <p className="text-[11px] text-text-muted/70">
-          Ex.: detectou pessoa → WhatsApp envia mensagem com o print. Campos
-          disponíveis: {EVENT_PLACEHOLDERS.map((p) => p.label).join(', ')}
+          {t('monitoring.actionsHint', { fields: eventPlaceholders(t).map((p) => p.label).join(', ') })}
         </p>
       ) : null}
 
@@ -4216,10 +4315,10 @@ function ActionEditor({
             <div className="text-xs font-medium text-text">
               {catalog.find((e) => e.id === a.target)?.name || a.target}
               <span className="text-text-muted"> / </span>
-              {toolLabel(a.tool)}
+              {toolLabel(a.tool, t)}
             </div>
             {a.args && Object.keys(a.args).length > 0 ? (
-              <div className="text-[11px] text-text-muted/70 truncate">{formatActionArgs(a.args)}</div>
+              <div className="text-[11px] text-text-muted/70 truncate">{formatActionArgs(a.args, t)}</div>
             ) : null}
           </div>
           <div className="flex items-center gap-1 shrink-0">
@@ -4227,8 +4326,8 @@ function ActionEditor({
               type="button"
               onClick={() => startEdit(a)}
               className="p-1 text-text-muted hover:text-emerald-400 hover:bg-emerald-500/10 rounded-md transition-colors"
-              aria-label="Editar ação"
-              title="Editar ação"
+              aria-label={t('monitoring.editAction')}
+              title={t('monitoring.editAction')}
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
@@ -4238,7 +4337,7 @@ function ActionEditor({
               type="button"
               onClick={() => onChange(actions.filter((_, j) => j !== i))}
               className="text-gray-500 hover:text-red-400 text-sm"
-              aria-label="Remover ação"
+              aria-label={t('monitoring.removeAction')}
             >
               ×
             </button>
@@ -4250,14 +4349,14 @@ function ActionEditor({
         <div className="space-y-3 bg-white/[0.03] border border-border/60 rounded-xl p-3">
           <div>
             <label className="block text-[11px] font-semibold text-text-muted mb-1">
-              Extensão alvo
+              {t('monitoring.targetExt')}
             </label>            <select
               value={target}
               onChange={(e) => selectTarget(e.target.value)}
               className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500"
             >
               {catalog.length === 0 ? (
-                <option value="">Nenhuma extensão com ações instalada</option>
+                <option value="">{t('monitoring.noActionsExt')}</option>
               ) : null}
               {catalog.map((ext) => (
                 <option key={ext.id} value={ext.id}>
@@ -4270,17 +4369,17 @@ function ActionEditor({
           {toolDef ? (
             <>
               <div>
-                <label className="block text-[11px] font-semibold text-text-muted mb-1">Ação</label>
+                <label className="block text-[11px] font-semibold text-text-muted mb-1">{t('monitoring.actionField')}</label>
                 <select
                   value={tool}
                   onChange={(e) => selectTool(e.target.value)}
                   className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500"
                 >
                   {targetExt?.tools
-                    ?.filter((t) => t.name !== 'get_actions' && t.name !== 'set_actions')
-                    .map((t) => (
-                      <option key={t.name} value={t.name}>
-                        {toolLabel(t.name)}
+                    ?.filter((toolItem) => toolItem.name !== 'get_actions' && toolItem.name !== 'set_actions')
+                    .map((toolItem) => (
+                      <option key={toolItem.name} value={toolItem.name}>
+                        {toolLabel(toolItem.name, t)}
                       </option>
                     ))}
                 </select>
@@ -4290,8 +4389,8 @@ function ActionEditor({
                 {Object.entries(props).map(([key, param]) => (
                   <div key={key}>
                     <label className="block text-[11px] font-semibold text-text-muted mb-1">
-                      {paramLabel(key)}
-                      {param?.default !== undefined ? ' (pré-preenchido)' : ''}
+                      {paramLabel(key, t)}
+                      {param?.default !== undefined ? t('monitoring.prefilled') : ''}
                     </label>
                     {param?.enum ? (
                       <select
@@ -4327,7 +4426,7 @@ function ActionEditor({
               </div>
 
               <div className="flex flex-wrap gap-1.5">
-                {EVENT_PLACEHOLDERS.map((p) => (
+                {eventPlaceholders(t).map((p) => (
                   <button
                     key={p.token}
                     type="button"
@@ -4352,7 +4451,7 @@ function ActionEditor({
                 onClick={addAction}
                 className="text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded-lg transition-colors"
               >
-                {editingId ? 'Salvar alterações' : 'Usar esta ação'}
+                {editingId ? t('monitoring.saveChanges') : t('monitoring.useAction')}
               </button>
             </>
           ) : null}
@@ -4365,7 +4464,7 @@ function ActionEditor({
           onClick={toggleDraft}
           className="text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 py-1.5 rounded-lg transition-colors shadow-md active:scale-[0.99] disabled:opacity-60"
         >
-          {showDraft ? 'Cancelar' : 'Adicionar ação'}
+          {showDraft ? t('common.cancel') : t('monitoring.addAction')}
         </button>
       ) : null}
     </div>
@@ -4390,6 +4489,7 @@ function SearchInput({
   value: string
   onChange: (v: string) => void
 }): JSX.Element {
+  const { t } = useI18n()
   const [options, setOptions] = useState<string[]>([])
   const [open, setOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -4458,7 +4558,7 @@ function SearchInput({
         }}
         onFocus={() => setOpen(true)}
         onBlur={() => setTimeout(() => setOpen(false), 150)}
-        placeholder={options.length > 0 ? 'Digite para buscar…' : 'Digite nome ou número'}
+        placeholder={options.length > 0 ? t('monitoring.searchPlaceholder') : t('monitoring.typeNameOrNumber')}
         className="w-full bg-zinc-800 border border-white/10 rounded-xl px-3 py-2 text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:border-emerald-500"
       />
       {open && filtered.length > 0 ? (
@@ -4490,6 +4590,7 @@ function AddEditMonitorModal({
   initialMonitor,
   onSave
 }: AddEditMonitorModalProps): JSX.Element | null {
+  const { t } = useI18n()
   if (!isOpen) return null
 
   const [cameraId, setCameraId] = useState<string>(
@@ -4539,7 +4640,7 @@ function AddEditMonitorModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!cameraId) {
-      setError('Selecione uma câmera.')
+      setError(t('monitoring.selectCamera'))
       return
     }
 
@@ -4567,7 +4668,7 @@ function AddEditMonitorModal({
       const isAuto = initialMonitor?.isAutomation === true
       const autoBaseId = initialMonitor?.id?.startsWith('auto-') ? initialMonitor.id.replace('auto-', '') : undefined
       const existingWorkflow = initialMonitor?.automationWorkflow || null
-      const automationName = (label.trim() || initialMonitor?.label || '').replace(/^⚡\s*/, '').trim() || 'Monitoramento de câmera'
+      const automationName = (label.trim() || initialMonitor?.label || '').replace(/^⚡\s*/, '').trim() || t('monitoring.defaultName')
 
       if (isAuto || autoBaseId || existingWorkflow?.id) {
         // === Automation Hub path ===
@@ -4618,7 +4719,7 @@ function AddEditMonitorModal({
           : (existingWorkflow?.steps || existingWorkflow?.actions || [
               {
                 id: 'show_overlay',
-                name: 'Exibir Overlay de Alerta',
+                name: t('monitoring.overlayDefault'),
                 type: 'action' as const,
                 provider: 'momai-vision',
                 action: 'momai-vision.show_overlay',
@@ -4635,7 +4736,7 @@ function AddEditMonitorModal({
           const provider = act.provider || (actionId.includes('.') ? actionId.split('.')[0] : 'system')
           return {
             id: act.id || `step_${idx + 1}_${Date.now()}`,
-            name: act.name || `Ação ${idx + 1}`,
+            name: act.name || t('monitoring.actionFallback', { index: idx + 1 }),
             type: 'action' as const,
             provider,
             action: actionId,
@@ -4674,7 +4775,7 @@ function AddEditMonitorModal({
 
         const saveRes = await sdk.api.post('/automations', automationPayload)
         if (saveRes && (saveRes as any).ok === false) {
-          throw new Error((saveRes as any).error || 'Falha ao salvar automação no Automation Hub')
+          throw new Error((saveRes as any).error || t('monitoring.saveAutomationFailed'))
         }
       } else {
         // === Legacy monitor path (mon-*) ===
@@ -4703,7 +4804,7 @@ function AddEditMonitorModal({
             actions: actions.length ? actions : undefined
           })
           if (cmdRes && (cmdRes as any).ok === false) {
-            throw new Error((cmdRes as any).error || 'Falha ao atualizar monitoramento')
+            throw new Error((cmdRes as any).error || t('monitoring.updateFailed'))
           }
         } else {
           const cmdRes = await command('start_monitoring', {
@@ -4714,7 +4815,7 @@ function AddEditMonitorModal({
             actions: actions.length ? actions : undefined
           })
           if (cmdRes && (cmdRes as any).ok === false) {
-            throw new Error((cmdRes as any).error || 'Falha ao iniciar monitoramento')
+            throw new Error((cmdRes as any).error || t('monitoring.startFailed'))
           }
         }
       }
@@ -4800,13 +4901,13 @@ function AddEditMonitorModal({
           <div className="flex items-center justify-between px-6 py-4 border-b border-border/40 bg-sidebar shrink-0">
             <h2 id="vision-edit-monitor-title" className="text-sm font-bold text-text flex items-center gap-2.5">
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-              <span className="truncate">{initialMonitor ? 'Editar Monitoramento' : 'Novo Monitoramento'}</span>
+              <span className="truncate">{initialMonitor ? t('monitoring.editTitle') : t('nav.newMonitor')}</span>
             </h2>
             <button
               type="button"
               onClick={onClose}
               className="text-text-muted hover:text-text rounded-lg p-1.5 hover:bg-input/60 transition-colors shrink-0"
-              aria-label="Fechar"
+              aria-label={t('common.close')}
             >
               <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <line x1="18" y1="6" x2="6" y2="18" />
@@ -4825,7 +4926,7 @@ function AddEditMonitorModal({
             <div className="mv-mgrid-2">
               <div>
                 <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                  Câmera
+                  {t('monitoring.camera')}
                 </label>
                 <select
                   value={cameraId}
@@ -4834,12 +4935,12 @@ function AddEditMonitorModal({
                 >
                   {cameraId && !cameras.some((c) => c.id === cameraId) && (
                     <option key={cameraId} value={cameraId}>
-                      {formatCameraName(initialMonitor?.cameraName || cameraId, 'webcam')} (Câmera do Monitoramento)
+                      {formatCameraName(initialMonitor?.cameraName || cameraId, 'webcam', t)} ({t('monitoring.cameraOfMonitor')})
                     </option>
                   )}
                   {cameras.map((cam) => (
                     <option key={cam.id} value={cam.id}>
-                      {formatCameraName(cam.name, cam.source)} ({cam.source === 'webcam' ? 'Webcam' : 'IP'})
+                      {formatCameraName(cam.name, cam.source, t)} ({cam.source === 'webcam' ? t('cameras.optWebcam') : t('cameras.optIp')})
                     </option>
                   ))}
                 </select>
@@ -4847,11 +4948,11 @@ function AddEditMonitorModal({
 
               <div>
                 <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                  Nome <span className="font-normal text-text-muted/60">(Opcional)</span>
+                  {t('cameras.addModal.nameLabel')} <span className="font-normal text-text-muted/60">{t('monitoring.nameOptional')}</span>
                 </label>
                 <input
                   type="text"
-                  placeholder="ex: Portão da Garagem"
+                  placeholder={t('monitoring.namePlaceholder')}
                   value={label}
                   onChange={(e) => setLabel(e.target.value)}
                   className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text placeholder-text-muted/60 focus:outline-none focus:border-emerald-500"
@@ -4861,16 +4962,16 @@ function AddEditMonitorModal({
 
             <div>
               <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                Gatilho de Alerta (Trigger)
+                {t('monitoring.triggerLabel')}
               </label>
               <select
                 value={triggerType}
                 onChange={(e) => setTriggerType(e.target.value)}
                 className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500 font-medium"
               >
-                {TRIGGER_TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>
-                    {t.label}
+                {TRIGGER_TYPES.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {t(item.labelKey)}
                   </option>
                 ))}
               </select>
@@ -4879,7 +4980,7 @@ function AddEditMonitorModal({
             {triggerType === 'motion' && (
               <div>
                 <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                  Sensibilidade de Movimento
+                  {t('monitoring.sensitivityLabel')}
                 </label>
                 <select
                   value={sensitivity}
@@ -4888,7 +4989,7 @@ function AddEditMonitorModal({
                 >
                   {SENSITIVITY_OPTIONS.map((opt) => (
                     <option key={opt.value} value={opt.value}>
-                      {opt.label}
+                      {t(opt.labelKey)}
                     </option>
                   ))}
                 </select>
@@ -4899,14 +5000,14 @@ function AddEditMonitorModal({
               <div className="space-y-4 bg-white/[0.03] p-4 rounded-xl border border-border/60">
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                    Objeto Inanimado a Detectar
+                    {t('monitoring.objectLabel')}
                   </label>
                   <select
                     value={objectClass}
                     onChange={(e) => setObjectClass(e.target.value)}
                     className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500 font-medium"
                   >
-                    {INANIMATE_OBJECT_OPTIONS.map((opt) => (
+                    {inanimateObjectOptions(t).map((opt) => (
                       <option key={opt.value} value={opt.value}>
                         {opt.label}
                       </option>
@@ -4916,15 +5017,15 @@ function AddEditMonitorModal({
 
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                    Condição
+                    {t('monitoring.condition')}
                   </label>
                   <select
                     value={objectPresent ? 'true' : 'false'}
                     onChange={(e) => setObjectPresent(e.target.value === 'true')}
                     className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500"
                   >
-                    <option value="true">Detectar quando estiver Presente</option>
-                    <option value="false">Detectar quando estiver Ausente</option>
+                    <option value="true">{t('monitoring.detectPresent')}</option>
+                    <option value="false">{t('monitoring.detectAbsent')}</option>
                   </select>
                 </div>
               </div>
@@ -4934,20 +5035,20 @@ function AddEditMonitorModal({
               <div className="space-y-4 bg-white/[0.03] p-4 rounded-xl border border-border/60">
                 <div className="text-xs text-text-muted flex items-center gap-2">
                   <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                  <span>Detecta a presença de pessoas na cena via Inteligência Artificial.</span>
+                  <span>{t('monitoring.personHint')}</span>
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                    Condição
+                    {t('monitoring.condition')}
                   </label>
                   <select
                     value={objectPresent ? 'true' : 'false'}
                     onChange={(e) => setObjectPresent(e.target.value === 'true')}
                     className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500"
                   >
-                    <option value="true">Detectar quando Pessoa estiver Presente</option>
-                    <option value="false">Detectar quando Pessoa estiver Ausente</option>
+                    <option value="true">{t('monitoring.personPresent')}</option>
+                    <option value="false">{t('monitoring.personAbsent')}</option>
                   </select>
                 </div>
               </div>
@@ -4957,14 +5058,14 @@ function AddEditMonitorModal({
               <div className="space-y-4 bg-white/[0.03] p-4 rounded-xl border border-border/60">
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                    Animal a Detectar
+                    {t('monitoring.animalLabel')}
                   </label>
                   <select
                     value={animalClass}
                     onChange={(e) => setAnimalClass(e.target.value)}
                     className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500 font-medium"
                   >
-                    {ANIMAL_OBJECT_OPTIONS.map((opt) => (
+                    {animalObjectOptions(t).map((opt) => (
                       <option key={opt.value} value={opt.value}>
                         {opt.label}
                       </option>
@@ -4974,15 +5075,15 @@ function AddEditMonitorModal({
 
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                    Condição
+                    {t('monitoring.condition')}
                   </label>
                   <select
                     value={objectPresent ? 'true' : 'false'}
                     onChange={(e) => setObjectPresent(e.target.value === 'true')}
                     className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500"
                   >
-                    <option value="true">Detectar quando Animal estiver Presente</option>
-                    <option value="false">Detectar quando Animal estiver Ausente</option>
+                    <option value="true">{t('monitoring.animalPresent')}</option>
+                    <option value="false">{t('monitoring.animalAbsent')}</option>
                   </select>
                 </div>
               </div>
@@ -4992,14 +5093,14 @@ function AddEditMonitorModal({
               <div className="space-y-4 bg-white/[0.03] p-4 rounded-xl border border-border/60">
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                    Alvo (Ser Vivo ou Objeto)
+                    {t('monitoring.targetLabel')}
                   </label>
                   <select
                     value={presenceTargetClass}
                     onChange={(e) => setPresenceTargetClass(e.target.value)}
                     className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500 font-medium"
                   >
-                    {ALL_OBJECT_OPTIONS.map((opt) => (
+                    {allObjectOptions(t).map((opt) => (
                       <option key={opt.value} value={opt.value}>
                         {opt.label}
                       </option>
@@ -5009,22 +5110,22 @@ function AddEditMonitorModal({
 
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                    Evento
+                    {t('monitoring.eventLabel')}
                   </label>
                   <select
                     value={presenceEvent}
                     onChange={(e) => setPresenceEvent(e.target.value)}
                     className="w-full bg-input border border-border rounded-xl px-3 py-2 text-sm text-text focus:outline-none focus:border-emerald-500"
                   >
-                    <option value="entered">Entrou / Apareceu na cena</option>
-                    <option value="stayed">Permaneceu na cena</option>
-                    <option value="left">Saiu / Desapareceu da cena</option>
+                    <option value="entered">{t('monitoring.eventEntered')}</option>
+                    <option value="stayed">{t('monitoring.eventStayed')}</option>
+                    <option value="left">{t('monitoring.eventLeft')}</option>
                   </select>
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1.5">
-                    Janela de Tempo (Segundos)
+                    {t('monitoring.windowLabel')}
                   </label>
                   <input
                     type="number"
@@ -5040,7 +5141,7 @@ function AddEditMonitorModal({
 
             <div className="w-full max-w-full">
               <label className="block text-xs font-semibold text-text mb-1.5">
-                Pausar após disparar (Cooldown)
+                {t('monitoring.cooldownLabel')}
               </label>
               <div className="flex items-center gap-2 max-w-full flex-wrap sm:flex-nowrap">
                 <input
@@ -5087,7 +5188,7 @@ function AddEditMonitorModal({
                 onClick={onClose}
                 className="text-xs font-medium text-text-muted hover:text-text bg-white/5 hover:bg-white/10 px-4 py-2 rounded-xl transition-all"
               >
-                Cancelar
+                {t('common.cancel')}
               </button>
               <button
                 type="submit"
@@ -5100,10 +5201,10 @@ function AddEditMonitorModal({
                       <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
                       <path d="M12 2a10 10 0 0 1 10 10" />
                     </svg>
-                    Salvando...
+                    {t('monitoring.saving')}
                   </>
                 ) : (
-                  'Salvar Monitoramento'
+                  t('monitoring.saveMonitor')
                 )}
               </button>
             </div>
@@ -5119,6 +5220,7 @@ function AddEditMonitorModal({
 // ---------------------------------------------------------------------------
 
 export default function VisionPage({ isActive = true }: { isActive?: boolean }): JSX.Element {
+  const { t, locale } = useI18n()
   const [cameras, setCameras] = useState<CameraInfo[]>(() => {
     try {
       const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:cameras`) : null
@@ -5249,15 +5351,15 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   const handleCopyImage = useCallback(async (imgSrc: string) => {
     setContextMenu(null)
     if (!imgSrc) {
-      setCopyToast('Sem imagem disponível para copiar')
+      setCopyToast(t('page.noImageToCopy'))
       setTimeout(() => setCopyToast(null), 2500)
       return
     }
     const ok = await copyImageToClipboard(imgSrc)
     if (ok) {
-      setCopyToast('Imagem copiada! Pronta para colar (Ctrl+V)')
+      setCopyToast(t('page.imageCopied'))
     } else {
-      setCopyToast('Não foi possível copiar a imagem')
+      setCopyToast(t('page.copyFailed'))
     }
     setTimeout(() => setCopyToast(null), 2500)
   }, [])
@@ -5287,7 +5389,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       const cleanBase = base.endsWith('/') ? base.slice(0, -1) : base
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), 600)
-      const res = await fetch(`${cleanBase}/automations/active-triggers?provider=vision`, {
+      const res = await fetch(`${cleanBase}/automations/active-triggers?provider=vision&include_disabled=true`, {
         signal: ctrl.signal
       }).finally(() => clearTimeout(timer))
       if (res.ok) {
@@ -5354,7 +5456,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
             : null
           const camId = cam ? cam.id : (rawCam || fetchedCams[0]?.id || 'webcam:0')
           const camName = cam ? cam.name : (rawCam || camId)
-          const labelName = auto.automationName || 'Automação Hub'
+          const labelName = auto.automationName || t('monitoring.hubFallback')
 
           // Parse trigger type from automation params for the modal
           const rawType = String(trigParams.triggeredBy || trig.id || trig.type || '').toLowerCase()
@@ -5848,7 +5950,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
             const id = `ip:${draft.url}`
             if (existingIpIds.has(id)) continue
             existingIpIds.add(id)
-            newIpCameras.push({ id, name: draft.name || 'Câmera IP', url: draft.url })
+            newIpCameras.push({ id, name: draft.name || t('cameras.defaultIpName'), url: draft.url })
           }
 
           const updatedIp = [...ipCamerasList, ...newIpCameras]
@@ -5888,7 +5990,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         if (expandedPrint && expandedPrint.id === snapshotId) {
           setExpandedPrint((prev) => (prev ? { ...prev, description: res.description } : null))
         }
-        setError(res.description ? null : 'Descrição indisponível (visão offline)')
+        setError(res.description ? null : t('page.descriptionOffline'))
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       } finally {
@@ -5924,7 +6026,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         ordered.push(
           known
             ? { ...known, online: false }
-            : { id, name: 'Câmera', source: id.startsWith('ip:') ? 'ip' : 'webcam', online: false, monitors: 0 }
+            : { id, name: t('cameras.fallbackName'), source: id.startsWith('ip:') ? 'ip' : 'webcam', online: false, monitors: 0 }
         )
       }
     }
@@ -6003,21 +6105,21 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
             MomAI Vision
           </h1>
           <p className="text-xs text-text-muted mt-0.5">
-            Visão e monitoramento 100% locais — nada sai da sua máquina.
+            {t('page.subtitle')}
           </p>
         </div>
         <div className="flex items-center gap-2">
           <span className="text-xs text-text-muted">
-            {activeMonitors.length} monitor{activeMonitors.length !== 1 ? 'es' : ''} ativo{activeMonitors.length !== 1 ? 's' : ''}
+            {activeMonitors.length !== 1 ? t('page.activeOther', { count: activeMonitors.length }) : t('page.activeOne', { count: activeMonitors.length })}
             {pausedMonitors.length > 0
-              ? ` · ${pausedMonitors.length} pausado${pausedMonitors.length !== 1 ? 's' : ''}`
+              ? pausedMonitors.length !== 1 ? t('monitoring.pausedSuffixOther', { count: pausedMonitors.length }) : t('monitoring.pausedSuffixOne', { count: pausedMonitors.length })
               : ''}
           </span>
           <button
             disabled={isRefreshing}
             onClick={() => void refresh()}
             className="text-xs rounded-lg bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-3 py-1.5 transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-60"
-            title="Atualizar lista e conexão das câmeras"
+            title={t('page.refreshCameras')}
           >
             <svg
               className={`w-3.5 h-3.5 text-emerald-400 transition-transform ${isRefreshing ? 'animate-spin' : ''}`}
@@ -6031,23 +6133,23 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               <path d="M21.5 2v6h-6M2.5 22v-6h6" />
               <path d="M2 11.5a10 10 0 0 1 18.8-4.3L21.5 8M2.5 16l1.2 0.8A10 10 0 0 0 22 12.5" />
             </svg>
-            <span>{isRefreshing ? 'Atualizando...' : 'Atualizar'}</span>
+            <span>{isRefreshing ? t('page.refreshing') : t('common.refresh')}</span>
           </button>
         </div>
       </header>
 
       <nav className="flex gap-2 mb-5">
         <button className={tabClass('cameras')} onClick={() => setActiveTab('cameras')}>
-          Câmeras
+          {t('nav.cameras')}
         </button>
         <button className={tabClass('alerts')} onClick={() => setActiveTab('alerts')}>
-          Alertas {alerts.length > 0 ? `(${alerts.length})` : ''}
+          {t('nav.alerts')} {alerts.length > 0 ? `(${alerts.length})` : ''}
         </button>
         <button className={tabClass('gallery')} onClick={() => setActiveTab('gallery')}>
-          Prints
+          {t('page.printsTab')}
         </button>
         <button className={tabClass('settings')} onClick={() => setActiveTab('settings')}>
-          Configurações
+          {t('nav.settings')}
         </button>
       </nav>
 
@@ -6093,13 +6195,20 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
 {!expandedCamera && (
           <div className="mt-3 pt-1">
             <div className="flex items-center gap-2.5 mb-4">
-              <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(52,211,153,0.5)]" />
+              <div
+                className={`w-2.5 h-2.5 rounded-full ${
+                  activeMonitors.length > 0
+                    ? 'bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(52,211,153,0.5)]'
+                    : 'bg-amber-400/80 shadow-[0_0_8px_rgba(251,191,36,0.4)]'
+                }`}
+              />
               <h3 className="text-lg font-bold text-text tracking-tight">
-                Monitoramento Ativo
+                {activeMonitors.length > 0 ? t('monitoring.sectionActive') : t('monitoring.sectionIdle')}
               </h3>
               {monitors.length > 0 && (
                 <span className="text-xs text-text-muted font-medium">
-                  ({activeMonitors.length})
+                  ({activeMonitors.length !== 1 ? t('page.activeOther', { count: activeMonitors.length }) : t('page.activeOne', { count: activeMonitors.length })}
+                  {pausedMonitors.length > 0 ? (pausedMonitors.length !== 1 ? t('monitoring.pausedSuffixOther', { count: pausedMonitors.length }) : t('monitoring.pausedSuffixOne', { count: pausedMonitors.length })) : ''})
                 </span>
               )}
             </div>
@@ -6110,9 +6219,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                   <VisionIcon className="w-6 h-6" />
                 </div>
                 <div className="space-y-1">
-                  <h4 className="text-sm font-semibold text-text">Nenhum monitoramento configurado</h4>
+                  <h4 className="text-sm font-semibold text-text">{t('monitoring.emptyConfig')}</h4>
                   <p className="text-xs text-text-muted max-w-sm">
-                    Configure monitoramentos inteligentes para receber alertas de movimento, pessoas ou objetos.
+                    {t('monitoring.emptyConfigHint')}
                   </p>
                 </div>
                 <button
@@ -6132,7 +6241,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                     <line x1="12" y1="5" x2="12" y2="19" />
                     <line x1="5" y1="12" x2="19" y2="12" />
                   </svg>
-                  <span>Adicionar Monitoramento</span>
+                  <span>{t('monitoring.addMonitor')}</span>
                 </button>
               </div>
             ) : (
@@ -6151,12 +6260,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                             </span>
                             {m.cameraName && m.label && (
                               <span className="text-xs text-text-muted font-normal truncate max-w-full block">
-                                · {formatCameraName(m.cameraName, 'webcam')}
+                                · {formatCameraName(m.cameraName, 'webcam', t)}
                               </span>
                             )}
                             {m.cooldownSec ? (
                               <span className="text-xs text-text-muted font-normal shrink-0">
-                                · Intervalo: {formatCooldown(m.cooldownSec)}
+                                · {t('monitoring.interval', { value: formatCooldown(m.cooldownSec) })}
                               </span>
                             ) : null}
                           </div>
@@ -6169,7 +6278,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                             }}
                             className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-lg bg-input hover:bg-card border border-border/30 transition-all"
                           >
-                            Editar
+                            {t('common.edit')}
                           </button>
                           <button
                             onClick={async () => {
@@ -6196,7 +6305,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                             }}
                             className="text-xs font-medium text-amber-400 hover:text-amber-300 px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 transition-all"
                           >
-                            Pausar
+                            {t('common.pause')}
                           </button>
                           <button
                             onClick={async () => {
@@ -6221,8 +6330,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                                 setError(err instanceof Error ? err.message : String(err))
                               }
                             }}
-                            title="Excluir monitoramento"
-                            aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}
+                            title={t('monitoring.deleteMonitor')}
+                            aria-label={t('monitoring.deleteMonitorName', { name: m.label || m.cameraName || m.cameraId })}
                             className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all cursor-pointer"
                           >
                             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -6253,14 +6362,14 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                         <path d="M12 5v14M5 12h14" />
                       </svg>
                     </div>
-                    <span className="text-xs font-semibold">Adicionar Monitoramento</span>
+                    <span className="text-xs font-semibold">{t('monitoring.addMonitor')}</span>
                   </button>
                 </div>
 
                 {pausedMonitors.length > 0 && (
                   <div className="-mt-2">
                     <h4 className="text-xs font-semibold text-text-muted mb-1.5 uppercase tracking-wider">
-                      Pausados ({pausedMonitors.length})
+                      {t('monitoring.pausedHeader', { count: pausedMonitors.length })}
                     </h4>
                     <div className="grid grid-cols-1 gap-2.5 opacity-80">
                       {pausedMonitors.map((m) => {
@@ -6276,12 +6385,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                                 </span>
                                 {m.cameraName && m.label && (
                                   <span className="text-xs text-text-muted truncate max-w-full block">
-                                    · {formatCameraName(m.cameraName, 'webcam')}
+                                    · {formatCameraName(m.cameraName, 'webcam', t)}
                                   </span>
                                 )}
                                 {m.cooldownSec ? (
                                   <span className="text-xs text-text-muted shrink-0">
-                                    · Intervalo: {formatCooldown(m.cooldownSec)}
+                                    · {t('monitoring.interval', { value: formatCooldown(m.cooldownSec) })}
                                   </span>
                                 ) : null}
                               </div>
@@ -6312,7 +6421,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                                 }}
                                 className="text-xs font-medium text-emerald-400 hover:text-emerald-300 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-all"
                               >
-                                Retomar
+                                {t('monitoring.resume')}
                               </button>
                               <button
                                 onClick={() => {
@@ -6321,7 +6430,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                                 }}
                                 className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-lg bg-input hover:bg-card border border-border/30 transition-all"
                               >
-                                Editar
+                                {t('common.edit')}
                               </button>
                               <button
                                 onClick={async () => {
@@ -6346,8 +6455,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                                     setError(err instanceof Error ? err.message : String(err))
                                   }
                                 }}
-                                title="Excluir monitoramento"
-                                aria-label={`Excluir monitoramento ${m.label || m.cameraName || m.cameraId}`}
+                                title={t('monitoring.deleteMonitor')}
+                                aria-label={t('monitoring.deleteMonitorName', { name: m.label || m.cameraName || m.cameraId })}
                                 className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all cursor-pointer"
                               >
                                 <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -6372,17 +6481,17 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       {activeTab === 'alerts' ? (
         <section className="space-y-3">
           <div className="flex items-center justify-between mb-1">
-            <h3 className="text-sm font-semibold text-text">Histórico de Alertas</h3>
+            <h3 className="text-sm font-semibold text-text">{t('alerts.title')}</h3>
             {alerts.length > 0 ? (
               confirmClearAlerts ? (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-red-600 dark:text-red-400 font-semibold">Limpar todos os alertas?</span>
+                  <span className="text-xs text-red-600 dark:text-red-400 font-semibold">{t('alerts.clearPrompt')}</span>
                   <button
                     onClick={() => void handleClearAlerts()}
                     className="text-xs px-2.5 py-1 rounded-lg bg-red-500 hover:bg-red-600 text-white font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
                     style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
                   >
-                    Sim, limpar
+                    {t('alerts.confirmYes')}
                   </button>
                   <button
                     onClick={() => setConfirmClearAlerts(false)}
@@ -6399,14 +6508,14 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                   <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                   </svg>
-                  limpar alertas
+                  {t('alerts.clearLink')}
                 </button>
               )
             ) : null}
           </div>
           {alerts.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-border/40 bg-card/30 p-8 text-center text-sm text-text-muted">
-              Nenhum alerta ainda. Os alertas aparecem aqui, no chat e no overlay flutuante.
+              {t('alerts.emptyFeed')}
             </div>
           ) : (
             alerts.map((alert: Alert) => {
@@ -6424,13 +6533,13 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-sm font-semibold text-text truncate max-w-[70%]">
-                        {formatCameraName(alert.cameraName, 'webcam') || 'Câmera'}
-                        {alert.className ? ` · ${ptLabel(alert.className)}` : ''}
+                        {formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')}
+                        {alert.className ? ` · ${localizedClassLabel(alert.className, t)}` : ''}
                         {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
                       </p>
                       {alert.ts ? (
                         <span className="text-[11px] text-text-muted font-medium shrink-0 bg-input px-2 py-0.5 rounded-md border border-border/30">
-                          {formatTime(alert.ts)}
+                          {formatTime(alert.ts, locale)}
                         </span>
                       ) : null}
                     </div>
@@ -6438,7 +6547,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                       <p className="text-xs text-text-muted mt-1">
                         {alert.description ? `${alert.description} ` : ''}
                         {alert.triggeredBy ? (
-                          <span className="text-text-muted/80">{triggerLabel(alert)}</span>
+                          <span className="text-text-muted/80">{localizedTriggerLabel(alert, t)}</span>
                         ) : null}
                       </p>
                     ) : null}
@@ -6449,7 +6558,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                         className="group relative w-32 h-20 rounded-xl bg-black shrink-0 overflow-hidden cursor-pointer border border-border/40 hover:border-emerald-500/60 transition-all shadow-sm"
                         onClick={() => setExpandedAlert(alert)}
                         onContextMenu={(e) => handleAlertContextMenu(e, alert)}
-                        title="Clique para ampliar em tela cheia (Botão direito para copiar/excluir)"
+                        title={t('alerts.expandHint')}
                       >
                         <AlertCanvasOverlay
                           imageDataUri={imgSrc}
@@ -6470,7 +6579,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                         e.stopPropagation()
                         void handleDeleteAlert(alert)
                       }}
-                      title="Excluir este alerta"
+                      title={t('alerts.deleteOne')}
                       className="p-1.5 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors shrink-0 cursor-pointer"
                     >
                       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -6489,21 +6598,21 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       {activeTab === 'gallery' ? (
         <section>
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-text">Prints da Câmera</h3>
+            <h3 className="text-sm font-semibold text-text">{t('gallery.cameraPrints')}</h3>
             <div className="flex items-center gap-3">
               <button onClick={() => void refreshGallery()} className="text-xs text-text-muted hover:text-text transition-colors">
-                atualizar
+                {t('gallery.refreshLink')}
               </button>
               {snapshots.length > 0 ? (
                 confirmClearPrints ? (
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-red-600 dark:text-red-400 font-semibold">Excluir todos os prints?</span>
+                    <span className="text-xs text-red-600 dark:text-red-400 font-semibold">{t('gallery.deleteAllPrompt')}</span>
                     <button
                       onClick={() => void handleClearAllPrints()}
                       className="text-xs px-2.5 py-1 rounded-lg bg-red-500 hover:bg-red-600 text-white font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
                       style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
                     >
-                      Sim, excluir
+                      {t('gallery.confirmDeleteYes')}
                     </button>
                     <button
                       onClick={() => setConfirmClearPrints(false)}
@@ -6520,7 +6629,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                     <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                     </svg>
-                    excluir todos
+                    {t('gallery.deleteAllLink')}
                   </button>
                 )
               ) : null}
@@ -6528,7 +6637,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           </div>
           {snapshots.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-border/40 bg-card/30 p-8 text-center text-sm text-text-muted">
-              Galeria de prints vazia. Print por print, a MomAI monta seu histórico visual.
+              {t('gallery.emptyHint')}
             </div>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 auto-rows-fr">
@@ -6545,26 +6654,26 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                         snap.imageDataUri ||
                         `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${snap.id}.jpg`
                       }
-                      alt={snap.description || 'Print'}
+                      alt={snap.description || t('gallery.printAlt')}
                       loading="lazy"
                       className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
                     />
                     <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                       <span className="text-xs font-medium text-white bg-black/60 px-2 py-1 rounded-md backdrop-blur-sm">
-                        Ampliar print
+                        {t('gallery.enlargePrint')}
                       </span>
                     </div>
                   </div>
                   <figcaption className="px-2.5 py-2 flex-1 flex flex-col justify-between">
-                    <p className="text-[11px] text-text font-medium truncate">{snap.description || formatTime(snap.ts)}</p>
+                    <p className="text-[11px] text-text font-medium truncate">{snap.description || formatTime(snap.ts, locale)}</p>
                     <div className="flex items-center justify-between mt-1 pt-1 border-t border-border/20">
-                      <span className="text-[10px] text-text-muted">{formatTime(snap.ts)}</span>
+                      <span className="text-[10px] text-text-muted">{formatTime(snap.ts, locale)}</span>
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
                           void handleDeletePrint(snap.id)
                         }}
-                        title="Excluir print"
+                        title={t('gallery.deletePrint')}
                         className="p-1 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors cursor-pointer"
                       >
                         <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -6589,10 +6698,10 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
-              Configurações do Vision
+              {t('settings.title')}
             </h2>
             <p className="text-xs text-text-muted mt-1">
-              Ajuste suas preferências de câmeras, retenção de prints e modos de rastreamento local.
+              {t('settings.subtitle')}
             </p>
           </div>
 
@@ -6600,15 +6709,15 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
             <div>
               <h3 className="text-sm font-semibold text-text flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                Retenção de Prints
+                {t('settings.retention')}
               </h3>
               <p className="text-xs text-text-muted mt-0.5">
-                Defina o limite de armazenamento local para galeria de prints e histórico.
+                {t('settings.retentionDesc')}
               </p>
             </div>
             <div className="space-y-3">
               <label className="flex items-center justify-between text-xs text-text bg-input/50 p-3 rounded-xl border border-border/30">
-                <span>Dias de armazenamento (padrão: 7)</span>
+                <span>{t('settings.daysLabel')}</span>
                 <input
                   type="number"
                   min={1}
@@ -6619,7 +6728,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 />
               </label>
               <label className="flex items-center justify-between text-xs text-text bg-input/50 p-3 rounded-xl border border-border/30">
-                <span>Máximo de arquivos armazenados (padrão: 200)</span>
+                <span>{t('settings.maxFilesLabel')}</span>
                 <input
                   type="number"
                   min={20}
@@ -6631,7 +6740,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               </label>
             </div>
             <p className="text-[11px] text-text-muted">
-              Prints ficam guardados localmente no seu computador. Frames ao vivo em vídeo nunca são gravados em disco.
+              {t('settings.localNote')}
             </p>
           </div>
         </section>
@@ -6698,12 +6807,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           ? [
               {
                 id: 'snapshot',
-                label: 'Tirar print',
+                label: t('cameras.takeSnapshot'),
                 onClick: () => void takeSnapshot(target.camera.id)
               },
               {
                 id: 'expand',
-                label: 'Ampliar imagem',
+                label: t('cameras.enlargeImage'),
                 onClick: () => handleExpandCamera(target.camera)
               },
               {
@@ -6711,13 +6820,13 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 label:
                   config.detectionZones?.[target.camera.id] &&
                   config.detectionZones[target.camera.id].length >= 3
-                    ? 'Editar área de monitoramento'
-                    : 'Definir área de monitoramento',
+                    ? t('cameras.zoneEditActive')
+                    : t('cameras.zoneDefine'),
                 onClick: () => handleToggleEditZone(target.camera.id)
               },
               {
                 id: 'monitor',
-                label: 'Criar monitoramento',
+                label: t('monitoring.addMonitor'),
                 onClick: () => {
                   setEditingMonitor({
                     id: '',
@@ -6730,12 +6839,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               },
               {
                 id: 'reload',
-                label: 'Recarregar câmera',
+                label: t('cameras.reload'),
                 onClick: () => void handleReloadCamera()
               },
               {
                 id: 'remove',
-                label: target.camera.source === 'ip' ? 'Remover câmera IP' : 'Remover da exibição',
+                label: target.camera.source === 'ip' ? t('cameras.removeIpShort') : t('cameras.removeFromView'),
                 danger: true,
                 onClick: () => void handleRemoveCamera(target.camera.id)
               }
@@ -6743,13 +6852,13 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           : [
               {
                 id: 'copy',
-                label: 'Copiar',
+                label: t('common.copy'),
                 shortcut: 'Ctrl+C',
                 onClick: () => void handleCopyImage(target.imgSrc)
               },
               {
                 id: 'delete',
-                label: 'Excluir',
+                label: t('common.delete'),
                 shortcut: 'Del',
                 danger: true,
                 onClick: () => {

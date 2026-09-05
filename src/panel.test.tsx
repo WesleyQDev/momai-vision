@@ -21,9 +21,9 @@ describe('VisionPanel', () => {
 
   it('shows camera and monitor counts', async () => {
     render(<VisionPanel />)
-    await screen.findByText('câmeras (1 online)')
+    await screen.findByText('Câmeras (1 Online)')
     expect(screen.getAllByText('1')).toHaveLength(2)
-    expect(screen.getByText('monitors ativos')).toBeTruthy()
+    expect(screen.getByText('Ativo')).toBeTruthy()
   })
 
   it('lists active monitors with trigger types', async () => {
@@ -50,7 +50,7 @@ describe('VisionPanel', () => {
 })
 
 describe('VisionAlertCard', () => {
-  it('renders only the image for snapshots (no buttons or header)', () => {
+  it('renders the alert image with the camera header', () => {
     render(
       <VisionAlertCard
         data={{
@@ -61,11 +61,12 @@ describe('VisionAlertCard', () => {
         }}
       />
     )
-    const img = screen.getByRole('img') as HTMLImageElement
-    expect(img.src).toContain('data:image/jpeg;base64,abc')
+    const imgs = screen.getAllByRole('img') as HTMLImageElement[]
+    const img = imgs.find((i) => i.src.includes('data:image/jpeg;base64,abc'))
+    expect(img).toBeTruthy()
     expect(screen.queryByText('Abrir MomAI')).toBeNull()
     expect(screen.queryByText('Pausar monitoramento')).toBeNull()
-    expect(screen.queryByText('Webcam')).toBeNull()
+    expect(screen.getByText('Webcam')).toBeTruthy()
   })
 
   it('renders the alert title, description and snapshot', () => {
@@ -104,7 +105,7 @@ describe('VisionAlertCard', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     render(<VisionAlertCard data={{ cameraName: 'Garagem', monitorId: 'mon-9', onClose }} />)
-    fireEvent.click(screen.getByText('Pausar monitoramento'))
+    fireEvent.click(screen.getByText('Pausado'))
 
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledTimes(1)

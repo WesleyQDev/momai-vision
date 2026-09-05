@@ -65,6 +65,10 @@ export interface MomAISDK {
     screenshot(): Promise<ArrayBuffer>
   }
   has(method: string): boolean
+  i18n?: {
+    getLocale?: () => string
+    onLocaleChange?: (handler: (locale: string) => void) => () => void
+  }
   dev: {
     reload(): void
     log(...args: any[]): void

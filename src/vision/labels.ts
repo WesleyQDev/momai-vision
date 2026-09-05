@@ -91,6 +91,16 @@ export function ptLabel(className?: string): string {
   return PT_CLASS[className.toLowerCase()] || className
 }
 
+export function localizedClassLabel(className?: string, t?: (key: string) => string): string {
+  if (!className) return ''
+  const key = `classes.${className.toLowerCase()}`
+  if (t) {
+    const translated = t(key)
+    if (translated && translated !== key) return translated
+  }
+  return PT_CLASS[className.toLowerCase()] || className
+}
+
 function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
@@ -115,3 +125,27 @@ export function triggerLabel(alert: { triggeredBy?: string; className?: string }
   }
   return cap(by.replace(/[:_-]+/g, ' '))
 }
+
+export function localizedTriggerLabel(
+  alert: { triggeredBy?: string; className?: string },
+  t?: (key: string, vars?: Record<string, string | number>) => string
+): string {
+  const by = alert.triggeredBy || ''
+  if (!t) return triggerLabel(alert)
+  if (by === 'motion') return t('triggers.motion')
+  if (by === 'snapshot') return t('triggers.snapshot')
+  if (by.startsWith('object:')) {
+    const cls = cap(localizedClassLabel(alert.className, t))
+    return cls || t('triggers.object')
+  }
+  if (by.startsWith('presence')) {
+    const cls = cap(localizedClassLabel(alert.className, t))
+    return t('triggers.presence', { class: cls })
+  }
+  if (by.startsWith('absence')) {
+    const cls = cap(localizedClassLabel(alert.className, t))
+    return t('triggers.absence', { class: cls })
+  }
+  return cap(by.replace(/[:_-]+/g, ' '))
+}
+
