@@ -1,7 +1,7 @@
 {
   "id": "momai-vision",
   "name": "MomAI Vision",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "is_official": true,
   "description": "Veja suas câmeras, receba alertas de movimento e pergunte o que está acontecendo.",
   "category": "utility",
@@ -55,6 +55,7 @@
   "author": "WesleyQDev",
   "icon": "icon.png",
   "icon_url": "https://raw.githubusercontent.com/WesleyQDev/momai-vision/main/icon.png",
+  "icon_bg": "#10b981",
   "momai_compat": ">=1.11.0",
   "sdkVersion": 1,
   "background": true,

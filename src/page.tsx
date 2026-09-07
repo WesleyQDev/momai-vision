@@ -1713,14 +1713,17 @@ function CardHeaderActionButton({
   onClick,
   isActive = false,
   hoverTransform,
+  tone = 'default',
 }: {
   icon: React.ReactNode
   title: string
   onClick: (e: React.MouseEvent) => void
   isActive?: boolean
   hoverTransform: string
+  tone?: 'default' | 'danger'
 }) {
   const [hovered, setHovered] = useState(false)
+  const isDanger = tone === 'danger'
 
   return (
     <button
@@ -1733,29 +1736,37 @@ function CardHeaderActionButton({
       }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onFocus={() => setHovered(true)}
+      onBlur={() => setHovered(false)}
       style={{
         backgroundColor: isActive
-          ? 'rgba(255, 255, 255, 0.35)'
-          : hovered
-            ? 'rgba(255, 255, 255, 0.25)'
-            : 'rgba(255, 255, 255, 0.08)',
+          ? 'rgba(16, 185, 129, 0.95)'
+          : hovered && isDanger
+            ? 'rgba(220, 38, 38, 0.95)'
+            : hovered
+              ? 'rgba(0, 0, 0, 0.92)'
+              : 'rgba(0, 0, 0, 0.78)',
         borderColor: isActive
-          ? 'rgba(255, 255, 255, 0.75)'
+          ? 'rgba(255, 255, 255, 0.9)'
           : hovered
-            ? 'rgba(255, 255, 255, 0.5)'
-            : 'rgba(255, 255, 255, 0.18)',
+            ? 'rgba(255, 255, 255, 0.8)'
+            : 'rgba(255, 255, 255, 0.38)',
         color: '#ffffff',
-        boxShadow: hovered ? '0 0 10px rgba(255, 255, 255, 0.45)' : 'none',
-        transform: hovered ? 'scale(1.12)' : 'scale(1)',
+        boxShadow: hovered
+          ? '0 0 0 1px rgba(255, 255, 255, 0.35), 0 6px 18px rgba(0, 0, 0, 0.6)'
+          : '0 4px 14px rgba(0, 0, 0, 0.55)',
+        transform: hovered ? 'scale(1.1)' : 'scale(1)',
         transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
       }}
-      className="w-6 h-6 rounded-lg flex items-center justify-center border cursor-pointer select-none"
+      className="w-8 h-8 rounded-[10px] flex items-center justify-center border cursor-pointer select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
       title={title}
+      aria-label={title}
     >
       <div
         style={{
           transform: hovered ? hoverTransform : 'none',
           transition: 'transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1)',
+          filter: 'drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8))',
         }}
         className="flex items-center justify-center pointer-events-none text-white"
       >
@@ -1881,6 +1892,7 @@ const CameraCard = memo(function CameraCard({
   const [printStatus, setPrintStatus] = useState<'idle' | 'capturing' | 'success'>('idle')
   const [reloading, setReloading] = useState(false)
   const [fps, setFps] = useState(0)
+  const [confirmingRemove, setConfirmingRemove] = useState(false)
   // Fase de conexão lenta/indisponível: se demorar demais sem frame, mostra feedback amigável
   const [isSlow, setIsSlow] = useState(false)
   const [isUnavailable, setIsUnavailable] = useState(false)
@@ -1943,6 +1955,21 @@ const CameraCard = memo(function CameraCard({
   useEffect(() => {
     setError(null)
   }, [refreshKey])
+
+  // Confirmation overlay state: reset when the card switches camera.
+  useEffect(() => {
+    setConfirmingRemove(false)
+  }, [camera.id])
+
+  // Close the remove confirmation with Escape for keyboard users.
+  useEffect(() => {
+    if (!confirmingRemove) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setConfirmingRemove(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [confirmingRemove])
 
   // Feedback de conexão demorada: se ficar muito tempo sem frame, mostra
   // estados progressivos "Ainda conectando..." (12s) e "Câmera indisponível" (22s)
@@ -2629,10 +2656,10 @@ const CameraCard = memo(function CameraCard({
             draggable={false}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
-            className={`absolute top-2 right-2 z-30 flex items-center gap-1.5 bg-black/75 backdrop-blur-md p-1 rounded-xl border border-white/20 shadow-2xl transition-all duration-200 ${
-              isEditingZone
+            className={`absolute top-2.5 right-2.5 z-30 flex items-center gap-2 bg-black/85 backdrop-blur-md p-1.5 rounded-xl border border-white/30 shadow-[0_8px_24px_rgba(0,0,0,0.55)] transition-all duration-200 ${
+              isEditingZone || confirmingRemove
                 ? 'opacity-100 scale-100'
-                : 'opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100'
+                : 'opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 focus-within:opacity-100 focus-within:scale-100 max-sm:opacity-100 max-sm:scale-100'
             }`}
           >
             {onToggleEditZone ? (
@@ -2648,7 +2675,7 @@ const CameraCard = memo(function CameraCard({
                 }
                 onClick={() => onToggleEditZone()}
                 icon={
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.623l4.353-1.32a2 2 0 0 0 .83-.497z" />
                     <path d="m15 5 4 4" />
                   </svg>
@@ -2661,7 +2688,7 @@ const CameraCard = memo(function CameraCard({
                 title={t('cameras.expandImage')}
                 onClick={() => onExpand(camera)}
                 icon={
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
                   </svg>
                 }
@@ -2669,15 +2696,16 @@ const CameraCard = memo(function CameraCard({
             ) : null}
             {onRemove ? (
               <CardHeaderActionButton
+                tone="danger"
                 hoverTransform="rotate(90deg) scale(1.2)"
                 title={
                   camera.source === 'ip'
                     ? t('cameras.removeIpFull')
                     : t('cameras.removeDisplay')
                 }
-                onClick={() => onRemove(camera.id)}
+                onClick={() => setConfirmingRemove(true)}
                 icon={
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="18" y1="6" x2="6" y2="18" />
                     <line x1="6" y1="6" x2="18" y2="18" />
                   </svg>
@@ -2685,6 +2713,58 @@ const CameraCard = memo(function CameraCard({
               />
             ) : null}
           </div>
+
+          {/* Remove confirmation card: asks before closing/removing the camera */}
+          {confirmingRemove && onRemove ? (
+            <div
+              className="absolute inset-0 z-40 flex items-center justify-center p-3 bg-black/60"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                setConfirmingRemove(false)
+              }}
+              onDoubleClick={(e) => e.stopPropagation()}
+            >
+              <div
+                role="alertdialog"
+                aria-modal="false"
+                aria-label={t('cameras.removeConfirmTitle')}
+                className="w-auto max-w-[220px] rounded-xl bg-card border border-border/50 shadow-2xl px-3.5 py-3 text-center animate-fadeIn"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
+              >
+                <p className="text-[13px] font-bold text-text leading-tight">
+                  {t('cameras.removeConfirmTitle')}
+                </p>
+                <p className="text-[11px] text-text-muted mt-1 leading-snug">
+                  {camera.source === 'ip'
+                    ? t('cameras.removeConfirmIpDesc', { name: formatCameraName(camera.name, camera.source, t) })
+                    : t('cameras.removeConfirmWebcamDesc', { name: formatCameraName(camera.name, camera.source, t) })}
+                </p>
+                <div className="flex items-center justify-center gap-2 mt-3">
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingRemove(false)}
+                    className="text-[11px] font-semibold rounded-lg px-2.5 py-1.5 bg-transparent hover:bg-input border border-border/40 text-text-muted hover:text-text transition-all active:scale-95 cursor-pointer"
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    autoFocus
+                    onClick={() => {
+                      setConfirmingRemove(false)
+                      onRemove(camera.id)
+                    }}
+                    className="text-[11px] font-semibold rounded-lg px-2.5 py-1.5 bg-input hover:bg-card border border-border/40 text-text transition-all active:scale-95 cursor-pointer"
+                  >
+                    {t('cameras.removeConfirmYes')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
 
       <div className="flex items-center justify-between px-3 py-2 bg-card/95 shrink-0 border-t border-border/30">
@@ -2770,7 +2850,7 @@ function AddCameraCard({ onClick }: { onClick: () => void }): JSX.Element {
       <button
         onClick={onClick}
         type="button"
-        className="group relative rounded-2xl border border-dashed border-border/50 hover:border-border bg-input/40 hover:bg-input/80 transition-all duration-200 flex flex-col items-center justify-center p-6 text-center overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/30 h-full min-h-[168px] cursor-pointer min-w-0 flex-1"
+        className="group relative rounded-2xl border border-dashed border-border/50 hover:border-border bg-input/40 hover:bg-input/80 transition-all duration-200 flex flex-col items-center justify-center p-6 text-center overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/30 h-full min-h-[220px] cursor-pointer min-w-0 flex-1"
       >
         <div className="w-9 h-9 rounded-xl bg-card border border-border/40 text-text-muted group-hover:text-text flex items-center justify-center mb-3 transition-all duration-200">
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -6158,7 +6238,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       {/* Tab: Cameras Grid */}
       {activeTab === 'cameras' ? (
         <section>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5 md:gap-6 items-stretch">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5 md:gap-6 items-stretch">
             {displayedCameras.map((camera, idx) => (
               <CameraCard
                 key={camera.id}

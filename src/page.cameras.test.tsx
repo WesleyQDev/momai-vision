@@ -373,12 +373,37 @@ describe('VisionPage — X no card remove câmera IP do cadastro (webcam só da 
 
     fireEvent.click(await screen.findByTitle('Remover câmera IP (cadastro e exibição)'))
 
+    // Confirmation card appears before anything is removed.
+    await screen.findByText('Fechar câmera?')
+    expect(calls.filter((c) => c.toolName === 'configure' && c.args.ipCameras !== undefined)).toHaveLength(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sim' }))
+
     await waitFor(() => {
       const write = calls.find((c) => c.toolName === 'configure' && c.args.ipCameras !== undefined)
       expect(write).toBeTruthy()
       expect(write!.args.ipCameras).toEqual([])
       expect(write!.args.selectedCameras).toEqual([])
     })
+  })
+
+  it('cancelar a confirmação mantém a câmera na exibição', async () => {
+    const registeredIp = { id: 'ip:http://10.0.0.1:8080/video', name: 'Portão', url: 'http://10.0.0.1:8080/video' }
+    const { calls } = setupServer({
+      cameras: [{ id: registeredIp.id, name: 'Portão', source: 'ip', online: true, monitors: 0 }],
+      selectedCameras: [registeredIp.id],
+      ipCameras: [registeredIp]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    fireEvent.click(await screen.findByTitle('Remover câmera IP (cadastro e exibição)'))
+    await screen.findByText('Fechar câmera?')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+
+    await waitFor(() => expect(screen.queryByText('Fechar câmera?')).toBeNull())
+    expect(calls.filter((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)).toHaveLength(0)
   })
 
   it('remover webcam pelo X mantém o cadastro das câmeras IP intacto', async () => {
@@ -392,6 +417,10 @@ describe('VisionPage — X no card remove câmera IP do cadastro (webcam só da 
     await screen.findByText('MomAI Vision')
 
     fireEvent.click(await screen.findByTitle('Fechar / Remover câmera da exibição'))
+
+    // Confirmation card appears before anything is removed.
+    await screen.findByText('Fechar câmera?')
+    fireEvent.click(screen.getByRole('button', { name: 'Sim' }))
 
     await waitFor(() => {
       const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
