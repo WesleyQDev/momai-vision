@@ -1,7 +1,7 @@
 {
   "id": "momai-vision",
   "name": "MomAI Vision",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "is_official": true,
   "description": "Veja suas câmeras, receba alertas de movimento e pergunte o que está acontecendo.",
   "category": "utility",
@@ -59,7 +59,7 @@
   "momai_compat": ">=1.11.0",
   "sdkVersion": 1,
   "background": true,
-  "backgroundScript": "runtime.js",
+  "backgroundScript": "dist/runtime.js",
   "permissions": ["camera", "network"],
   "ui": {
     "page": "dist/page.js",
