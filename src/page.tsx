@@ -2879,16 +2879,19 @@ function AddCameraModal({
   onClose: () => void
   allCameras: CameraInfo[]
   selectedCameraIds: string[]
-  onConfirm: (webcamIds: string[], ipDrafts: Array<{ name: string; url: string }>) => Promise<void>
+  onConfirm: (webcamIds: string[], ipDrafts: Array<{ name: string; url: string; transport: 'tcp' | 'udp' }>) => Promise<void>
 }): JSX.Element | null {
   const { t } = useI18n()
   const isMaximized = useWindowMaximized()
   const [activeTab, setActiveTab] = useState<'webcam' | 'ip'>('webcam')
   const [selectedWebcamId, setSelectedWebcamId] = useState<string>('')
   const [pendingWebcamIds, setPendingWebcamIds] = useState<string[]>([])
-  const [pendingIpDrafts, setPendingIpDrafts] = useState<Array<{ name: string; url: string }>>([])
+  const [pendingIpDrafts, setPendingIpDrafts] = useState<Array<{ name: string; url: string; transport: 'tcp' | 'udp' }>>([])
   const [ipUrl, setIpUrl] = useState('')
   const [ipName, setIpName] = useState('')
+  const [ipTransport, setIpTransport] = useState<'tcp' | 'udp'>('udp')
+  const [transportHelp, setTransportHelp] = useState<'tcp' | 'udp' | null>(null)
+  const [rememberIp, setRememberIp] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [confirmUnsaved, setConfirmUnsaved] = useState(false)
@@ -2897,17 +2900,32 @@ function AddCameraModal({
   const ipCameras = allCameras.filter((c) => c.source === 'ip')
 
   // Reset the pending selection every time the modal (re)opens, so a
-  // cancelled session never leaks cameras into the next one.
+  // cancelled session never leaks cameras into the next one. A previously
+  // remembered IP draft (name + URL + transport) is restored instead.
   useEffect(() => {
     if (!isOpen) return
     setSelectedWebcamId('')
     setPendingWebcamIds([])
     setPendingIpDrafts([])
-    setIpUrl('')
-    setIpName('')
+    setTransportHelp(null)
     setModalError(null)
     setSubmitting(false)
     setConfirmUnsaved(false)
+    try {
+      const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:ip-draft`) : null
+      const saved = raw ? JSON.parse(raw) as { name?: unknown; url?: unknown; transport?: unknown } : null
+      if (saved && typeof saved.url === 'string' && saved.url.trim()) {
+        setIpUrl(saved.url)
+        setIpName(typeof saved.name === 'string' ? saved.name : '')
+        setIpTransport(saved.transport === 'tcp' ? 'tcp' : 'udp')
+        setRememberIp(true)
+        return
+      }
+    } catch {}
+    setIpUrl('')
+    setIpName('')
+    setIpTransport('udp')
+    setRememberIp(false)
   }, [isOpen])
 
   if (!isOpen) return null
@@ -2931,6 +2949,22 @@ function AddCameraModal({
     void command('warm_webcam', { cameraId: val }).catch(() => {})
   }
 
+  const persistIpDraft = (draft: { name: string; url: string; transport: 'tcp' | 'udp' } | null) => {
+    try {
+      if (typeof localStorage === 'undefined') return
+      if (draft && draft.url.trim()) {
+        localStorage.setItem(`${EXT_ID}:ip-draft`, JSON.stringify(draft))
+      } else {
+        localStorage.removeItem(`${EXT_ID}:ip-draft`)
+      }
+    } catch {}
+  }
+
+  const handleToggleRememberIp = (checked: boolean) => {
+    setRememberIp(checked)
+    persistIpDraft(checked ? { name: ipName.trim(), url: ipUrl.trim(), transport: ipTransport } : null)
+  }
+
   const handleStageIp = () => {
     const url = ipUrl.trim()
     if (!url) return
@@ -2943,7 +2977,8 @@ function AddCameraModal({
       setModalError(t('cameras.addModal.alreadyStaged'))
       return
     }
-    setPendingIpDrafts((prev) => [...prev, { name: ipName.trim(), url }])
+    if (rememberIp) persistIpDraft({ name: ipName.trim(), url, transport: ipTransport })
+    setPendingIpDrafts((prev) => [...prev, { name: ipName.trim(), url, transport: ipTransport }])
     setIpUrl('')
     setIpName('')
     setModalError(null)
@@ -2963,7 +2998,7 @@ function AddCameraModal({
   // para que 1 clique no rodapé já adicione uma única IP sem passo extra.
   const effectivePendingCount = pendingCount + (hasUnsavedValidIp ? 1 : 0)
 
-  const doConfirm = async (overrideWebcams?: string[], overrideIps?: Array<{ name: string; url: string }>) => {
+  const doConfirm = async (overrideWebcams?: string[], overrideIps?: Array<{ name: string; url: string; transport: 'tcp' | 'udp' }>) => {
     const webcamsToAdd = overrideWebcams ?? pendingWebcamIds
     const ipsToAdd = overrideIps ?? pendingIpDrafts
     if (webcamsToAdd.length + ipsToAdd.length === 0) return
@@ -3005,7 +3040,8 @@ function AddCameraModal({
         setModalError(t('cameras.addModal.alreadyStaged'))
         return
       }
-      const nextIps = [...pendingIpDrafts, { name: ipName.trim(), url }]
+      const nextIps = [...pendingIpDrafts, { name: ipName.trim(), url, transport: ipTransport }]
+      if (rememberIp) persistIpDraft({ name: ipName.trim(), url, transport: ipTransport })
       await doConfirm(pendingWebcamIds, nextIps)
       return
     }
@@ -3169,7 +3205,65 @@ function AddCameraModal({
                           placeholder={t('cameras.addModal.urlPlaceholder')}
                           className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
                         />
+                        <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={rememberIp}
+                            onChange={(e) => handleToggleRememberIp(e.target.checked)}
+                            className="w-3.5 h-3.5 shrink-0"
+                          />
+                          <span className="text-[11px] text-text-muted">
+                            {t('cameras.addModal.rememberIp')}
+                          </span>
+                        </label>
                       </div>
+                      </div>
+                      <div>
+                        <span id="vision-ip-transport-label" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                          {t('cameras.addModal.transportLabel')}
+                        </span>
+                        <div role="radiogroup" aria-labelledby="vision-ip-transport-label" className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {(['udp', 'tcp'] as const).map((mode) => {
+                            const selected = ipTransport === mode
+                            return (
+                              <div
+                                key={mode}
+                                className={`flex items-center gap-2 rounded-lg border px-3 py-2 transition-colors ${selected
+                                  ? 'bg-emerald-500/10 border-emerald-500/50'
+                                  : 'bg-input border-border/40'
+                                  }`}
+                              >
+                                <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+                                  <input
+                                    type="radio"
+                                    name="vision-ip-transport"
+                                    value={mode}
+                                    checked={selected}
+                                    onChange={() => setIpTransport(mode)}
+                                    className="w-3.5 h-3.5 shrink-0"
+                                  />
+                                  <span className="text-xs font-medium text-text">
+                                    {t(mode === 'tcp' ? 'cameras.addModal.transportTcp' : 'cameras.addModal.transportUdp')}
+                                  </span>
+                                </label>
+                                <button
+                                  type="button"
+                                  onClick={() => setTransportHelp((prev) => (prev === mode ? null : mode))}
+                                  aria-label={t('cameras.addModal.transportHelpAbout', { mode: mode.toUpperCase() })}
+                                  aria-expanded={transportHelp === mode}
+                                  className="w-5 h-5 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text text-[11px] leading-none flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
+                                >
+                                  ?
+                                </button>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        {transportHelp ? (
+                          <p role="status" className="mt-2 text-[11px] leading-relaxed text-text-muted bg-card border border-border/40 rounded-lg px-3 py-2">
+                            {t(transportHelp === 'tcp' ? 'cameras.addModal.transportTcpHelp' : 'cameras.addModal.transportUdpHelp')}
+                          </p>
+                        ) : null}
                       </div>
                       <div className="flex justify-end">
                         <button
@@ -3242,6 +3336,9 @@ function AddCameraModal({
                             </svg>
                           </span>
                           <span className="truncate">{draft.name || draft.url}</span>
+                          <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium bg-input text-text-muted shrink-0">
+                            {draft.transport.toUpperCase()}
+                          </span>
                         </span>
                         <button
                           type="button"
@@ -5976,7 +6073,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   // caso de erro na persistência, um banner claro é exibido e o usuário pode
   // reabrir o modal e tentar de novo.
   const confirmAddCameras = useCallback(
-    async (webcamIds: string[], ipDrafts: Array<{ name: string; url: string }>) => {
+    async (webcamIds: string[], ipDrafts: Array<{ name: string; url: string; transport: 'tcp' | 'udp' }>) => {
       lastSelectionChangeAtRef.current = Date.now()
       setBusy(true)
       setIsModalOpen(false)
@@ -6025,12 +6122,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
           const existingIpIds = new Set(ipCamerasList.map((c) => c.id))
 
-          const newIpCameras: Array<{ id: string; name: string; url: string }> = []
+          const newIpCameras: Array<{ id: string; name: string; url: string; transport: 'tcp' | 'udp' }> = []
           for (const draft of ipDrafts) {
             const id = `ip:${draft.url}`
             if (existingIpIds.has(id)) continue
             existingIpIds.add(id)
-            newIpCameras.push({ id, name: draft.name || t('cameras.defaultIpName'), url: draft.url })
+            newIpCameras.push({ id, name: draft.name || t('cameras.defaultIpName'), url: draft.url, transport: draft.transport })
           }
 
           const updatedIp = [...ipCamerasList, ...newIpCameras]

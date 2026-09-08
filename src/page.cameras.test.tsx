@@ -203,7 +203,7 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
       expect(write).toBeTruthy()
       expect(write!.args.selectedCameras).toEqual(['webcam:a', 'ip:http://192.168.0.5:8080/video'])
       expect(write!.args.ipCameras).toEqual([
-        { id: 'ip:http://192.168.0.5:8080/video', name: 'Garagem', url: 'http://192.168.0.5:8080/video' }
+        { id: 'ip:http://192.168.0.5:8080/video', name: 'Garagem', url: 'http://192.168.0.5:8080/video', transport: 'udp' }
       ])
     })
   })
@@ -355,8 +355,117 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
       const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
       expect(write).toBeTruthy()
       expect(write!.args.selectedCameras).toEqual(['webcam:a', 'ip:http://10.0.0.9:8080/video'])
-      expect(write!.args.ipCameras).toEqual([{ id: 'ip:http://10.0.0.9:8080/video', name: 'Câmera IP', url: 'http://10.0.0.9:8080/video' }])
+      expect(write!.args.ipCameras).toEqual([{ id: 'ip:http://10.0.0.9:8080/video', name: 'Câmera IP', url: 'http://10.0.0.9:8080/video', transport: 'udp' }])
     })
+  })
+})
+
+describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
+  it('usa UDP por padrão ao adicionar câmera RTSP', async () => {
+    const { calls } = setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+
+    await stageIp('Quintal', 'rtsp://admin:pass@192.168.0.4:554/onvif2')
+    fireEvent.click(screen.getByRole('button', { name: 'Adicionar 1 câmera' }))
+
+    await waitFor(() => {
+      const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
+      expect(write).toBeTruthy()
+      expect(write!.args.ipCameras).toEqual([
+        { id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2', name: 'Quintal', url: 'rtsp://admin:pass@192.168.0.4:554/onvif2', transport: 'udp' }
+      ])
+    })
+  })
+
+  it('envia TCP quando o usuário seleciona TCP antes de adicionar', async () => {
+    const { calls } = setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    fireEvent.click(screen.getByRole('radio', { name: 'TCP' }))
+    fireEvent.change(screen.getByPlaceholderText('Nome da câmera (ex.: Garagem, Entrada)'), { target: { value: 'Quintal' } })
+    fireEvent.change(screen.getByPlaceholderText(/URL \(http/), { target: { value: 'rtsp://admin:pass@192.168.0.4:554/onvif2' } })
+    fireEvent.click(screen.getByText('Adicionar à seleção'))
+
+    // The staged draft shows the chosen mode.
+    expect(screen.getAllByText('TCP').length).toBeGreaterThan(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Adicionar 1 câmera' }))
+
+    await waitFor(() => {
+      const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
+      expect(write).toBeTruthy()
+      expect(write!.args.ipCameras).toEqual([
+        { id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2', name: 'Quintal', url: 'rtsp://admin:pass@192.168.0.4:554/onvif2', transport: 'tcp' }
+      ])
+    })
+  })
+
+  it('o ponto de interrogação abre o card explicativo de cada modo', async () => {
+    setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    expect(screen.queryByText(/mais simples e baratas/)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Sobre o modo UDP' }))
+    await screen.findByText(/mais simples e baratas/)
+
+    // Clicking again closes the card.
+    fireEvent.click(screen.getByRole('button', { name: 'Sobre o modo UDP' }))
+    await waitFor(() => expect(screen.queryByText(/mais simples e baratas/)).toBeNull())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sobre o modo TCP' }))
+    await screen.findByText(/mais avançadas/)
+  })
+})
+
+describe('VisionPage — lembrar nome e URL da câmera IP', () => {
+  it('caixinha Lembrar salva e preenche nome e URL ao reabrir', async () => {
+    setupServer({ cameras: [] })
+    const first = render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    fireEvent.change(screen.getByPlaceholderText('Nome da câmera (ex.: Garagem, Entrada)'), { target: { value: 'Quintal' } })
+    fireEvent.change(screen.getByPlaceholderText(/URL \(http/), { target: { value: 'rtsp://admin:pass@192.168.0.4:554/onvif2' } })
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Lembrar nome e URL' }))
+    fireEvent.click(screen.getByText('Adicionar à seleção'))
+
+    expect(JSON.parse(localStorage.getItem('momai-vision:ip-draft') || '{}')).toEqual({
+      name: 'Quintal',
+      url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+      transport: 'udp'
+    })
+
+    first.unmount()
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    expect((screen.getByPlaceholderText('Nome da câmera (ex.: Garagem, Entrada)') as HTMLInputElement).value).toBe('Quintal')
+    expect((screen.getByPlaceholderText(/URL \(http/) as HTMLInputElement).value).toBe('rtsp://admin:pass@192.168.0.4:554/onvif2')
+    expect((screen.getByRole('checkbox', { name: 'Lembrar nome e URL' }) as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('desmarcar a caixinha apaga o nome e URL salvos', async () => {
+    localStorage.setItem('momai-vision:ip-draft', JSON.stringify({ name: 'Quintal', url: 'rtsp://x', transport: 'udp' }))
+    setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    expect((screen.getByRole('checkbox', { name: 'Lembrar nome e URL' }) as HTMLInputElement).checked).toBe(true)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Lembrar nome e URL' }))
+    expect(localStorage.getItem('momai-vision:ip-draft')).toBeNull()
   })
 })
 

@@ -6,10 +6,14 @@ import {
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
   RTSP_RESTART_DELAY_MS,
   RTSP_TRANSPORT_FAILOVER_DELAY_MS,
+  applyPinnedTransport,
   buildRtspFfmpegArgs,
   decideRtspReconnect,
   isRtspAuthFailure,
-  otherTransport
+  nextReconnectDelayMs,
+  otherTransport,
+  resolveInitialTransport,
+  shouldLogRetry
 } from './rtsp'
 
 describe('rtsp connection policy', () => {
@@ -102,5 +106,49 @@ describe('rtsp connection policy', () => {
         transportsTried: 2
       })
     ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS })
+  })
+
+  it('prefers the user-configured transport over learned and default ones', () => {
+    expect(resolveInitialTransport('udp', 'tcp')).toBe('udp')
+    expect(resolveInitialTransport('tcp', 'udp')).toBe('tcp')
+    expect(resolveInitialTransport(undefined, 'udp')).toBe('udp')
+    expect(resolveInitialTransport()).toBe(RTSP_PREFERRED_TRANSPORT_DEFAULT)
+  })
+
+  it('keeps a pinned transport instead of failing over to the other one', () => {
+    const failover = decideRtspReconnect({
+      failedTransport: 'udp',
+      stderrLower: 'invalid data found when processing input',
+      hadFirstFrame: false,
+      transportsTried: 1
+    })
+    expect(failover.action).toBe('retry-other-transport')
+    expect(applyPinnedTransport(failover, 'udp')).toEqual({
+      action: 'retry-same-transport',
+      delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS
+    })
+    // Without a pinned choice the failover decision passes through untouched.
+    expect(applyPinnedTransport(failover)).toEqual(failover)
+  })
+
+  it('backs off progressively on repeated never-connected failures', () => {
+    expect(nextReconnectDelayMs(1)).toBe(3000)
+    expect(nextReconnectDelayMs(2)).toBe(6000)
+    expect(nextReconnectDelayMs(3)).toBe(12000)
+    expect(nextReconnectDelayMs(5)).toBe(48000)
+    // Capped so a dead camera or wrong pinned transport never waits longer.
+    expect(nextReconnectDelayMs(6)).toBe(60000)
+    expect(nextReconnectDelayMs(100)).toBe(60000)
+    // Defensive clamp for unexpected counts.
+    expect(nextReconnectDelayMs(0)).toBe(3000)
+  })
+
+  it('quiets the log after the first attempts of a failing streak', () => {
+    expect(shouldLogRetry(1)).toBe(true)
+    expect(shouldLogRetry(2)).toBe(true)
+    expect(shouldLogRetry(3)).toBe(false)
+    expect(shouldLogRetry(9)).toBe(false)
+    expect(shouldLogRetry(10)).toBe(true)
+    expect(shouldLogRetry(20)).toBe(true)
   })
 })

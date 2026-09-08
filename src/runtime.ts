@@ -18,9 +18,13 @@ import {
   RTSP_FIRST_FRAME_WATCHDOG_MS,
   RTSP_FRESH_ATTEMPT_GRACE_MS,
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
+  applyPinnedTransport,
   buildRtspFfmpegArgs,
   decideRtspReconnect,
+  nextReconnectDelayMs,
   otherTransport,
+  resolveInitialTransport,
+  shouldLogRetry,
   type RtspTransport
 } from './vision/rtsp'
 import {
@@ -120,6 +124,8 @@ interface CameraEntry {
   source: 'webcam' | 'ip'
   deviceId?: string
   url?: string
+  /** User-chosen RTSP transport. Undefined keeps the automatic TCP-first failover. */
+  transport?: RtspTransport
 }
 
 const ipCameras: CameraEntry[] = []
@@ -129,7 +135,7 @@ interface StoredConfig {
   retentionDays?: number
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
-  ipCameras?: Array<{ id: string; name: string; url: string }>
+  ipCameras?: Array<{ id: string; name: string; url: string; transport?: RtspTransport }>
   selectedCameras?: string[]
   sendActions?: MonitorAction[]
   detectionZones?: Record<string, Point[]>
@@ -188,7 +194,8 @@ async function syncIpCameras(): Promise<void> {
   ipCameras.length = 0
   for (const cam of config.ipCameras || []) {
     if (cam && cam.url && typeof cam.url === 'string') {
-      ipCameras.push({ id: `ip:${cam.url}`, name: cam.name || 'Câmera IP', source: 'ip', url: cam.url })
+      const transport = cam.transport === 'tcp' || cam.transport === 'udp' ? cam.transport : undefined
+      ipCameras.push({ id: `ip:${cam.url}`, name: cam.name || 'Câmera IP', source: 'ip', url: cam.url, transport })
     }
   }
 }
@@ -642,7 +649,7 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
   const SOI = Buffer.from([0xff, 0xd8])
   const EOI = Buffer.from([0xff, 0xd9])
 
-  const initialTransport = preferredTransportMap.get(camera.id) || RTSP_PREFERRED_TRANSPORT_DEFAULT
+  const initialTransport = resolveInitialTransport(camera.transport, preferredTransportMap.get(camera.id))
 
   const trySpawn = (transport: RtspTransport, transportsTried: number) => {
     if (transportsTried <= 1) bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) [${transport}]...`)
@@ -705,7 +712,11 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       stderrBuf += msg
       if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000)
       if (msg.includes('POC') || msg.includes('RPS') || msg.includes('NALU') || msg.includes('PPS id')) return
-      if (msg.toLowerCase().includes('error') || msg.toLowerCase().includes('failed') || msg.toLowerCase().includes('fatal') || msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('401')) {
+      // Long never-connected streaks already report via lastError + the
+      // periodic restart line — don't echo ffmpeg's identical error per
+      // attempt. Mid-stream failures always log (rare and actionable).
+      const streakQuiet = !hadFirstFrame && connectState.failures >= 3
+      if (!streakQuiet && (msg.toLowerCase().includes('error') || msg.toLowerCase().includes('failed') || msg.toLowerCase().includes('fatal') || msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('401'))) {
         bridge?.log(`[vision] RTSP FFmpeg (${camera.name}) [${transport}]: ${msg.slice(0, 250)}`)
       }
     })
@@ -729,12 +740,15 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
         mjpegStreams.delete(camera.id)
         return
       }
-      const decision = decideRtspReconnect({
-        failedTransport: transport,
-        stderrLower: stderrBuf.toLowerCase(),
-        hadFirstFrame,
-        transportsTried
-      })
+      const decision = applyPinnedTransport(
+        decideRtspReconnect({
+          failedTransport: transport,
+          stderrLower: stderrBuf.toLowerCase(),
+          hadFirstFrame,
+          transportsTried
+        }),
+        camera.transport
+      )
       if (decision.action === 'retry-other-transport') {
         const nextTransport = otherTransport(transport)
         preferredTransportMap.set(camera.id, nextTransport)
@@ -752,21 +766,27 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
         bridge?.log(`[vision] RTSP: authentication failed for ${camera.name} — check user/password, retrying in ${Math.round(decision.delayMs / 1000)}s...`)
       } else {
         connectState.failures++
+        // Never-connected streaks back off progressively (3s → 60s cap) so a
+        // wrong pinned transport or an offline camera neither hammers the
+        // camera nor floods the log. Mid-stream drops keep the fast restart.
+        const delayMs = hadFirstFrame ? decision.delayMs : nextReconnectDelayMs(connectState.failures)
         if (!hadFirstFrame) {
           const hint = stderrBuf.trim().slice(-160) || `exit code=${code} signal=${signal}`
           connectState.lastError = hint
         }
-        bridge?.log(`[vision] RTSP: FFmpeg exited for ${camera.name} [${transport}] code=${code} signal=${signal} — restarting in ${decision.delayMs}ms...`)
-      }
-      setTimeout(() => {
-        if (entry.controller.signal.aborted) {
-          mjpegStreams.delete(camera.id)
-          return
+        if (hadFirstFrame || shouldLogRetry(connectState.failures)) {
+          bridge?.log(`[vision] RTSP: FFmpeg exited for ${camera.name} [${transport}] code=${code} signal=${signal} — restarting in ${delayMs}ms...`)
         }
-        try { ffmpeg.kill() } catch {}
-        trySpawn(preferredTransportMap.get(camera.id) || RTSP_PREFERRED_TRANSPORT_DEFAULT, 1)
-      }, decision.delayMs)
-      return
+        setTimeout(() => {
+          if (entry.controller.signal.aborted) {
+            mjpegStreams.delete(camera.id)
+            return
+          }
+          try { ffmpeg.kill() } catch {}
+          trySpawn(resolveInitialTransport(camera.transport, preferredTransportMap.get(camera.id)), 1)
+        }, delayMs)
+        return
+      }
     })
 
     entry.controller.signal.addEventListener('abort', () => {
@@ -3309,7 +3329,7 @@ async function toolConfigure(args: {
   retentionDays?: number
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
-  ipCameras?: Array<{ id: string; name: string; url: string }>
+  ipCameras?: Array<{ id: string; name: string; url: string; transport?: RtspTransport }>
   selectedCameras?: string[]
   sendActions?: MonitorAction[]
   detectionZones?: Record<string, Point[]>
@@ -3321,6 +3341,11 @@ async function toolConfigure(args: {
     for (const cam of args.ipCameras) {
       if (!cam || typeof cam.url !== 'string') {
         return { ok: false, error: 'URL de câmera IP inválida' }
+      }
+      // Only tcp/udp are valid RTSP transports; anything else falls back
+      // to the automatic TCP-first failover instead of failing the save.
+      if (cam.transport !== undefined && cam.transport !== 'tcp' && cam.transport !== 'udp') {
+        delete cam.transport
       }
       const validation = await assertCameraUrlSafe(cam.url)
       if (!validation.ok) {
@@ -3385,11 +3410,19 @@ async function toolConfigure(args: {
   }
   if (args.ipCameras !== undefined) {
     const previousIpIds = new Set(ipCameras.map((c) => c.id))
+    const previousTransports = new Map(ipCameras.map((c) => [c.id, c.transport]))
     await syncIpCameras()
     // Stop MJPEG/RTSP streams for IP cameras that were removed from the
     // registry, so they stop consuming the camera once unregistered.
     for (const removedId of previousIpIds) {
       if (!ipCameras.some((c) => c.id === removedId)) stopMjpeg(removedId)
+    }
+    // Restart streams whose transport choice changed, so the new mode
+    // takes effect immediately instead of lingering on the old one.
+    for (const cam of ipCameras) {
+      if (previousIpIds.has(cam.id) && previousTransports.get(cam.id) !== cam.transport) {
+        stopMjpeg(cam.id)
+      }
     }
     // Start MJPEG streams for IP cameras that have active monitors.
     for (const cam of ipCameras) {

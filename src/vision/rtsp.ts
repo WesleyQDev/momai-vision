@@ -35,6 +35,31 @@ export const RTSP_RESTART_DELAY_MS = 800
 /** Delay before retrying after both transports failed in one cycle. */
 export const RTSP_EXHAUSTED_RETRY_DELAY_MS = 3000
 
+/** Base delay for repeated never-connected retries (progressive). */
+export const RTSP_RETRY_BASE_DELAY_MS = 3000
+
+/** Cap for the progressive retry backoff. */
+export const RTSP_RETRY_MAX_DELAY_MS = 60000
+
+/**
+ * Progressive delay for consecutive never-connected failures: 3s, 6s, 12s,
+ * 24s, 48s, then capped at 60s. Stops a wrong pinned transport (or a camera
+ * stuck offline) from hammering the camera and spamming the log every 3s.
+ */
+export function nextReconnectDelayMs(consecutiveFailures: number): number {
+  const step = Math.max(0, Math.min(consecutiveFailures - 1, 5))
+  return Math.min(RTSP_RETRY_MAX_DELAY_MS, RTSP_RETRY_BASE_DELAY_MS * 2 ** step)
+}
+
+/**
+ * Log the first attempts of a failing streak, then only every 10th — the
+ * streak state stays visible in get_status (lastError/failures) without
+ * flooding the log while nobody can act on it.
+ */
+export function shouldLogRetry(consecutiveFailures: number): boolean {
+  return consecutiveFailures <= 2 || consecutiveFailures % 10 === 0
+}
+
 /** Delay before retrying after an auth failure (avoids account lockouts). */
 export const RTSP_AUTH_RETRY_DELAY_MS = 10000
 
@@ -50,6 +75,33 @@ export const RTSP_FRESH_ATTEMPT_GRACE_MS = 10000
 
 export function otherTransport(transport: RtspTransport): RtspTransport {
   return transport === 'tcp' ? 'udp' : 'tcp'
+}
+
+/**
+ * Resolve the transport for a new RTSP session. An explicit per-camera
+ * choice (set by the user when adding the camera) wins; otherwise reuse
+ * the learned transport, falling back to the TCP-first default.
+ */
+export function resolveInitialTransport(
+  configured?: RtspTransport,
+  learned?: RtspTransport
+): RtspTransport {
+  return configured ?? learned ?? RTSP_PREFERRED_TRANSPORT_DEFAULT
+}
+
+/**
+ * Honor a user-pinned transport: when the camera has an explicit choice,
+ * never fail over to the other transport — retry the chosen one instead,
+ * since the user already knows which one their camera speaks.
+ */
+export function applyPinnedTransport(
+  decision: RtspReconnectDecision,
+  pinned?: RtspTransport
+): RtspReconnectDecision {
+  if (pinned && decision.action === 'retry-other-transport') {
+    return { action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS }
+  }
+  return decision
 }
 
 /** FFmpeg arguments for low-latency RTSP → MJPEG transcoding. */
