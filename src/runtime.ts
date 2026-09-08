@@ -15,6 +15,15 @@ import { ptLabel } from './vision/labels'
 import { LatestWinsQueue } from './vision/detect-queue'
 import { assertCameraUrlSafe, validateCameraUrl } from './vision/camera-url'
 import {
+  RTSP_FIRST_FRAME_WATCHDOG_MS,
+  RTSP_FRESH_ATTEMPT_GRACE_MS,
+  RTSP_PREFERRED_TRANSPORT_DEFAULT,
+  buildRtspFfmpegArgs,
+  decideRtspReconnect,
+  otherTransport,
+  type RtspTransport
+} from './vision/rtsp'
+import {
   createMonitorState,
   evaluateMonitor,
   applySceneAnswer,
@@ -292,17 +301,21 @@ function pushIpFrameToHost(cameraId: string, frameData: Buffer | string): void {
   ipInFlight.set(cameraId, current + 1)
 
   const buf = Buffer.isBuffer(frameData) ? frameData : Buffer.from(frameData, 'base64')
-  // Timeout curto: o push é fire-and-forget para o preview (não bloqueia o parse
-  // do MJPEG).
+  // Timeout covers a busy host: the frame push is fire-and-forget for the
+  // preview, but aborting too early under CPU load (YOLO at 100%) starves the
+  // preview while detection (in-memory path) keeps working. Failures are
+  // counted in the camera metrics (get_status) instead of being silent.
   const ac = new AbortController()
-  const t = setTimeout(() => ac.abort(), 1200)
+  const t = setTimeout(() => ac.abort(), 2500)
   hostFetch(`/media/camera/frame/${encodeURIComponent(cameraId)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'image/jpeg' },
     body: new Uint8Array(buf),
     signal: ac.signal as any
   })
-    .catch(() => {})
+    .catch(() => {
+      metricFor(cameraId).pushFailed++
+    })
     .finally(() => {
       clearTimeout(t)
       const active = ipInFlight.get(cameraId) || 1
@@ -555,8 +568,8 @@ async function sweepMjpegStreams(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// RTSP client — raw TCP with Digest auth, TCP interleaved RTP, H.265→JPEG
-// via FFmpeg. For cameras (e.g. Yoosee/HiChip) that don't expose HTTP
+// RTSP client — FFmpeg with TCP-interleaved RTP first, H.264/H.265→JPEG
+// transcode. For cameras (e.g. Yoosee/HiChip) that don't expose HTTP
 // snapshot endpoints and whose RTSP implementation is too non-standard for
 // FFmpeg's own RTSP demuxer.
 // ---------------------------------------------------------------------------
@@ -576,7 +589,32 @@ function stopRtsp(cameraId: string): void {
   rtspSessions.delete(cameraId)
 }
 
-const preferredTransportMap = new Map<string, 'tcp' | 'udp'>()
+// Per-camera learned transport ('tcp' once it delivers frames). Unknown
+// cameras start on TCP: the vast majority of consumer IP cameras only serve
+// RTP interleaved over TCP, and UDP attempts stall for the full network
+// timeout before failing.
+const preferredTransportMap = new Map<string, RtspTransport>()
+
+// Connection health per IP camera. Lets get_status distinguish "connecting"
+// (FFmpeg still starting, within grace) from "failed" (bad credentials,
+// camera offline) so the UI never shows "connecting" forever on a dead end.
+interface IpConnectState {
+  startedAt: number
+  firstFrameAt: number
+  lastError: string
+  failures: number
+}
+
+const ipConnectState = new Map<string, IpConnectState>()
+
+function connectStateFor(cameraId: string): IpConnectState {
+  let state = ipConnectState.get(cameraId)
+  if (!state) {
+    state = { startedAt: 0, firstFrameAt: 0, lastError: '', failures: 0 }
+    ipConnectState.set(cameraId, state)
+  }
+  return state
+}
 
 async function startRtspStream(camera: CameraEntry): Promise<void> {
   if (rtspSessions.has(camera.id)) return
@@ -591,6 +629,11 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
   }
   mjpegStreams.set(camera.id, entry)
 
+  const connectState = connectStateFor(camera.id)
+  connectState.startedAt = Date.now()
+  connectState.firstFrameAt = 0
+  connectState.lastError = ''
+
   const { spawn } = await import('node:child_process')
   bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name}...`)
 
@@ -599,31 +642,12 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
   const SOI = Buffer.from([0xff, 0xd8])
   const EOI = Buffer.from([0xff, 0xd9])
 
-  const initialTransport = preferredTransportMap.get(camera.id) || 'udp'
+  const initialTransport = preferredTransportMap.get(camera.id) || RTSP_PREFERRED_TRANSPORT_DEFAULT
 
-  const trySpawn = (transport: 'tcp' | 'udp', isRetry = false) => {
-    if (!isRetry) bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) [${transport}]...`)
-    else bridge?.log(`[vision] RTSP: ${transport === 'udp' ? 'tcp' : 'udp'} falhou, tentando ${transport} para ${camera.name} (${redactedUrl})...`)
-    const ffmpegArgs = [
-      '-hide_banner',
-      '-loglevel', 'error',
-      '-rtsp_transport', transport,
-      '-buffer_size', '2097152',
-      '-max_delay', '500000',
-      '-err_detect', 'ignore_err',
-      '-allowed_media_types', 'video',
-      '-timeout', '5000000',
-      '-probesize', '128k',
-      '-analyzeduration', '1000000',
-      '-fflags', '+nobuffer+discardcorrupt',
-      '-flags', 'low_delay',
-      '-i', url,
-      '-vf', 'fps=25,scale=640:-2',
-      '-f', 'image2pipe',
-      '-vcodec', 'mjpeg',
-      '-q:v', '3',
-      'pipe:1'
-    ]
+  const trySpawn = (transport: RtspTransport, transportsTried: number) => {
+    if (transportsTried <= 1) bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) [${transport}]...`)
+    else bridge?.log(`[vision] RTSP: ${otherTransport(transport)} failed, trying ${transport} for ${camera.name} (${redactedUrl})...`)
+    const ffmpegArgs = buildRtspFfmpegArgs(url, transport)
     const ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     const session: RtspSession = { ffmpeg, alive: true }
@@ -631,10 +655,26 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
     let hadFirstFrame = false
     let stderrBuf = ''
 
+    // A silent UDP stall (camera stops sending RTP, control connection open)
+    // never exits FFmpeg — without this, a dead session sits forever with no
+    // frames and no restart. The per-spawn `session` guard keeps a stale
+    // watchdog from killing a newer retry.
+    const firstFrameWatchdog = setTimeout(() => {
+      if (!hadFirstFrame && session.alive && !entry.controller.signal.aborted) {
+        bridge?.log(`[vision] RTSP: no frame from ${camera.name} [${transport}] after ${RTSP_FIRST_FRAME_WATCHDOG_MS / 1000}s — restarting...`)
+        connectState.failures++
+        try { ffmpeg.kill() } catch {} // 'exit' below applies the reconnect policy
+      }
+    }, RTSP_FIRST_FRAME_WATCHDOG_MS)
+
     ffmpeg.stdout!.on('data', (chunk: Buffer) => {
       if (!hadFirstFrame) {
         hadFirstFrame = true
+        clearTimeout(firstFrameWatchdog)
         preferredTransportMap.set(camera.id, transport)
+        connectState.firstFrameAt = Date.now()
+        connectState.lastError = ''
+        connectState.failures = 0
       }
       if (jpegBuf.length === 0) jpegBuf = chunk
       else jpegBuf = Buffer.concat([jpegBuf, chunk])
@@ -671,46 +711,66 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
     })
 
     ffmpeg.on('error', (err) => {
-      bridge?.log(`[vision] RTSP: spawn falhou para ${camera.name}: ${err.message} (ffmpeg instalado?)`)
+      bridge?.log(`[vision] RTSP: spawn failed for ${camera.name}: ${err.message} (is ffmpeg installed?)`)
+      connectState.lastError = 'ffmpeg-missing'
+      connectState.failures++
       session.alive = false
       rtspSessions.delete(camera.id)
       mjpegStreams.delete(camera.id)
     })
 
     ffmpeg.on('exit', (code, signal) => {
+      clearTimeout(firstFrameWatchdog)
       if (!session.alive) return
       session.alive = false
       rtspSessions.delete(camera.id)
-      const errLower = stderrBuf.toLowerCase()
-      const isTransportMismatch = errLower.includes('nonmatching transport') || (transport === 'tcp' && (errLower.includes('connection to tcp') || errLower.includes('method setup failed')))
-      const nextTransport = transport === 'udp' ? 'tcp' : 'udp'
-      if (!isRetry && isTransportMismatch && !hadFirstFrame && !entry.controller.signal.aborted) {
-        bridge?.log(`[vision] RTSP: ${transport} incompatível para ${camera.name}, alternando para ${nextTransport}...`)
+      if (entry.controller.signal.aborted) {
+        bridge?.log(`[vision] RTSP: FFmpeg stopped for ${camera.name} [${transport}] code=${code}`)
+        mjpegStreams.delete(camera.id)
+        return
+      }
+      const decision = decideRtspReconnect({
+        failedTransport: transport,
+        stderrLower: stderrBuf.toLowerCase(),
+        hadFirstFrame,
+        transportsTried
+      })
+      if (decision.action === 'retry-other-transport') {
+        const nextTransport = otherTransport(transport)
         preferredTransportMap.set(camera.id, nextTransport)
+        bridge?.log(`[vision] RTSP: ${transport} failed for ${camera.name}, switching to ${nextTransport}...`)
         setTimeout(() => {
           if (entry.controller.signal.aborted) { mjpegStreams.delete(camera.id); return }
           try { ffmpeg.kill() } catch {}
-          trySpawn(nextTransport, true)
-        }, 50)
+          trySpawn(nextTransport, transportsTried + 1)
+        }, decision.delayMs)
         return
       }
-      if (!entry.controller.signal.aborted) {
-        bridge?.log(`[vision] RTSP: FFmpeg saiu para ${camera.name} [${transport}] code=${code} signal=${signal} — auto-reiniciando em 800ms...`)
-        setTimeout(() => {
-          if (entry.controller.signal.aborted) {
-            mjpegStreams.delete(camera.id)
-            return
-          }
-          try { ffmpeg.kill() } catch {}
-          trySpawn(transport, false)
-        }, 800)
-        return
+      if (decision.action === 'backoff-auth') {
+        connectState.lastError = 'auth'
+        connectState.failures++
+        bridge?.log(`[vision] RTSP: authentication failed for ${camera.name} — check user/password, retrying in ${Math.round(decision.delayMs / 1000)}s...`)
+      } else {
+        connectState.failures++
+        if (!hadFirstFrame) {
+          const hint = stderrBuf.trim().slice(-160) || `exit code=${code} signal=${signal}`
+          connectState.lastError = hint
+        }
+        bridge?.log(`[vision] RTSP: FFmpeg exited for ${camera.name} [${transport}] code=${code} signal=${signal} — restarting in ${decision.delayMs}ms...`)
       }
-      bridge?.log(`[vision] RTSP: FFmpeg finalizado para ${camera.name} [${transport}] code=${code}`)
-      mjpegStreams.delete(camera.id)
+      setTimeout(() => {
+        if (entry.controller.signal.aborted) {
+          mjpegStreams.delete(camera.id)
+          return
+        }
+        try { ffmpeg.kill() } catch {}
+        trySpawn(preferredTransportMap.get(camera.id) || RTSP_PREFERRED_TRANSPORT_DEFAULT, 1)
+      }, decision.delayMs)
+      return
     })
 
     entry.controller.signal.addEventListener('abort', () => {
+      clearTimeout(firstFrameWatchdog)
       session.alive = false
       try { ffmpeg.kill() } catch {}
       rtspSessions.delete(camera.id)
@@ -720,7 +780,7 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
     return ffmpeg
   }
 
-  trySpawn(initialTransport)
+  trySpawn(initialTransport, 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1123,7 @@ interface CameraMetrics {
   fetchMs: number[]
   parseMs: number[]
   pushDropped: number
+  pushFailed: number
   snapshotPollMs: number[]
 }
 
@@ -1071,7 +1132,7 @@ const cameraMetrics = new Map<string, CameraMetrics>()
 function metricFor(cameraId: string): CameraMetrics {
   let m = cameraMetrics.get(cameraId)
   if (!m) {
-    m = { captureAt: 0, yoloAt: 0, yoloMs: [], renderAt: 0, framesIn: 0, framesYolo: 0, framesDropped: 0, fetchMs: [], parseMs: [], pushDropped: 0, snapshotPollMs: [] }
+    m = { captureAt: 0, yoloAt: 0, yoloMs: [], renderAt: 0, framesIn: 0, framesYolo: 0, framesDropped: 0, fetchMs: [], parseMs: [], pushDropped: 0, pushFailed: 0, snapshotPollMs: [] }
     cameraMetrics.set(cameraId, m)
   }
   return m
@@ -1098,6 +1159,7 @@ function summaryMetrics(cameraId: string): Record<string, number> {
     framesYolo: m.framesYolo,
     framesDropped: m.framesDropped,
     pushDropped: m.pushDropped,
+    pushFailed: m.pushFailed,
     yoloAvgMs: avgMs(m.yoloMs),
     fetchAvgMs: avgMs(m.fetchMs),
     parseAvgMs: avgMs(m.parseMs),
@@ -1835,7 +1897,10 @@ const WEB_RECONNECT_MIN_MS = 60000
 // como offline em transient stall de 2-3 frames, mas 15s já é "sem sinal" real.
 const IP_FRAME_STALE_MS = 8000
 const IP_RECONNECT_STALE_MS = 15000
-const IP_RECONNECT_MIN_MS = 30000
+// A checagem de stall roda a cada 10s (sweep): com o watchdog de primeiro
+// frame dentro do RTSP + este intervalo, uma sessão UDP silenciosa (sem
+// frames e sem exit do FFmpeg) é percebida em ~20s em vez de ~1 minuto.
+const IP_RECONNECT_MIN_MS = 20000
 // Timeout do worker para o start-watch no host. O bridge da câmera tem 30s
 // internos; para o fluxo de UI (list_cameras no modal de adicionar) esperar
 // tudo isso é "Adicionando" eterno. 8s cobre o boot da hidden window + o
@@ -1931,6 +1996,18 @@ async function reconnectIpIfStale(camera: CameraEntry): Promise<void> {
   if (isIpStreamFresh(camera)) return
   const sub = mjpegStreams.get(camera.id)
   const rtsp = rtspSessions.get(camera.id)
+  // A fresh FFmpeg attempt needs room to finish its handshake/probe: never
+  // kill a connection that started seconds ago, or the sweeper flaps a
+  // camera that was about to deliver its first frame.
+  const connectState = ipConnectState.get(camera.id)
+  if (
+    connectState &&
+    connectState.firstFrameAt === 0 &&
+    (sub || rtsp) &&
+    Date.now() - connectState.startedAt < RTSP_FRESH_ATTEMPT_GRACE_MS
+  ) {
+    return
+  }
   const lastSeen = sub?.latestTs || 0
   // Se nunca entregou frame e já passou do stale, força restart (câmera não conectou)
   const shouldRetry = !sub && !rtsp ? true : Date.now() - lastSeen >= IP_RECONNECT_STALE_MS
@@ -2195,9 +2272,11 @@ async function toolCaptureSnapshot(args: { cameraId?: string; camera?: string; n
   if (camera.source === 'ip') {
     await startMjpeg(camera)
   }
-  // Give the source a moment to produce a frame.
+  // Give the source a moment to produce a frame. RTSP needs longer: even a
+  // healthy camera takes seconds for spawn + handshake + probe + keyframe.
+  const maxFrameTries = camera.source === 'ip' ? 20 : 10
   let frame: { jpegBase64: string } | null = null
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < maxFrameTries; i++) {
     frame = await getCameraFrame(camera)
     if (frame) break
     await new Promise((r) => setTimeout(r, 300))
@@ -2804,9 +2883,9 @@ async function toolStopMonitoring(args: { monitorId?: string; all?: boolean }): 
 }
 
 async function getStatusData(): Promise<
-  Record<string, { online: boolean; monitors: number; since?: number; metrics?: Record<string, number> }>
+  Record<string, { online: boolean; monitors: number; since?: number; connecting?: boolean; lastError?: string; metrics?: Record<string, number> }>
 > {
-  const status: Record<string, { online: boolean; monitors: number; since?: number; metrics?: Record<string, number> }> = {}
+  const status: Record<string, { online: boolean; monitors: number; since?: number; connecting?: boolean; lastError?: string; metrics?: Record<string, number> }> = {}
   const byCamera = new Map<string, ActiveMonitor[]>()
   for (const m of monitors.values()) {
     if (m.config.paused) continue
@@ -2821,10 +2900,19 @@ async function getStatusData(): Promise<
         camera.source === 'webcam'
           ? reloadingCameras.has(camera.id) || isWebcamStreamFresh(camera) || await isWebcamOnline(camera)
           : isIpStreamFresh(camera)
+      // IP extras: while offline but FFmpeg is running the camera is still
+      // connecting (not dead); lastError tells why it never connected
+      // ('auth' = wrong user/password, ffmpeg stderr hint, '' = trying).
+      const connecting =
+        camera.source === 'ip' && !online && (mjpegStreams.has(camera.id) || rtspSessions.has(camera.id))
+      const lastError =
+        camera.source === 'ip' ? ipConnectState.get(camera.id)?.lastError || '' : ''
       status[camera.id] = {
         online,
         monitors: active.length,
         since: active[0]?.config.createdAt,
+        connecting,
+        lastError,
         metrics: summaryMetrics(camera.id)
       }
     })
@@ -3071,6 +3159,10 @@ async function toolReloadCamera(args: { cameraId?: string; cameraName?: string }
   try {
     if (camera.source === 'ip') {
       stopMjpeg(camera.id)
+      // A manual reload is an explicit user retry: never let the stale
+      // sweeper's rate limit delay it.
+      ipLastReconnectTs.delete(camera.id)
+      ipLastOnlineCheck.delete(camera.id)
       await startMjpeg(camera)
     } else if (camera.source === 'webcam') {
       // If the card held a stale id (replug changed the deviceId), the host
@@ -3087,8 +3179,11 @@ async function toolReloadCamera(args: { cameraId?: string; cameraName?: string }
     } else {
       return { ok: false, error: 'unsupported camera source' }
     }
+    // RTSP needs longer: spawn + handshake + probe + keyframe take seconds
+    // even when healthy.
+    const maxReloadTries = camera.source === 'ip' ? 20 : 10
     let frame: { jpegBase64: string } | null = null
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < maxReloadTries; i++) {
       frame = await getCameraFrame(camera)
       if (frame) break
       await new Promise((r) => setTimeout(r, 300))
@@ -3558,9 +3653,11 @@ function ensureInitialized(): Promise<void> {
     }, 5000)
     // TTL dos streams MJPEG/RTSP: derruba streams de câmeras IP sem consumidor
     // ativo (item A2) — não deixa ffmpeg/fetch contínuo vazando para sempre.
+    // Roda a cada 10s para perceber stalls silenciosos de UDP rápido (o
+    // reconnect interno limita re-tentativas; checagens baratas de memória).
     setInterval(() => {
       void sweepMjpegStreams().catch(() => {})
-    }, 30000)
+    }, 10000)
     initPromise = withTimeout(
       restoreMonitors().catch((err) => {
         bridge?.log(`[vision] restore failed: ${err instanceof Error ? err.message : String(err)}`)
