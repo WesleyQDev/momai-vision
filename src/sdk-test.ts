@@ -18,6 +18,9 @@ function createSDK() {
       delete: vi.fn(async () => {}),
       listKeys: vi.fn(async () => [])
     },
+    media: {
+      url: (extensionId: string, relativePath: string) => `/extensions/${extensionId}/storage/${relativePath}`
+    },
     events: {
       subscribe: vi.fn(() => () => {}),
       unsubscribe: vi.fn(),

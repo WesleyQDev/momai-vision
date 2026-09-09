@@ -23,6 +23,9 @@ export interface MomAISDK {
     delete(key: string): Promise<void>
     listKeys(): Promise<string[]>
   }
+  media: {
+    url: (extensionId: string, relativePath: string) => string
+  }
   events: {
     subscribe<T = any>(type: string, handler: (data: T) => void): () => void
     unsubscribe(type: string, handler: (...args: any[]) => void): void

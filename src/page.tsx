@@ -3829,6 +3829,15 @@ function ExpandedCameraModal({
     }
   }, [camera, streamUrl])
 
+  useEffect(() => {
+    if (!camera) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [camera, onClose])
+
   if (!camera) return null
 
   const handleTakeSnapshot = async () => {
@@ -3845,16 +3854,15 @@ function ExpandedCameraModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 bg-bg overflow-hidden flex flex-col animate-fadeIn">
-      <div className="h-full flex flex-col">
-        <div className="relative flex items-center justify-between px-6 py-3 border-b border-border/40 bg-card/85 backdrop-blur-md shrink-0">
-          <div className="w-12 shrink-0" />
-          <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 max-w-[45%] pointer-events-none">
+    <div className="absolute inset-0 z-50 bg-bg overflow-hidden flex flex-col animate-fadeIn">
+      <div className="h-full flex flex-col min-h-0">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 sm:px-6 py-3 border-b border-border/40 bg-card/85 backdrop-blur-md shrink-0">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
-            <h2 className="text-base font-bold text-text truncate">{formatCameraName(camera.name, camera.source, t)}</h2>
-            <span className="text-xs text-text-muted shrink-0">({isWebcam ? t('cameras.optWebcam') : t('cameras.ipSlashRtsp')})</span>
+            <h2 className="text-sm sm:text-base font-bold text-text truncate min-w-0">{formatCameraName(camera.name, camera.source, t)}</h2>
+            <span className="hidden sm:inline text-xs text-text-muted shrink-0">({isWebcam ? t('cameras.optWebcam') : t('cameras.ipSlashRtsp')})</span>
           </div>
-          <div className="flex items-center gap-2 shrink-0 ml-auto z-10">
+          <div className="flex flex-wrap items-center gap-2 shrink-0 ml-auto">
             {onToggleEditZone ? (
               <button
                 type="button"
@@ -3939,7 +3947,7 @@ function ExpandedCameraModal({
         >
           <canvas
             ref={frameCanvasRef}
-            className="w-full h-full object-contain"
+            className="max-w-full max-h-full w-full h-full object-contain"
           />
 
           {/* Bounding boxes — SVG overlay with object-contain letterbox (filtrado por zona) */}
@@ -4003,7 +4011,7 @@ function ExpandedPrintModal({
 
   const imgSrc =
     snap.imageDataUri ||
-    `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${snap.id}.jpg`
+    `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${snap.id}.jpg`)}`
 
   return (
     <div
@@ -4081,7 +4089,7 @@ function ExpandedAlertModal({
   const imgSrc =
     alert.imageDataUri ||
     (alert.snapshotId
-      ? `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${alert.snapshotId}.jpg`
+      ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
       : '')
 
   return (
@@ -5536,7 +5544,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     e.stopPropagation()
     const imgSrc =
       snap.imageDataUri ||
-      `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${snap.id}.jpg`
+      `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${snap.id}.jpg`)}`
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
@@ -5550,7 +5558,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     const imgSrc =
       alert.imageDataUri ||
       (alert.snapshotId
-        ? `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${alert.snapshotId}.jpg`
+        ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
         : '')
     setContextMenu({
       x: e.clientX,
@@ -6733,7 +6741,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               const imgSrc =
                 alert.imageDataUri ||
                 (alert.snapshotId
-                  ? `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${alert.snapshotId}.jpg`
+                  ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
                   : '')
               return (
                 <div
@@ -6863,7 +6871,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                     <img
                       src={
                         snap.imageDataUri ||
-                        `${window.api?.getApiBaseUrl?.() || ''}/extensions/${EXT_ID}/storage/snapshots/${snap.id}.jpg`
+                        `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${snap.id}.jpg`)}`
                       }
                       alt={snap.description || t('gallery.printAlt')}
                       loading="lazy"
