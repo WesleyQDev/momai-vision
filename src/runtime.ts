@@ -17,10 +17,13 @@ import { assertCameraUrlSafe, validateCameraUrl } from './vision/camera-url'
 import {
   RTSP_FIRST_FRAME_WATCHDOG_MS,
   RTSP_FRESH_ATTEMPT_GRACE_MS,
+  RTSP_MID_STREAM_CHECK_MS,
+  RTSP_MID_STREAM_STALL_MS,
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
   applyPinnedTransport,
   buildRtspFfmpegArgs,
   decideRtspReconnect,
+  isRtspMidStreamStalled,
   nextReconnectDelayMs,
   otherTransport,
   resolveInitialTransport,
@@ -674,6 +677,31 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       }
     }, RTSP_FIRST_FRAME_WATCHDOG_MS)
 
+    let midStreamWatchdog: ReturnType<typeof setInterval> | undefined
+    const stopMidStreamWatchdog = (): void => {
+      if (midStreamWatchdog) {
+        clearInterval(midStreamWatchdog)
+        midStreamWatchdog = undefined
+      }
+    }
+    const startMidStreamWatchdog = (): void => {
+      if (midStreamWatchdog) return
+      midStreamWatchdog = setInterval(() => {
+        if (!session.alive || entry.controller.signal.aborted) return
+        if (rtspSessions.get(camera.id) !== session) {
+          stopMidStreamWatchdog()
+          return
+        }
+        if (isRtspMidStreamStalled(entry.latestTs)) {
+          bridge?.log(`[vision] RTSP: no frame from ${camera.name} [${transport}] for ${RTSP_MID_STREAM_STALL_MS / 1000}s mid-stream — restarting...`)
+          try { ffmpeg.kill() } catch {} // 'exit' below restarts on the proven transport
+        }
+      }, RTSP_MID_STREAM_CHECK_MS)
+      if (typeof (midStreamWatchdog as unknown as { unref?: () => void }).unref === 'function') {
+        ; (midStreamWatchdog as unknown as { unref: () => void }).unref()
+      }
+    }
+
     ffmpeg.stdout!.on('data', (chunk: Buffer) => {
       if (!hadFirstFrame) {
         hadFirstFrame = true
@@ -682,6 +710,7 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
         connectState.firstFrameAt = Date.now()
         connectState.lastError = ''
         connectState.failures = 0
+        startMidStreamWatchdog()
       }
       if (jpegBuf.length === 0) jpegBuf = chunk
       else jpegBuf = Buffer.concat([jpegBuf, chunk])
@@ -726,12 +755,15 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       connectState.lastError = 'ffmpeg-missing'
       connectState.failures++
       session.alive = false
+      clearTimeout(firstFrameWatchdog)
+      stopMidStreamWatchdog()
       rtspSessions.delete(camera.id)
       mjpegStreams.delete(camera.id)
     })
 
     ffmpeg.on('exit', (code, signal) => {
       clearTimeout(firstFrameWatchdog)
+      stopMidStreamWatchdog()
       if (!session.alive) return
       session.alive = false
       rtspSessions.delete(camera.id)
@@ -791,6 +823,7 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
 
     entry.controller.signal.addEventListener('abort', () => {
       clearTimeout(firstFrameWatchdog)
+      stopMidStreamWatchdog()
       session.alive = false
       try { ffmpeg.kill() } catch {}
       rtspSessions.delete(camera.id)

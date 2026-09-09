@@ -73,6 +73,22 @@ export const RTSP_FIRST_FRAME_WATCHDOG_MS = 12000
 /** Grace period where the stale sweeper must not kill a fresh attempt. */
 export const RTSP_FRESH_ATTEMPT_GRACE_MS = 10000
 
+/**
+ * Mid-stream stall threshold: a UDP session that delivered frames and then
+ * goes silent keeps FFmpeg alive with no data, no EOF and no exit, so the
+ * preview freezes on the last image. Restart when no frame arrived for this
+ * long; the exit handler reuses the proven transport for a fast recovery.
+ */
+export const RTSP_MID_STREAM_STALL_MS = 10000
+
+/** How often the mid-stream watchdog checks for a silent session. */
+export const RTSP_MID_STREAM_CHECK_MS = 2500
+
+export function isRtspMidStreamStalled(lastFrameAt: number, now: number = Date.now()): boolean {
+  if (!lastFrameAt || lastFrameAt <= 0) return false
+  return now - lastFrameAt >= RTSP_MID_STREAM_STALL_MS
+}
+
 export function otherTransport(transport: RtspTransport): RtspTransport {
   return transport === 'tcp' ? 'udp' : 'tcp'
 }

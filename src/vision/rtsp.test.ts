@@ -3,6 +3,7 @@ import {
   RTSP_AUTH_RETRY_DELAY_MS,
   RTSP_EXHAUSTED_RETRY_DELAY_MS,
   RTSP_FIRST_FRAME_WATCHDOG_MS,
+  RTSP_MID_STREAM_STALL_MS,
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
   RTSP_RESTART_DELAY_MS,
   RTSP_TRANSPORT_FAILOVER_DELAY_MS,
@@ -10,6 +11,7 @@ import {
   buildRtspFfmpegArgs,
   decideRtspReconnect,
   isRtspAuthFailure,
+  isRtspMidStreamStalled,
   nextReconnectDelayMs,
   otherTransport,
   resolveInitialTransport,
@@ -150,5 +152,14 @@ describe('rtsp connection policy', () => {
     expect(shouldLogRetry(9)).toBe(false)
     expect(shouldLogRetry(10)).toBe(true)
     expect(shouldLogRetry(20)).toBe(true)
+  })
+
+  it('detects a mid-stream stall after the first frame (frozen UDP session)', () => {
+    expect(RTSP_MID_STREAM_STALL_MS).toBeGreaterThan(5000)
+    expect(RTSP_MID_STREAM_STALL_MS).toBeLessThan(15000)
+    const now = Date.now()
+    expect(isRtspMidStreamStalled(0, now)).toBe(false)
+    expect(isRtspMidStreamStalled(now - 2000, now)).toBe(false)
+    expect(isRtspMidStreamStalled(now - (RTSP_MID_STREAM_STALL_MS + 1000), now)).toBe(true)
   })
 })

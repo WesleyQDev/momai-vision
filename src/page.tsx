@@ -15,6 +15,7 @@ import { AlertCanvasOverlay } from './panel'
 import { useI18n } from './hooks/useI18n'
 import { classColor } from './vision/theme-color'
 import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
+import { isRtspMidStreamStalled } from './vision/rtsp'
 import { filterDetectionsInZone, orderPointsClockwise, createBoxFromCorners, simplifyPolygon, type Point } from './vision/zone'
 import visionIconPng from '../icon.png'
 import ContextMenu from './components/ContextMenu'
@@ -1909,6 +1910,10 @@ const CameraCard = memo(function CameraCard({
   const hasFrameRef = useRef(false)
   const readyRef = useRef(false)
   const errorRef = useRef<string | null>(null)
+  const lastPreviewFrameAtRef = useRef(0)
+  const lastAutoReloadAtRef = useRef(0)
+  const reloadingRef = useRef(false)
+  reloadingRef.current = reloading
 
   // Último frame (bytes JPEG) do preview MJPEG — o pump de detecção reusa
   // este frame local em vez de baixar outro do node-core (ver pump abaixo).
@@ -2221,11 +2226,13 @@ const CameraCard = memo(function CameraCard({
           bitmap.close()
           return
         }
+        lastPreviewFrameAtRef.current = Date.now()
         drawToCanvas(bitmap, origW, origH)
       },
       onFrame: (frame) => {
         if (cancelled) return
         lastFrameRef.current = frame
+        lastPreviewFrameAtRef.current = Date.now()
         drawNext(frame)
       },
       onError: () => {
@@ -2250,6 +2257,7 @@ const CameraCard = memo(function CameraCard({
             onFrame: (frame) => {
               if (cancelled) return
               lastFrameRef.current = frame
+              lastPreviewFrameAtRef.current = Date.now()
               drawNext(frame)
             },
             onError: () => {
@@ -2547,6 +2555,32 @@ const CameraCard = memo(function CameraCard({
       setReloading(false)
     }
   }
+
+  const handleReloadCameraRef = useRef(handleReloadCamera)
+  handleReloadCameraRef.current = handleReloadCamera
+
+  useEffect(() => {
+    lastPreviewFrameAtRef.current = 0
+    lastAutoReloadAtRef.current = 0
+  }, [camera.id, refreshKey])
+
+  // Same recovery as the manual reload button, triggered when the preview
+  // freezes mid-stream (frames arrived before, then silence). Webcams are
+  // excluded because their host reacquire is destructive to the capture device.
+  useEffect(() => {
+    if (!isActive || isWebcam) return
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      if (!hasFrameRef.current || reloadingRef.current) return
+      if (!isRtspMidStreamStalled(lastPreviewFrameAtRef.current)) return
+      const now = Date.now()
+      if (now - lastAutoReloadAtRef.current < 30000) return
+      lastAutoReloadAtRef.current = now
+      setFps(0)
+      void handleReloadCameraRef.current()
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [isActive, isWebcam, camera.id])
 
   return (
     <div
