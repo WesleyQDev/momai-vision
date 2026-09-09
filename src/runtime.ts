@@ -45,6 +45,18 @@ import {
   type SceneAnswer
 } from './vision/triggers'
 import { filterDetectionsInZone, type Point } from './vision/zone'
+import {
+  loadSnapshots,
+  recordSnapshot,
+  deleteSnapshotRecord,
+  clearSnapshots,
+  pruneSnapshots,
+  loadAlerts,
+  recordAlert,
+  trimAlerts,
+  clearAlerts,
+  deleteAlertsWhere
+} from './snapshots-store'
 
 const SKILL_ID = process.env.MOMAI_EXTENSION_ID || 'momai-vision'
 // A porta padrão do node-core do host é 8050 (não 8000).
@@ -63,6 +75,13 @@ interface MomaiBridge {
   storage: {
     get: (key: string) => Promise<unknown>
     set: (key: string, value: unknown) => Promise<void>
+    delete?: (key: string) => Promise<void>
+  }
+  collections?: {
+    insert: (name: string, record: unknown) => Promise<{ id: number }>
+    list: (name: string, opts?: { limit?: number }) => Promise<any[]>
+    remove: (name: string, id: number) => Promise<unknown>
+    clear: (name: string, opts?: { olderThanMs?: number }) => Promise<{ removed: number }>
   }
   loadAsset: (relativePath: string) => Promise<{ bytes: Uint8Array; text: string }>
   saveFile: (relativePath: string, content: Uint8Array | { bytes: Uint8Array } | string) => Promise<{ ok: boolean; path: string }>
@@ -1292,12 +1311,7 @@ interface SnapshotMeta {
 const MAX_SNAPSHOTS = 200
 
 async function loadIndex(): Promise<SnapshotMeta[]> {
-  const index = (await bridge!.storage.get('snapshots_index')) as SnapshotMeta[] | null
-  return Array.isArray(index) ? index : []
-}
-
-async function saveIndex(index: SnapshotMeta[]): Promise<void> {
-  await bridge!.storage.set('snapshots_index', index)
+  return loadSnapshots(bridge!, 1000)
 }
 
 async function saveSnapshot(jpegBase64: string, meta: Omit<SnapshotMeta, 'id' | 'ts'>): Promise<SnapshotMeta> {
@@ -1308,12 +1322,9 @@ async function saveSnapshot(jpegBase64: string, meta: Omit<SnapshotMeta, 'id' | 
   const bytes = Uint8Array.from(Buffer.from(jpegBase64, 'base64'))
   await bridge!.saveFile(`snapshots/${id}.jpg`, bytes)
   const entry: SnapshotMeta = { id, ts: Date.now(), ...meta }
-  const index = await loadIndex()
-  index.unshift(entry)
-  // Prune: keep newest N / age limit, then delete files that fell out of the index.
-  const pruned = index.filter((s) => s.ts >= Date.now() - maxAgeMs).slice(0, maxSnapshots)
-  const removedIds = index.filter((s) => !pruned.includes(s)).map((s) => s.id)
-  await saveIndex(pruned)
+  await recordSnapshot(bridge!, entry)
+  // Prune: drop rows over count/age limits, then delete files that fell out.
+  const removedIds = await pruneSnapshots(bridge!, { maxCount: maxSnapshots, maxAgeMs })
   if (removedIds.length > 0) {
     void deleteSnapshotFiles(removedIds)
   }
@@ -1813,21 +1824,8 @@ interface PersistedAlert {
 }
 
 async function loadAlertsHistory(): Promise<PersistedAlert[]> {
-  const history = (await bridge!.storage.get('alerts_history')) as PersistedAlert[] | null
-  return Array.isArray(history) ? history : []
+  return loadAlerts(bridge!, 200)
 }
-
-async function saveAlertsHistory(alerts: PersistedAlert[]): Promise<void> {
-  await bridge!.storage.set('alerts_history', alerts)
-}
-
-// Serializa as escritas do histórico de alertas. Alertas em rajada (vários
-// monitores, tickers de 1s por câmera) chamam saveAlertToHistory de forma
-// concorrente via fire-and-forget; um read-modify-write ingênuo perde
-// entradas quando duas gravações se sobrepõem (ambas leem o arquivo antigo e
-// a última gravação vence). Enfileirar as operações numa promise chain faz
-// cada save ler o estado mais recente antes de gravar.
-let alertsHistoryWriteChain: Promise<void> = Promise.resolve()
 
 /**
  * Monta a entrada PERSISTIDA do histórico de alertas. NUNCA inclui
@@ -1862,14 +1860,11 @@ export function buildPersistedAlert(
 }
 
 function saveAlertToHistory(alert: PersistedAlert): Promise<void> {
-  const task = alertsHistoryWriteChain.then(async () => {
-    const history = await loadAlertsHistory()
-    history.unshift(alert)
-    await saveAlertsHistory(history.slice(0, 200))
+  const task = recordAlert(bridge!, alert).then(() => {
+    trimAlerts(bridge!, 200).catch(() => {})
   })
   // Uma falha de gravação não pode envenenar a fila dos alertas seguintes.
-  alertsHistoryWriteChain = task.catch(() => {})
-  return task
+  return task.catch(() => {})
 }
 
 async function fireAlert(config: MonitorConfig, alert: import('./vision/triggers').AlertInfo, jpegBase64: string): Promise<void> {
@@ -3086,21 +3081,17 @@ async function toolListSnapshots(args: { limit?: number }): Promise<unknown> {
 async function toolDeleteSnapshot(args: { snapshotId?: string; id?: string }): Promise<unknown> {
   const id = args.snapshotId || args.id
   if (!id) return { ok: false, error: 'snapshotId required' }
-  const index = await loadIndex()
-  const updated = index.filter((s) => s.id !== id)
-  await saveIndex(updated)
-  await deleteSnapshotFiles([id])
+  const found = await deleteSnapshotRecord(bridge!, id)
+  if (found) await deleteSnapshotFiles([id])
   return { ok: true, snapshotId: id }
 }
 
 async function toolClearSnapshots(): Promise<unknown> {
-  const index = await loadIndex()
-  const allIds = index.map((s) => s.id)
-  await saveIndex([])
-  if (allIds.length > 0) {
-    await deleteSnapshotFiles(allIds)
+  const { removed, ids } = await clearSnapshots(bridge!)
+  if (ids.length > 0) {
+    await deleteSnapshotFiles(ids)
   }
-  return { ok: true, deletedCount: allIds.length }
+  return { ok: true, deletedCount: removed }
 }
 
 async function toolListAlerts(args: { limit?: number }): Promise<unknown> {
@@ -3113,19 +3104,17 @@ async function toolListAlerts(args: { limit?: number }): Promise<unknown> {
 }
 
 async function toolClearAlerts(): Promise<unknown> {
-  await saveAlertsHistory([])
+  await clearAlerts(bridge!)
   return { ok: true }
 }
 
 async function toolDeleteAlert(args: { alertId?: string; ts?: number; cameraId?: string }): Promise<unknown> {
-  const history = await loadAlertsHistory()
-  const updated = history.filter((a) => {
+  await deleteAlertsWhere(bridge!, (a) => {
     const key = `${a.cameraId}_${a.ts}_${a.className || 'obj'}_${a.snapshotId || ''}`
-    if (args.alertId && key === args.alertId) return false
-    if (args.ts && a.ts === args.ts && (!args.cameraId || a.cameraId === args.cameraId)) return false
-    return true
+    if (args.alertId && key === args.alertId) return true
+    if (args.ts && a.ts === args.ts && (!args.cameraId || a.cameraId === args.cameraId)) return true
+    return false
   })
-  await saveAlertsHistory(updated)
   return { ok: true }
 }
 

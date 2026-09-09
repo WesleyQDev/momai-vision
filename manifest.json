@@ -335,7 +335,11 @@
   "storage": [
     {
       "description": "Prints (imagens JPEG) e regras de monitoramento, guardados localmente.",
-      "locations": ["snapshots/*.jpg", "monitors.json", "snapshots_index.json", "config.json", "cameras.json"]
+      "locations": ["snapshots/*.jpg", "monitors.json", "config.json", "cameras.json", "extension.db (snapshots, alertas)"],
+      "collections": [
+        { "name": "snapshots", "indexes": ["cameraId"], "retentionDays": 30 },
+        { "name": "alerts", "indexes": ["cameraId"], "retentionDays": 90 }
+      ]
     }
   ],
   "persistOnQuit": true
