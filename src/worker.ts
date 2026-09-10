@@ -14,8 +14,10 @@
 
 import path from 'node:path'
 import fs from 'node:fs/promises'
+import fsSync from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import runtimeModule, { stopEngine, init } from './runtime'
+import { createIpcVisionStorage } from './worker-storage'
 
 const workerDir = path.dirname(fileURLToPath(import.meta.url))
 const [skillId, skillPath] = process.argv.slice(2)
@@ -24,9 +26,45 @@ const dataDir =
   process.env.MOMAI_NODE_CORE_DATA_DIR ||
   path.resolve(workerDir, '..', '..', 'data')
 
-const storageBase = path.join(dataDir, 'extensions', skillId)
+const displayStorageDir = path.join(dataDir, 'extensions', skillId)
 
-const SAFE_KEY = /^[a-zA-Z0-9_-]+$/
+let storageResponseListener: ((msg: any) => void) | null = null
+const ipcBridge = createIpcVisionStorage({
+  send: (msg: unknown) => process.send?.(msg as any),
+  onResponse: (fn) => {
+    storageResponseListener = fn as (msg: any) => void
+  },
+  storageDir: displayStorageDir
+})
+
+async function migrateLegacySharedJsonOnce(): Promise<void> {
+  try {
+    const current = await ipcBridge.storage.get('config')
+    if (current !== null && current !== undefined) return
+  } catch {
+    return
+  }
+  const legacyFile = path.join(dataDir, 'extensions', skillId, 'config.json')
+  try {
+    if (!fsSync.existsSync(legacyFile)) return
+    const raw = await fs.readFile(legacyFile, 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object') {
+      await ipcBridge.storage.set('config', parsed)
+    }
+  } catch {}
+  const legacyMonitors = path.join(dataDir, 'extensions', skillId, 'monitors.json')
+  try {
+    const currentMonitors = await ipcBridge.storage.get('monitors')
+    if (currentMonitors !== null && currentMonitors !== undefined) return
+    if (!fsSync.existsSync(legacyMonitors)) return
+    const raw = await fs.readFile(legacyMonitors, 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (parsed !== null && parsed !== undefined) {
+      await ipcBridge.storage.set('monitors', parsed)
+    }
+  } catch {}
+}
 
 function resolveInsideExtensionDir(relativePath: string, method: string): string {
   if (typeof relativePath !== 'string' || relativePath.length === 0) {
@@ -40,26 +78,7 @@ function resolveInsideExtensionDir(relativePath: string, method: string): string
   return resolved
 }
 
-const storage = {
-  storageDir: storageBase,
-  async get(key: string) {
-    if (typeof key !== 'string' || !SAFE_KEY.test(key)) throw new Error('Invalid storage key')
-    try {
-      return JSON.parse(await fs.readFile(path.join(storageBase, `${key}.json`), 'utf-8'))
-    } catch {
-      return null
-    }
-  },
-  async set(key: string, value: unknown) {
-    if (typeof key !== 'string' || !SAFE_KEY.test(key)) throw new Error('Invalid storage key')
-    await fs.mkdir(storageBase, { recursive: true })
-    const serialized = JSON.stringify(value, null, 2)
-    if (serialized.length > 1024 * 1024) {
-      throw new Error('Storage quota exceeded: max 1MB per extension')
-    }
-    await fs.writeFile(path.join(storageBase, `${key}.json`), serialized, 'utf-8')
-  }
-}
+const storage = ipcBridge.storage
 
 const MAX_ASSET_BYTES = 64 * 1024 * 1024
 const MAX_SAVE_BYTES = 5 * 1024 * 1024
@@ -69,6 +88,8 @@ const momai = {
   sendEvent: (eventType: string, data: unknown) => process.send?.({ type: 'event', eventType, data }),
   sendStructuredResponse: (data: unknown) => process.send?.({ type: 'structured_response', data }),
   storage,
+  collections: ipcBridge.collections,
+  sessionFiles: ipcBridge.sessionFiles,
   async loadAsset(relativePath: string) {
     const fullPath = resolveInsideExtensionDir(relativePath, 'loadAsset')
     let stat
@@ -106,16 +127,26 @@ process.send?.({ type: 'ready' })
 
 // Restore monitors and webcam watches at startup so monitoring keeps running
 // even if the page is never opened / no chat tool call is ever dispatched.
-init(momai).catch((err: unknown) => {
-  process.send?.({
-    type: 'log',
-    message: `[vision] startup init failed: ${err instanceof Error ? err.message : String(err)}`
+migrateLegacySharedJsonOnce()
+  .catch(() => {})
+  .finally(() => {
+    init(momai).catch((err: unknown) => {
+      process.send?.({
+        type: 'log',
+        message: `[vision] startup init failed: ${err instanceof Error ? err.message : String(err)}`
+      })
+    })
   })
-})
 
 process.on('message', async (msg: unknown) => {
   if (!msg || typeof msg !== 'object') return
   const message = msg as { type?: string; requestId?: string; payload?: Record<string, unknown> }
+  if (message.type === 'storage-response') {
+    try {
+      storageResponseListener?.(message)
+    } catch {}
+    return
+  }
   if (message.type === 'execute') {
     const { requestId, payload } = message
     const t0 = Date.now()
