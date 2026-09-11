@@ -1339,9 +1339,12 @@ async function deleteSnapshotFiles(ids: string[]): Promise<void> {
     // via MOMAI_DATA_DIR divergia no layout dev (junction no repositório) e os
     // arquivos de snapshot vazavam. Fallback antigo preservado para segurança.
     const skillPath = process.argv[3]
+    const modeStorageDir = process.env.MOMAI_EXTENSION_STORAGE_DIR
     const snapshotsDir = skillPath
       ? path.join(skillPath, 'snapshots')
-      : path.join(process.env.MOMAI_DATA_DIR || '', 'extensions', SKILL_ID, 'snapshots')
+      : modeStorageDir
+        ? path.join(modeStorageDir, 'snapshots')
+        : path.join(process.env.MOMAI_DATA_DIR || '', 'extensions', SKILL_ID, 'snapshots')
     for (const id of ids) {
       try {
         await fs.unlink(path.join(snapshotsDir, `${id}.jpg`))

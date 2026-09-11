@@ -43,6 +43,15 @@ export interface MomAISDK {
   notifications: {
     send(opts: { title: string; body?: string; action?: string }): Promise<void>
   }
+  ui: {
+    /**
+     * Host-provided overlay container inside the main content area.
+     * Extension full-area overlays must portal here instead of
+     * document.body. Null where the host provides none (overlay
+     * windows, older hosts, workers, unit tests).
+     */
+    overlayRoot(): HTMLElement | null
+  }
   theme: {
     setColors(colors: Record<string, string>): Promise<void>
   }

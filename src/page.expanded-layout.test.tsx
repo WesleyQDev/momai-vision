@@ -53,6 +53,22 @@ describe('VisionPage — expanded camera stays inside content area', () => {
     expect(expanded!.className).not.toMatch(/\bfixed\b/)
   })
 
+  it('stays outside the spaced content wrapper so space-y never offsets inset-0', async () => {
+    setupServer()
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    const expandBtn = await screen.findByTitle(/Ampliar imagem|Enlarge image/i)
+    fireEvent.click(expandBtn)
+    const anchor = await screen.findByTitle(/Dois cliques para fechar|Double-click to close/i)
+
+    // A `space-y-*` ancestor applies margin-top to the absolutely positioned
+    // overlay and pushes it down, leaving a gap under the host titlebar.
+    for (let el: HTMLElement | null = anchor; el && el !== document.body; el = el.parentElement) {
+      expect(el.getAttribute('class') || '').not.toMatch(/(^|\s)space-y-5(\s|$)/)
+    }
+  })
+
   it('keeps expanded header responsive without overlap', async () => {
     setupServer()
     const { container } = render(<VisionPage />)

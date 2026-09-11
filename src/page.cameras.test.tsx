@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
 import { getSDK } from 'momai:sdk'
 import VisionPage from './page'
@@ -357,6 +357,55 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
       expect(write!.args.selectedCameras).toEqual(['webcam:a', 'ip:http://10.0.0.9:8080/video'])
       expect(write!.args.ipCameras).toEqual([{ id: 'ip:http://10.0.0.9:8080/video', name: 'Câmera IP', url: 'http://10.0.0.9:8080/video', transport: 'udp' }])
     })
+  })
+})
+
+describe('VisionPage — modal Adicionar Câmeras respeita o container de overlay do host', () => {
+  const OVERLAY_ROOT_ID = 'momai-extension-overlay-root'
+
+  function mountOverlayRoot() {
+    document.getElementById(OVERLAY_ROOT_ID)?.remove()
+    const root = document.createElement('div')
+    root.id = OVERLAY_ROOT_ID
+    document.body.appendChild(root)
+    return root
+  }
+
+  afterEach(() => {
+    document.getElementById(OVERLAY_ROOT_ID)?.remove()
+  })
+
+  it('monta o sheet dentro do container oficial com posicionamento absolute', async () => {
+    const root = mountOverlayRoot()
+    setupServer({ cameras: [WEB_A] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    const heading = await screen.findByText('Adicionar Câmeras')
+
+    // O portal deve mirar o container do host — nunca o body direto — para
+    // o sheet preencher só a área de conteúdo sem cobrir o sidebar nativo.
+    expect(root.contains(heading)).toBe(true)
+    const sheet = root.firstElementChild as HTMLElement | null
+    expect(sheet).toBeTruthy()
+    expect(sheet!.parentElement).toBe(root)
+    expect(sheet!.className).toMatch(/(^|\s)absolute(\s|$)/)
+    expect(sheet!.className).not.toMatch(/(^|\s)fixed(\s|$)/)
+  })
+
+  it('recorre ao body quando o host não oferece o container (hosts antigos)', async () => {
+    document.getElementById(OVERLAY_ROOT_ID)?.remove()
+    setupServer({ cameras: [WEB_A] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    const heading = await screen.findByText('Adicionar Câmeras')
+
+    const sheet = [...document.body.children].find((el) =>
+      el.textContent?.includes('Adicionar Câmeras')
+    )
+    expect(sheet).toBeTruthy()
+    expect(sheet!.contains(heading)).toBe(true)
   })
 })
 

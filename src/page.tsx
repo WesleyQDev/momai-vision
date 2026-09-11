@@ -3096,10 +3096,9 @@ function AddCameraModal({
 
   return createPortal(
     <div
-      className={`fixed inset-0 top-8 z-[100] animate-fadeIn overflow-y-auto ${
+      className={`absolute inset-0 z-[100] animate-fadeIn overflow-y-auto pointer-events-auto ${
         isMaximized ? 'grid place-items-center p-6 bg-black/60 backdrop-blur-sm' : 'flex flex-col bg-bg'
       }`}
-      style={{ top: '32px' }}
     >
       <div
         role="dialog"
@@ -3426,7 +3425,9 @@ function AddCameraModal({
           </div>
         </div>
     </div>,
-    document.body
+    // Host-provided overlay container keeps the sheet inside the content
+    // area (never over host chrome); body fallback for older hosts.
+    sdk.ui?.overlayRoot?.() ?? document.body
   )
 }
 
@@ -6314,7 +6315,10 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     }`
 
   return (
-    <div className="relative w-full h-full min-h-screen max-h-screen overflow-y-auto p-4 md:p-6 text-text space-y-5 custom-scrollbar">
+    <div className="relative w-full h-full min-h-screen max-h-screen overflow-y-auto p-4 md:p-6 text-text custom-scrollbar">
+      {/* Content owns the vertical rhythm; overlays stay siblings of this
+          wrapper so space-y margins never offset their absolute inset-0. */}
+      <div className="space-y-5">
       <header className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-xl font-bold flex items-center gap-2 text-text">
@@ -6964,6 +6968,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           </div>
         </section>
       ) : null}
+      </div>
 
       {/* Modals */}
       <AddEditMonitorModal

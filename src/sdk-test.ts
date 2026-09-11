@@ -34,6 +34,14 @@ function createSDK() {
       listRendererTypes: vi.fn(() => [])
     },
     notifications: { send: vi.fn(async () => {}) },
+    ui: {
+      // Mirrors the host contract (sdk.ui.overlayRoot): resolves the
+      // overlay container when the test mounts one, null otherwise.
+      overlayRoot: () =>
+        typeof document === 'undefined'
+          ? null
+          : document.getElementById('momai-extension-overlay-root'),
+    },
     theme: { setColors: vi.fn(async () => {}) },
     scheduler: { cron: vi.fn(() => ({ cancel: vi.fn() })) },
     oauth: { authorize: vi.fn(async () => ({ ok: true })) },
