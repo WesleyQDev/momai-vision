@@ -1,17 +1,16 @@
 /**
  * RTSP connection policy — pure, testable helpers (no I/O).
  *
- * Most consumer IP cameras only serve RTP over RTSP/TCP (interleaved), while
- * a minority require UDP. Starting with UDP and failing over only on one
- * specific stderr message left generic failures (timeouts, refused
- * connections) looping on the wrong transport — the main cause of slow or
- * never-connecting IP cameras. The policy here is:
+ * The user picks the RTSP transport (UDP or TCP) per camera. The runtime
+ * never flips between transports on its own: every retry reuses the
+ * configured transport.
  *
- *   1. Default to TCP (works for the vast majority of cameras).
- *   2. On ANY early exit without a first frame, try the other transport
- *      once, immediately — don't pattern-match stderr for one message.
- *   3. Never hammer the camera on auth failures: back off instead.
- *   4. Mid-stream drops restart fast on the proven transport.
+ * The policy here is:
+ *
+ *   1. Use the user-configured transport, falling back to TCP for legacy
+ *      cameras without one.
+ *   2. Never hammer the camera on auth failures: back off instead.
+ *   3. Mid-stream drops restart fast on the same transport.
  */
 
 export type RtspTransport = 'tcp' | 'udp'
@@ -26,13 +25,10 @@ export const RTSP_CONNECT_TIMEOUT_US = '3000000'
 export const RTSP_PROBESIZE = '64k'
 export const RTSP_ANALYZE_DURATION_US = '500000'
 
-/** Delay before trying the other transport after an early failure. */
-export const RTSP_TRANSPORT_FAILOVER_DELAY_MS = 150
-
 /** Delay before restarting a dropped mid-stream session (same transport). */
 export const RTSP_RESTART_DELAY_MS = 800
 
-/** Delay before retrying after both transports failed in one cycle. */
+/** Delay before retrying an early failure on the same transport. */
 export const RTSP_EXHAUSTED_RETRY_DELAY_MS = 3000
 
 /** Base delay for repeated never-connected retries (progressive). */
@@ -89,35 +85,16 @@ export function isRtspMidStreamStalled(lastFrameAt: number, now: number = Date.n
   return now - lastFrameAt >= RTSP_MID_STREAM_STALL_MS
 }
 
-export function otherTransport(transport: RtspTransport): RtspTransport {
-  return transport === 'tcp' ? 'udp' : 'tcp'
-}
-
 /**
- * Resolve the transport for a new RTSP session. An explicit per-camera
- * choice (set by the user when adding the camera) wins; otherwise reuse
- * the learned transport, falling back to the TCP-first default.
+ * Resolve the transport for a new RTSP session. Always the user-configured
+ * transport; legacy cameras without one fall back to the TCP default.
+ * The second parameter is kept for call-site compatibility and ignored.
  */
 export function resolveInitialTransport(
   configured?: RtspTransport,
-  learned?: RtspTransport
+  _learned?: RtspTransport
 ): RtspTransport {
-  return configured ?? learned ?? RTSP_PREFERRED_TRANSPORT_DEFAULT
-}
-
-/**
- * Honor a user-pinned transport: when the camera has an explicit choice,
- * never fail over to the other transport — retry the chosen one instead,
- * since the user already knows which one their camera speaks.
- */
-export function applyPinnedTransport(
-  decision: RtspReconnectDecision,
-  pinned?: RtspTransport
-): RtspReconnectDecision {
-  if (pinned && decision.action === 'retry-other-transport') {
-    return { action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS }
-  }
-  return decision
+  return configured ?? RTSP_PREFERRED_TRANSPORT_DEFAULT
 }
 
 /** FFmpeg arguments for low-latency RTSP → MJPEG transcoding. */
@@ -166,17 +143,15 @@ export function isRtspAuthFailure(stderrLower: string): boolean {
 }
 
 export type RtspReconnectDecision =
-  | { action: 'retry-other-transport'; delayMs: number }
   | { action: 'retry-same-transport'; delayMs: number }
   | { action: 'backoff-auth'; delayMs: number }
 
 /**
  * Decide what to do when an FFmpeg RTSP session exits unexpectedly.
  *
- * - Mid-stream drops reuse the proven transport with a short delay.
- * - Early failures (no frame yet) fail over to the other transport once,
- *   whatever the stderr message says — transport mismatch is only one of
- *   many ways the wrong transport fails (timeouts, refused, 404, ...).
+ * - Mid-stream drops retry the same transport with a short delay.
+ * - Early failures (no frame yet) retry the same transport — the user
+ *   owns the UDP/TCP choice, so the runtime never flips transports.
  * - Auth failures back off with a long delay instead of hammering the
  *   camera (which can lock the account).
  */
@@ -184,16 +159,12 @@ export function decideRtspReconnect(opts: {
   failedTransport: RtspTransport
   stderrLower: string
   hadFirstFrame: boolean
-  transportsTried: number
 }): RtspReconnectDecision {
   if (opts.hadFirstFrame) {
     return { action: 'retry-same-transport', delayMs: RTSP_RESTART_DELAY_MS }
   }
   if (isRtspAuthFailure(opts.stderrLower)) {
     return { action: 'backoff-auth', delayMs: RTSP_AUTH_RETRY_DELAY_MS }
-  }
-  if (opts.transportsTried < 2) {
-    return { action: 'retry-other-transport', delayMs: RTSP_TRANSPORT_FAILOVER_DELAY_MS }
   }
   return { action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS }
 }

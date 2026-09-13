@@ -19,6 +19,8 @@ import { isRtspMidStreamStalled } from './vision/rtsp'
 import { filterDetectionsInZone, orderPointsClockwise, createBoxFromCorners, simplifyPolygon, type Point } from './vision/zone'
 import visionIconPng from '../icon.png'
 import ContextMenu from './components/ContextMenu'
+import EditCameraModal, { type EditingCameraTarget } from './components/EditCameraModal'
+import { readCachedFrame, storeCachedFrame, shouldCaptureFrameCache, clearCachedFrame } from './vision/frame-cache'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
@@ -206,11 +208,32 @@ interface VisionConfig {
   selectedCameras?: string[]
   sendActions?: MonitorActionUI[]
   detectionZones?: Record<string, Point[]>
+  showBoxes?: Record<string, boolean>
 }
 
 // Array vazio estável (módulo): evita criar referência nova a cada render do
 // card, o que invalidaria o memo do drawBoxes sem necessidade.
 const EMPTY_DETECTIONS: Detection[] = []
+const EMPTY_CAMERAS: CameraInfo[] = []
+// Preferência de enquadramento da câmera ampliada: 'cover' (preenche, padrão)
+// ou 'contain' (ajusta). Persistida localmente, sem tocar na config do worker.
+const EXPANDED_FILL_KEY = `${EXT_ID}:expanded-fill`
+
+function applyCameraNameAliases(cams: CameraInfo[]): CameraInfo[] {
+  try {
+    if (typeof localStorage === 'undefined') return cams
+    const raw = localStorage.getItem(`${EXT_ID}:camera-names`)
+    if (!raw) return cams
+    const aliases = JSON.parse(raw) as Record<string, string>
+    if (!aliases || typeof aliases !== 'object') return cams
+    return cams.map((c) => {
+      const alias = aliases[c.id]
+      return typeof alias === 'string' && alias.trim() ? { ...c, name: alias } : c
+    })
+  } catch {
+    return cams
+  }
+}
 
 export function VisionIcon({ className = 'w-6 h-6' }: { className?: string }): JSX.Element {
   return (
@@ -1104,7 +1127,7 @@ function SvgBoxOverlay({
 }: {
   boxes: Detection[]
   frameDims?: { w: number; h: number }
-  fit?: 'cover' | 'contain'
+  fit?: 'cover' | 'contain' | 'slice'
   zone?: Point[] | null
 }): JSX.Element | null {
   const { t } = useI18n()
@@ -1115,7 +1138,14 @@ function SvgBoxOverlay({
 
   if (visibleBoxes.length === 0) return null
 
-  const style: React.CSSProperties = fit === 'contain' && frameDims?.w && frameDims?.h
+  // 'slice' = mesmo enquadramento do object-cover (preenche e corta); 'contain'
+  // = object-contain. Os dois usam o viewBox do frame real, então os boxes
+  // acompanham exatamente o vídeo em qualquer proporção de tela.
+  const frameW = frameDims?.w || 0
+  const frameH = frameDims?.h || 0
+  const usesFrame = (fit === 'contain' || fit === 'slice') && frameW > 0 && frameH > 0
+
+  const style: React.CSSProperties = usesFrame
     ? { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none' }
     : {}
 
@@ -1123,21 +1153,18 @@ function SvgBoxOverlay({
     <svg
       className="absolute inset-0 w-full h-full pointer-events-none z-10"
       style={style}
-      viewBox={fit === 'contain' && frameDims?.w && frameDims?.h
-        ? `0 0 ${frameDims.w} ${frameDims.h}`
-        : undefined
-      }
-      preserveAspectRatio={fit === 'contain' ? 'xMidYMid meet' : undefined}
+      viewBox={usesFrame ? `0 0 ${frameW} ${frameH}` : undefined}
+      preserveAspectRatio={usesFrame ? (fit === 'slice' ? 'xMidYMid slice' : 'xMidYMid meet') : undefined}
     >
       {visibleBoxes.map((box, i) => {
         const color = classColor(box.className)
-        if (fit === 'contain' && frameDims?.w && frameDims?.h) {
-          const x1 = box.x1 * frameDims.w
-          const y1 = box.y1 * frameDims.h
-          const w = (box.x2 - box.x1) * frameDims.w
-          const h = (box.y2 - box.y1) * frameDims.h
-          const tagH = Math.max(16, frameDims.h * 0.04)
-          const fontSize = Math.max(10, Math.round(frameDims.h * 0.03))
+        if (usesFrame) {
+          const x1 = box.x1 * frameW
+          const y1 = box.y1 * frameH
+          const w = (box.x2 - box.x1) * frameW
+          const h = (box.y2 - box.y1) * frameH
+          const tagH = Math.max(16, frameH * 0.04)
+          const fontSize = Math.max(10, Math.round(frameH * 0.03))
           return (
             <g key={`${box.className}-${i}`}>
               <rect
@@ -1206,7 +1233,7 @@ function ZoneOverlay({
   draftPoints: Point[]
   isEditing: boolean
   frameDims: { w: number; h: number } | null
-  fit: 'cover' | 'contain'
+  fit: 'cover' | 'contain' | 'slice'
   onAddPoint?: (pt: Point) => void
   onSetPoints?: (pts: Point[]) => void
   onSave?: (points: Point[]) => void
@@ -1216,10 +1243,15 @@ function ZoneOverlay({
 }): JSX.Element | null {
   const { t } = useI18n()
   const hasSavedZone = Boolean(zone && zone.length >= 3)
-  const isContain = fit === 'contain' && Boolean(frameDims?.w && frameDims?.h)
+  // 'slice' acompanha o object-cover (preenche e corta); 'contain' segue o
+  // object-contain. Ambos usam o viewBox do frame real para o desenho da área
+  // não distorcer quando a proporção da tela difere da câmera.
+  const frameW = frameDims?.w || 0
+  const frameH = frameDims?.h || 0
+  const usesFrame = (fit === 'contain' || fit === 'slice') && frameW > 0 && frameH > 0
   const isCompact = fit === 'cover'
-  const vbW = isContain && frameDims ? frameDims.w : 1000
-  const vbH = isContain && frameDims ? frameDims.h : 1000
+  const vbW = usesFrame ? frameW : 1000
+  const vbH = usesFrame ? frameH : 1000
 
   // Modo de desenho: 'freehand' (lápis livre), 'box' (retângulo) ou 'points' (clicar ponto a ponto)
   type DrawMode = 'freehand' | 'box' | 'points'
@@ -1404,7 +1436,7 @@ function ZoneOverlay({
   const activePoints = isEditing ? draftPoints : (hasSavedZone ? zone! : [])
   const svgPointsStr = activePoints.map((p) => `${p.x * vbW},${p.y * vbH}`).join(' ')
 
-  const style: React.CSSProperties = isContain
+  const style: React.CSSProperties = usesFrame
     ? { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }
     : {}
 
@@ -1417,7 +1449,7 @@ function ZoneOverlay({
         }`}
         style={style}
         viewBox={`0 0 ${vbW} ${vbH}`}
-        preserveAspectRatio={isContain ? 'xMidYMid meet' : 'none'}
+        preserveAspectRatio={usesFrame ? (fit === 'slice' ? 'xMidYMid slice' : 'xMidYMid meet') : 'none'}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
@@ -1596,18 +1628,39 @@ function ZoneOverlay({
             ) : null}
           </div>
         ) : (
-          /* Modo Modal Ampliado: barra com dropdown (Lápis Livre / Retângulo / Pontos), adaptado aos temas e sem contagem de pontos */
-          <div className="absolute bottom-4 right-4 z-40 flex items-center gap-2 p-2 rounded-2xl bg-card/90 backdrop-blur-md border border-border/40 text-text text-sm shadow-2xl animate-fadeIn pointer-events-auto">
-            {/* Dropdown de Ferramentas no Modal Ampliado */}
+          /* Modo Modal Ampliado: dock central no padrão do cabeçalho (ícone + rótulo) */
+          <div
+            data-testid="expanded-zone-dock"
+            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-40 flex flex-wrap items-center justify-center gap-1.5 p-1.5 rounded-2xl bg-card/95 backdrop-blur-md border border-border/40 text-text shadow-2xl animate-fadeIn pointer-events-auto"
+          >
+            {/* Seletor de ferramenta de desenho */}
             <div ref={dropdownRef} className="relative">
               <button
                 type="button"
                 onClick={() => setIsDropdownOpen((v) => !v)}
-                className="px-3 py-1.5 rounded-xl bg-input/60 hover:bg-input text-text font-bold text-xs border border-border/40 transition-colors flex items-center gap-2 shadow-sm"
+                className="h-9 px-3 rounded-xl bg-input/60 hover:bg-input text-text font-semibold text-xs border border-border/40 transition-colors flex items-center gap-2"
                 title={t('monitoring.zoneEditor.selectTool')}
               >
+                {drawMode === 'freehand' ? (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                  </svg>
+                ) : drawMode === 'box' ? (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                  </svg>
+                ) : (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+                    <circle cx="12" cy="10" r="3" />
+                  </svg>
+                )}
                 <span>
-                  {drawMode === 'freehand' ? `✏️ ${t('monitoring.zoneEditor.freehand')}` : drawMode === 'box' ? `▢ ${t('monitoring.zoneEditor.box')}` : `📍 ${t('monitoring.zoneEditor.points')}`}
+                  {drawMode === 'freehand'
+                    ? t('monitoring.zoneEditor.freehand')
+                    : drawMode === 'box'
+                      ? t('monitoring.zoneEditor.box')
+                      : t('monitoring.zoneEditor.points')}
                 </span>
                 <svg className={`w-3 h-3 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <path d="M6 9l6 6 6-6" />
@@ -1615,13 +1668,15 @@ function ZoneOverlay({
               </button>
 
               {isDropdownOpen ? (
-                <div className="absolute bottom-full mb-2 left-0 z-50 min-w-[175px] py-1 bg-card/95 border border-border/50 rounded-xl shadow-2xl backdrop-blur-md text-xs animate-fadeIn overflow-hidden">
+                <div className="absolute bottom-full mb-2 left-0 z-50 min-w-[190px] py-1 bg-card/95 border border-border/50 rounded-xl shadow-2xl backdrop-blur-md text-xs animate-fadeIn overflow-hidden">
                   <button
                     type="button"
                     onClick={() => { setDrawMode('freehand'); setIsDropdownOpen(false) }}
                     className={`w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-input transition-colors ${drawMode === 'freehand' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
                   >
-                    <span className="text-sm">✏️</span>
+                    <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                    </svg>
                     <div>
                       <div className="font-semibold">{t('monitoring.zoneEditor.freehand')}</div>
                       <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.freehandHint')}</div>
@@ -1632,7 +1687,9 @@ function ZoneOverlay({
                     onClick={() => { setDrawMode('box'); setIsDropdownOpen(false) }}
                     className={`w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-input transition-colors ${drawMode === 'box' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
                   >
-                    <span className="text-sm">▢</span>
+                    <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="3" width="18" height="18" rx="2" />
+                    </svg>
                     <div>
                       <div className="font-semibold">{t('monitoring.zoneEditor.box')}</div>
                       <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.boxHint')}</div>
@@ -1643,7 +1700,10 @@ function ZoneOverlay({
                     onClick={() => { setDrawMode('points'); setIsDropdownOpen(false) }}
                     className={`w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-input transition-colors ${drawMode === 'points' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
                   >
-                    <span className="text-sm">📍</span>
+                    <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+                      <circle cx="12" cy="10" r="3" />
+                    </svg>
                     <div>
                       <div className="font-semibold">{t('monitoring.zoneEditor.points')}</div>
                       <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.pointsHint')}</div>
@@ -1653,13 +1713,19 @@ function ZoneOverlay({
               ) : null}
             </div>
 
+            <div className="w-px h-6 bg-border/40 mx-0.5" aria-hidden="true" />
+
             {draftPoints.length > 0 && onUndo ? (
               <button
                 type="button"
                 onClick={onUndo}
-                className="px-3 py-1 rounded-xl bg-transparent hover:bg-input text-text font-bold text-sm border border-border/40 transition-colors"
+                className="h-9 px-3 rounded-xl bg-transparent hover:bg-input text-text font-semibold text-xs border border-border/40 transition-colors flex items-center gap-1.5"
               >
-                {t('monitoring.zoneEditor.undoShort')}
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 7v6h6" />
+                  <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+                </svg>
+                <span>{t('monitoring.zoneEditor.undoShort')}</span>
               </button>
             ) : null}
 
@@ -1667,9 +1733,12 @@ function ZoneOverlay({
               <button
                 type="button"
                 onClick={onClear}
-                className="px-3 py-1 rounded-xl bg-transparent hover:bg-red-500/20 text-red-500 hover:text-red-400 font-bold text-sm border border-border/40 transition-colors"
+                className="h-9 px-3 rounded-xl bg-transparent hover:bg-red-500/20 text-red-500 hover:text-red-400 font-semibold text-xs border border-border/40 transition-colors flex items-center gap-1.5"
               >
-                {t('monitoring.zoneEditor.clearShort')}
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+                <span>{t('monitoring.zoneEditor.clearShort')}</span>
               </button>
             ) : null}
 
@@ -1677,9 +1746,13 @@ function ZoneOverlay({
               <button
                 type="button"
                 onClick={onCancel}
-                className="px-3 py-1 rounded-xl bg-transparent hover:bg-input text-text font-bold text-sm border border-border/40 transition-colors"
+                className="h-9 px-3 rounded-xl bg-transparent hover:bg-input text-text font-semibold text-xs border border-border/40 transition-colors flex items-center gap-1.5"
               >
-                {t('common.cancel')}
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+                <span>{t('common.cancel')}</span>
               </button>
             ) : null}
 
@@ -1688,13 +1761,16 @@ function ZoneOverlay({
                 type="button"
                 disabled={draftPoints.length < 3}
                 onClick={() => onSave(draftPoints)}
-                className={`px-4 py-1 rounded-xl font-bold text-sm transition-all shadow-md flex items-center gap-1.5 border ${
+                className={`h-9 px-4 rounded-xl font-semibold text-xs transition-all shadow-md flex items-center gap-1.5 border ${
                   draftPoints.length >= 3
-                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 shadow-emerald-900/40'
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400'
                     : 'bg-transparent text-text-muted/40 border-border/30 cursor-not-allowed'
                 }`}
               >
-                {t('common.save')}
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                <span>{t('common.save')}</span>
               </button>
             ) : null}
           </div>
@@ -1715,6 +1791,8 @@ function CardHeaderActionButton({
   isActive = false,
   hoverTransform,
   tone = 'default',
+  disabled = false,
+  label,
 }: {
   icon: React.ReactNode
   title: string
@@ -1722,6 +1800,8 @@ function CardHeaderActionButton({
   isActive?: boolean
   hoverTransform: string
   tone?: 'default' | 'danger'
+  disabled?: boolean
+  label?: string
 }) {
   const [hovered, setHovered] = useState(false)
   const isDanger = tone === 'danger'
@@ -1730,6 +1810,7 @@ function CardHeaderActionButton({
     <button
       type="button"
       draggable={false}
+      disabled={disabled}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => {
         e.stopPropagation()
@@ -1756,10 +1837,10 @@ function CardHeaderActionButton({
         boxShadow: hovered
           ? '0 0 0 1px rgba(255, 255, 255, 0.35), 0 6px 18px rgba(0, 0, 0, 0.6)'
           : '0 4px 14px rgba(0, 0, 0, 0.55)',
-        transform: hovered ? 'scale(1.1)' : 'scale(1)',
+        transform: hovered ? (label ? 'scale(1.04)' : 'scale(1.1)') : 'scale(1)',
         transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
       }}
-      className="w-8 h-8 rounded-[10px] flex items-center justify-center border cursor-pointer select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+      className={`${label ? 'h-9 px-3 gap-1.5 max-w-full' : 'w-8 h-8'} rounded-[10px] flex items-center justify-center border cursor-pointer select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:opacity-40 disabled:cursor-not-allowed`}
       title={title}
       aria-label={title}
     >
@@ -1773,6 +1854,117 @@ function CardHeaderActionButton({
       >
         {icon}
       </div>
+      {label ? (
+        <span className="whitespace-nowrap text-[11px] font-semibold leading-none">{label}</span>
+      ) : null}
+    </button>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Expanded-view toolbar: grouped dropdowns (icon + label) to keep the header
+// on a single row even on narrow windows. Card buttons stay icon-only above
+// the video; these live on the header's card background.
+// ---------------------------------------------------------------------------
+
+function ToolbarDropdown({
+  group,
+  label,
+  icon,
+  isOpen,
+  onToggle,
+  align = 'left',
+  children
+}: {
+  group: string
+  label: string
+  icon: React.ReactNode
+  isOpen: boolean
+  onToggle: () => void
+  align?: 'left' | 'right'
+  children: React.ReactNode
+}): JSX.Element {
+  return (
+    <div className="relative" data-tool-group={group}>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggle()
+        }}
+        aria-label={label}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        style={{ borderRadius: 10 }}
+        className={`h-9 px-3 flex items-center gap-1.5 border cursor-pointer select-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40 ${
+          isOpen
+            ? 'bg-input text-text border-border'
+            : 'bg-input/50 hover:bg-input text-text-muted hover:text-text border-border/40'
+        }`}
+      >
+        <span className="flex items-center justify-center w-4 h-4 shrink-0">{icon}</span>
+        <span style={{ fontSize: 11 }} className="hidden md:inline whitespace-nowrap font-semibold leading-none">{label}</span>
+        <svg
+          className={`w-3 h-3 shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+      {isOpen ? (
+        <div
+          role="menu"
+          style={{ minWidth: 220, marginTop: 6, borderRadius: 12 }}
+          className={`absolute top-full z-50 py-1 border border-border/50 bg-card/95 backdrop-blur-md shadow-2xl animate-fadeIn overflow-hidden ${
+            align === 'right' ? 'right-0' : 'left-0'
+          }`}
+        >
+          {children}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ToolbarMenuItem({
+  icon,
+  label,
+  title,
+  onClick,
+  disabled = false,
+  danger = false
+}: {
+  icon: React.ReactNode
+  label: string
+  title?: string
+  onClick: () => void
+  disabled?: boolean
+  danger?: boolean
+}): JSX.Element {
+  const accessible = title || label
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      aria-label={accessible}
+      title={accessible}
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick()
+      }}
+      className={`w-full text-left px-3 py-2 flex items-center gap-2.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+        danger ? 'text-red-500 hover:bg-red-500/10' : 'text-text hover:bg-input'
+      }`}
+    >
+      <span className="w-4 h-4 flex items-center justify-center shrink-0">{icon}</span>
+      <span className="flex-1 min-w-0 truncate">{label}</span>
     </button>
   )
 }
@@ -1781,10 +1973,12 @@ function CardHeaderActionButton({
 // Camera Card with Live Preview & Top Header Bar (Name, Expand & Close)
 // ---------------------------------------------------------------------------
 
-const CameraCard = memo(function CameraCard({
+export const CameraCard = memo(function CameraCard({
   camera,
   boxes = EMPTY_DETECTIONS,
   zone,
+  showBoxes = true,
+  onToggleShowBoxes,
   isEditingZone = false,
   onToggleEditZone,
   onSaveZone,
@@ -1806,11 +2000,14 @@ const CameraCard = memo(function CameraCard({
   onDetections,
   hasMonitor = false,
   onContextMenu,
+  reconnecting = false,
   suppressPump = false
 }: {
   camera: CameraInfo
   boxes?: Detection[]
   zone?: Point[] | null
+  showBoxes?: boolean
+  onToggleShowBoxes?: () => void
   isEditingZone?: boolean
   onToggleEditZone?: () => void
   onSaveZone?: (points: Point[]) => void
@@ -1832,6 +2029,8 @@ const CameraCard = memo(function CameraCard({
   onDetections?: (cameraId: string, boxes: Detection[]) => void
   hasMonitor?: boolean
   onContextMenu?: (e: React.MouseEvent, camera: CameraInfo) => void
+  /** True while watching the camera after "Limpar Cache e Conexões" until it is back online. */
+  reconnecting?: boolean
   // Quando o ExpandedCameraModal está aberto para esta câmera, o modal já
   // bombeia frames de detecção para ela — o card por trás não precisa
   // duplicar a carga (2 fetchDirectFrame + 2 frame_pump por ciclo).
@@ -1840,6 +2039,10 @@ const CameraCard = memo(function CameraCard({
   const { t, locale } = useI18n()
   const cardRef = useRef<HTMLDivElement | null>(null)
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  // Last frame from storage shown right after mount (app start / tab switch)
+  // while the live stream reconnects — the reload icon spins meanwhile.
+  const [cachedFrameShown, setCachedFrameShown] = useState(false)
+  const cachedFrameShownRef = useRef(false)
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
 
   const wasEditingRef = useRef(false)
@@ -2043,6 +2246,33 @@ const CameraCard = memo(function CameraCard({
     setError(null)
   }
 
+  // Show the last stored frame immediately on mount (app start / tab switch)
+  // while the live stream reconnects; the reload icon spins until the first
+  // live frame replaces it.
+  useEffect(() => {
+    if (!isActive) return
+    if (hasFrameRef.current) return
+    const cached = readCachedFrame(camera.id)
+    if (!cached) return
+    cachedFrameShownRef.current = true
+    setCachedFrameShown(true)
+    const canvas = frameCanvasRef.current
+    const ctx = canvas?.getContext('2d')
+    if (!canvas || !ctx) return
+    const img = new Image()
+    img.onload = () => {
+      try {
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        ctx.drawImage(img, 0, 0)
+        frameDimsRef.current = { w: img.naturalWidth, h: img.naturalHeight }
+      } catch {
+        // Invalid cached frame: the live stream takes over on its own.
+      }
+    }
+    img.src = cached
+  }, [isActive, camera.id])
+
   // Preview ao vivo + FPS real. Usa o leitor MJPEG em JS (fetch + ReadableStream)
   // em vez do <img multipart/x-mixed-replace>, que no Chromium congela no mesmo
   // frame de forma aleatória e não deixa contar FPS.
@@ -2111,6 +2341,27 @@ const CameraCard = memo(function CameraCard({
         fpsTsRef.current = now
       }
 
+      // Persist the drawn frame (throttled) so a card remount shows it at once.
+      if (shouldCaptureFrameCache(camera.id)) {
+        try {
+          const scaled = document.createElement('canvas')
+          const scale = Math.min(1, 640 / Math.max(1, frameCanvas.width))
+          scaled.width = Math.max(1, Math.round(frameCanvas.width * scale))
+          scaled.height = Math.max(1, Math.round(frameCanvas.height * scale))
+          const scaledCtx = scaled.getContext('2d')
+          if (scaledCtx) {
+            scaledCtx.drawImage(frameCanvas, 0, 0, scaled.width, scaled.height)
+            storeCachedFrame(camera.id, scaled.toDataURL('image/jpeg', 0.6))
+          }
+        } catch {
+          // best-effort cache
+        }
+      }
+
+      if (cachedFrameShownRef.current) {
+        cachedFrameShownRef.current = false
+        setCachedFrameShown(false)
+      }
       if (!hasFrameRef.current) {
         hasFrameRef.current = true
         setHasFrame(true)
@@ -2408,7 +2659,10 @@ const CameraCard = memo(function CameraCard({
             }
           }
         }
-        if (!jpegBase64) {
+        // O cache de frame direto do host só recebe frames de webcam (push da
+        // janela oculta). Para IP o frame vive no stream do worker: pular evita
+        // um GET garantido em 404 a cada ciclo do pump.
+        if (!jpegBase64 && isWebcam) {
           jpegBase64 = await fetchDirectFrame(camera.id).catch(() => null)
         }
         if (!jpegBase64) {
@@ -2635,19 +2889,19 @@ const CameraCard = memo(function CameraCard({
         >
           <canvas
             ref={frameCanvasRef}
-            className={`absolute inset-0 w-full h-full object-cover ${hasFrame ? 'block' : 'opacity-0'}`}
+            className={`absolute inset-0 w-full h-full object-cover ${hasFrame || cachedFrameShown ? 'block' : 'opacity-0'}`}
           />
-          {!hasFrame && (
+          {!hasFrame && !cachedFrameShown && (
             <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-text-muted bg-input/60 p-3 text-center gap-1">
               <VisionBlinkStyleTag />
               <span className="vision-eye-blink">
                 <VisionIcon className="w-5 h-5 text-text-muted" />
               </span>
-              <span className="font-medium leading-none">{cameraPlaceholderStatus(camera, reloading, error, isSlow, isUnavailable, t)}</span>
+              <span className="font-medium leading-none">{cameraPlaceholderStatus(camera, reloading || reconnecting, error, isSlow, isUnavailable, t)}</span>
             </div>
           )}
-          {/* Bounding boxes — SVG overlay (filtrado por zona) */}
-          <SvgBoxOverlay boxes={myDetections} frameDims={frameDimsRef.current} fit="cover" zone={zone} />
+          {/* Bounding boxes — SVG overlay (filtrado por zona, respeita Mostrar boxes) */}
+          <SvgBoxOverlay boxes={showBoxes === false ? EMPTY_DETECTIONS : myDetections} frameDims={frameDimsRef.current} fit="cover" zone={zone} />
 
           {/* Camada interativa de seleção de área (polígono) */}
           <ZoneOverlay
@@ -2677,7 +2931,7 @@ const CameraCard = memo(function CameraCard({
           ) : null}
 
           {error ? (
-            <div className={`absolute z-20 p-3 pointer-events-none ${hasFrame ? 'bottom-2 left-2 right-2 flex justify-center' : 'inset-0 flex items-center justify-center bg-black/75'}`}>
+            <div className={`absolute z-20 p-3 pointer-events-none ${hasFrame || cachedFrameShown ? 'bottom-2 left-2 right-2 flex justify-center' : 'inset-0 flex items-center justify-center bg-black/75'}`}>
               <div className="flex items-center gap-2 bg-black/85 backdrop-blur-md px-3 py-1.5 rounded-full border border-amber-500/40 text-xs text-amber-300 shadow-lg animate-pulse">
                 <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0" />
                 <span>{error}</span>
@@ -2713,6 +2967,29 @@ const CameraCard = memo(function CameraCard({
                     <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.623l4.353-1.32a2 2 0 0 0 .83-.497z" />
                     <path d="m15 5 4 4" />
                   </svg>
+                }
+              />
+            ) : null}
+            {onToggleShowBoxes ? (
+              <CardHeaderActionButton
+                isActive={showBoxes !== false}
+                hoverTransform="scale(1.35)"
+                title={showBoxes === false ? t('cameras.showBoxes') : t('cameras.hideBoxes')}
+                onClick={() => onToggleShowBoxes()}
+                icon={
+                  showBoxes === false ? (
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.127 2.29" />
+                      <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" />
+                      <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" />
+                      <path d="m2 2 20 20" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  )
                 }
               />
             ) : null}
@@ -2817,7 +3094,7 @@ const CameraCard = memo(function CameraCard({
             aria-label={t('cameras.reload')}
           >
             <svg
-              className={`w-3.5 h-3.5 ${reloading ? 'animate-spin' : ''}`}
+              className={`w-3.5 h-3.5 ${reloading || reconnecting || cachedFrameShown ? 'animate-spin' : ''}`}
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
@@ -2904,12 +3181,14 @@ function AddCameraCard({ onClick }: { onClick: () => void }): JSX.Element {
 
 function AddCameraModal({
   isOpen,
+  isActive = true,
   onClose,
   allCameras,
   selectedCameraIds,
   onConfirm
 }: {
   isOpen: boolean
+  isActive?: boolean
   onClose: () => void
   allCameras: CameraInfo[]
   selectedCameraIds: string[]
@@ -2929,6 +3208,8 @@ function AddCameraModal({
   const [modalError, setModalError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [confirmUnsaved, setConfirmUnsaved] = useState(false)
+  const [clearingCache, setClearingCache] = useState(false)
+  const [clearCacheSuccess, setClearCacheSuccess] = useState(false)
 
   const webcamCameras = allCameras.filter((c) => c.source === 'webcam')
   const ipCameras = allCameras.filter((c) => c.source === 'ip')
@@ -2937,7 +3218,7 @@ function AddCameraModal({
   // cancelled session never leaks cameras into the next one. A previously
   // remembered IP draft (name + URL + transport) is restored instead.
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen || !isActive) return
     setSelectedWebcamId('')
     setPendingWebcamIds([])
     setPendingIpDrafts([])
@@ -2945,13 +3226,15 @@ function AddCameraModal({
     setModalError(null)
     setSubmitting(false)
     setConfirmUnsaved(false)
+    setClearingCache(false)
+    setClearCacheSuccess(false)
     try {
       const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:ip-draft`) : null
       const saved = raw ? JSON.parse(raw) as { name?: unknown; url?: unknown; transport?: unknown } : null
       if (saved && typeof saved.url === 'string' && saved.url.trim()) {
         setIpUrl(saved.url)
         setIpName(typeof saved.name === 'string' ? saved.name : '')
-        setIpTransport(saved.transport === 'tcp' ? 'tcp' : 'udp')
+        setIpTransport(saved.transport === 'udp' ? 'udp' : 'tcp')
         setRememberIp(true)
         return
       }
@@ -2960,9 +3243,18 @@ function AddCameraModal({
     setIpName('')
     setIpTransport('udp')
     setRememberIp(false)
-  }, [isOpen])
+  }, [isOpen, isActive])
 
-  if (!isOpen) return null
+  useEffect(() => {
+    if (!isOpen || !isActive) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isOpen, isActive, onClose])
+
+  if (!isOpen || !isActive) return null
 
   const removePendingWebcam = (id: string) => {
     setPendingWebcamIds((prev) => prev.filter((x) => x !== id))
@@ -3016,6 +3308,21 @@ function AddCameraModal({
     setIpUrl('')
     setIpName('')
     setModalError(null)
+  }
+
+  const handleClearCache = async () => {
+    setClearingCache(true)
+    setClearCacheSuccess(false)
+    setModalError(null)
+    try {
+      await command('clear_camera_cache', { url: ipUrl.trim() || undefined })
+      setClearCacheSuccess(true)
+      setTimeout(() => setClearCacheSuccess(false), 4000)
+    } catch (err) {
+      setModalError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setClearingCache(false)
+    }
   }
 
   const pendingCount = pendingWebcamIds.length + pendingIpDrafts.length
@@ -3094,8 +3401,11 @@ function AddCameraModal({
     .filter((cam) => !selectedCameraIds.includes(cam.id) && !pendingWebcamIds.includes(cam.id))
     .map((cam) => ({ value: cam.id, label: formatCameraName(cam.name, cam.source, t), badge: t('cameras.addModal.available') }))
 
-  return createPortal(
+  const modalContent = (
     <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
       className={`absolute inset-0 z-[100] animate-fadeIn overflow-y-auto pointer-events-auto ${
         isMaximized ? 'grid place-items-center p-6 bg-black/60 backdrop-blur-sm' : 'flex flex-col bg-bg'
       }`}
@@ -3251,6 +3561,8 @@ function AddCameraModal({
                         </label>
                       </div>
                       </div>
+
+                      {/* Transport Selection */}
                       <div>
                         <span id="vision-ip-transport-label" className="block text-[11px] font-medium text-text-muted mb-1.5">
                           {t('cameras.addModal.transportLabel')}
@@ -3298,12 +3610,28 @@ function AddCameraModal({
                           </p>
                         ) : null}
                       </div>
-                      <div className="flex justify-end">
+
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <button
+                          type="button"
+                          disabled={clearingCache}
+                          onClick={handleClearCache}
+                          title={t('cameras.addModal.clearCacheHelp')}
+                          className="inline-flex items-center gap-1.5 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text text-[11px] font-medium px-3 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 disabled:opacity-50 cursor-pointer"
+                        >
+                          <svg className={`w-3.5 h-3.5 ${clearingCache ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+                            <path d="M21 3v5h-5" />
+                            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+                            <path d="M3 21v-5h5" />
+                          </svg>
+                          <span>{clearingCache ? t('cameras.addModal.clearCacheLoading') : t('cameras.addModal.clearCacheBtn')}</span>
+                        </button>
                         <button
                           type="button"
                           disabled={!ipUrl.trim()}
                           onClick={handleStageIp}
-                          className="inline-flex items-center gap-1.5 rounded-full bg-input hover:bg-card disabled:opacity-40 disabled:cursor-not-allowed border border-border/40 text-text text-[11px] font-medium px-3.5 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
+                          className="inline-flex items-center gap-1.5 rounded-full bg-input hover:bg-card disabled:opacity-40 disabled:cursor-not-allowed border border-border/40 text-text text-[11px] font-medium px-3.5 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 cursor-pointer"
                         >
                           <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <path d="M12 5v14M5 12h14" />
@@ -3311,6 +3639,12 @@ function AddCameraModal({
                           {t('cameras.addModal.addToSelection')}
                         </button>
                       </div>
+                      {clearCacheSuccess ? (
+                        <p role="status" className="text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-1.5 flex items-center gap-2">
+                          <span>✓</span>
+                          <span>{t('cameras.addModal.clearCacheSuccess')}</span>
+                        </p>
+                      ) : null}
                       {hasUnsavedValidIp ? (
                         <p className="text-[11px] text-text-muted text-center">{t('cameras.addModal.addHint')}</p>
                       ) : null}
@@ -3424,12 +3758,106 @@ function AddCameraModal({
             </div>
           </div>
         </div>
-    </div>,
-    // Host-provided overlay container keeps the sheet inside the content
-    // area (never over host chrome); body fallback for older hosts.
-    sdk.ui?.overlayRoot?.() ?? document.body
+    </div>
   )
+
+  const portalTarget = sdk.ui?.overlayRoot?.()
+  return portalTarget ? createPortal(modalContent, portalTarget) : modalContent
 }
+
+// ---------------------------------------------------------------------------
+// Live thumbnail for the expanded-view side rail (switches the main camera)
+// ---------------------------------------------------------------------------
+
+const THUMB_FRAME_INTERVAL_MS = 1000
+
+const CameraThumb = memo(function CameraThumb({
+  camera,
+  onSelect
+}: {
+  camera: CameraInfo
+  onSelect: (camera: CameraInfo) => void
+}): JSX.Element {
+  const { t } = useI18n()
+  const imgRef = useRef<HTMLImageElement | null>(null)
+  const hasFrameRef = useRef(false)
+  const [hasFrame, setHasFrame] = useState(false)
+
+  useEffect(() => {
+    const deviceId = camera.id.startsWith('webcam:') ? camera.id.slice('webcam:'.length) : camera.id
+    const base = (window as any).api?.getApiBaseUrl?.() || 'http://127.0.0.1:8000'
+    const token = (window as any).api?.getSessionToken?.() || ''
+    const url = `${base}/media/camera/stream/${encodeURIComponent(deviceId)}?ext=${EXT_ID}&token=${encodeURIComponent(token)}`
+    const ac = new AbortController()
+    let lastDraw = 0
+    let objectUrl: string | null = null
+
+    createMjpegReader(
+      url,
+      {
+        onFrame: (frame) => {
+          // Miniaturas atualizam ~1x/s: limita o decode sem parar o stream,
+          // que já roda no mesmo caminho enxuto do preview do card.
+          const now = Date.now()
+          if (now - lastDraw < THUMB_FRAME_INTERVAL_MS) return
+          lastDraw = now
+          if (typeof URL.createObjectURL !== 'function') return
+          const next = URL.createObjectURL(new Blob([frame as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' }))
+          const img = imgRef.current
+          if (img) img.src = next
+          if (objectUrl) URL.revokeObjectURL(objectUrl)
+          objectUrl = next
+          if (!hasFrameRef.current) {
+            hasFrameRef.current = true
+            setHasFrame(true)
+          }
+        },
+        onError: () => {
+          // Mantém o último frame exibido; o leitor reconecta sozinho.
+        }
+      },
+      ac.signal
+    )
+
+    return () => {
+      ac.abort()
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [camera.id])
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(camera)}
+      aria-label={camera.name}
+      title={camera.name}
+      style={{ width: 182, aspectRatio: '16 / 9', backgroundColor: 'rgba(0, 0, 0, 0.8)' }}
+      className="relative block shrink-0 rounded-xl border border-border/30 hover:border-emerald-500/50 transition-colors overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
+    >
+      <img
+        ref={imgRef}
+        alt=""
+        style={{ objectFit: 'cover' }}
+        className={`absolute inset-0 w-full h-full transition-opacity duration-300 ${hasFrame ? 'opacity-100' : 'opacity-0'}`}
+        draggable={false}
+      />
+      {!hasFrame ? (
+        <span style={{ color: 'rgba(255, 255, 255, 0.6)' }} className="absolute inset-0 flex items-center justify-center text-xs">
+          {t('cameras.connecting')}
+        </span>
+      ) : null}
+      <span
+        className={`absolute top-1 left-1 w-2 h-2 rounded-full shadow ${camera.online ? 'bg-emerald-400' : 'bg-red-500'}`}
+      />
+      <span
+        style={{ backgroundColor: 'rgba(0, 0, 0, 0.55)' }}
+        className="absolute inset-x-0 bottom-0 px-2 py-1 text-xs font-medium text-white truncate text-left"
+      >
+        {formatCameraName(camera.name, camera.source, t)}
+      </span>
+    </button>
+  )
+})
 
 // ---------------------------------------------------------------------------
 // Expanded Live Camera Modal (Responsive Full Screen Stream Preview)
@@ -3443,10 +3871,21 @@ function ExpandedCameraModal({
   onDetections,
   mode = 'balanced',
   zone,
+  showBoxes = true,
+  onToggleShowBoxes,
+  hasActiveRecognition = false,
+  hasRecognition = false,
+  onToggleRecognition,
+  onEdit,
+  onCopyUrl,
+  onReload,
+  onCreateMonitor,
   isEditingZone = false,
   onToggleEditZone,
   onSaveZone,
-  onClearZone
+  onClearZone,
+  otherCameras = EMPTY_CAMERAS,
+  onSelectCamera
 }: {
   camera: CameraInfo | null
   detections: Record<string, Detection[]>
@@ -3455,10 +3894,21 @@ function ExpandedCameraModal({
   onDetections?: (cameraId: string, boxes: Detection[]) => void
   mode?: 'fluid' | 'balanced' | 'economy'
   zone?: Point[] | null
+  showBoxes?: boolean
+  onToggleShowBoxes?: () => void
+  hasActiveRecognition?: boolean
+  hasRecognition?: boolean
+  onToggleRecognition?: () => void
+  onEdit?: () => void
+  onCopyUrl?: () => void
+  onReload?: () => void
+  onCreateMonitor?: () => void
   isEditingZone?: boolean
   onToggleEditZone?: () => void
   onSaveZone?: (points: Point[]) => void
   onClearZone?: () => void
+  otherCameras?: CameraInfo[]
+  onSelectCamera?: (camera: CameraInfo) => void
 }): JSX.Element | null {
   const { t, locale } = useI18n()
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -3510,6 +3960,37 @@ function ExpandedCameraModal({
   const [error, setError] = useState<string | null>(null)
   const [flashing, setFlashing] = useState(false)
   const [printStatus, setPrintStatus] = useState<'idle' | 'capturing' | 'success'>('idle')
+  const [fillMode, setFillMode] = useState<'cover' | 'contain'>(() => {
+    if (typeof localStorage === 'undefined') return 'cover'
+    return localStorage.getItem(EXPANDED_FILL_KEY) === 'contain' ? 'contain' : 'cover'
+  })
+  const toggleFillMode = useCallback(() => {
+    setFillMode((prev) => {
+      const next = prev === 'cover' ? 'contain' : 'cover'
+      try {
+        if (typeof localStorage !== 'undefined') localStorage.setItem(EXPANDED_FILL_KEY, next)
+      } catch {
+        // Preferência local: uma falha de storage não pode bloquear o toggle.
+      }
+      return next
+    })
+  }, [])
+  const headerRef = useRef<HTMLDivElement | null>(null)
+  const [openMenu, setOpenMenu] = useState<'view' | 'actions' | 'camera' | null>(null)
+  const openMenuRef = useRef<'view' | 'actions' | 'camera' | null>(null)
+  openMenuRef.current = openMenu
+
+  // Fecha o menu aberto ao clicar fora do cabeçalho (os itens fecham sozinhos).
+  useEffect(() => {
+    if (!openMenu) return
+    const handlePointerDown = (e: MouseEvent) => {
+      const header = headerRef.current
+      if (header && e.target instanceof Node && header.contains(e.target)) return
+      setOpenMenu(null)
+    }
+    window.addEventListener('mousedown', handlePointerDown)
+    return () => window.removeEventListener('mousedown', handlePointerDown)
+  }, [openMenu])
   const pumpingRef = useRef(false)
   const frameDimsRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 })
 
@@ -3595,7 +4076,9 @@ function ExpandedCameraModal({
             }
           }
         }
-        if (!jpegBase64) {
+        // Mesmo motivo do pump do card: frame direto do host só existe para
+        // webcam; IP usa o stream mantido pelo worker via get_frame.
+        if (!jpegBase64 && isWebcam) {
           jpegBase64 = await fetchDirectFrame(camera.id)
         }
         if (!jpegBase64) {
@@ -3833,7 +4316,13 @@ function ExpandedCameraModal({
   useEffect(() => {
     if (!camera) return
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Escape') return
+      // Menu aberto consome o Esc: fecha o menu sem fechar a câmera ampliada.
+      if (openMenuRef.current) {
+        setOpenMenu(null)
+        return
+      }
+      onClose()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
@@ -3855,24 +4344,240 @@ function ExpandedCameraModal({
   }
 
   return (
-    <div className="absolute inset-0 z-50 bg-bg overflow-hidden flex flex-col animate-fadeIn">
+    <div data-testid="expanded-camera" className="absolute inset-0 z-50 bg-bg overflow-hidden flex flex-col animate-fadeIn">
       <div className="h-full flex flex-col min-h-0">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 sm:px-6 py-3 border-b border-border/40 bg-card/85 backdrop-blur-md shrink-0">
+        <div ref={headerRef} data-testid="expanded-header" className="relative z-40 flex flex-wrap items-center gap-x-3 gap-y-2 px-3 sm:px-6 py-3 border-b border-border/40 bg-card/85 backdrop-blur-md shrink-0">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
             <h2 className="text-sm sm:text-base font-bold text-text truncate min-w-0">{formatCameraName(camera.name, camera.source, t)}</h2>
             <span className="hidden sm:inline text-xs text-text-muted shrink-0">({isWebcam ? t('cameras.optWebcam') : t('cameras.ipSlashRtsp')})</span>
           </div>
-          <div className="flex flex-wrap items-center gap-2 shrink-0 ml-auto">
+          <ToolbarDropdown
+            group="view"
+            label={t('cameras.viewGroup')}
+            isOpen={openMenu === 'view'}
+            onToggle={() => setOpenMenu((prev) => (prev === 'view' ? null : 'view'))}
+            icon={
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            }
+          >
+            {onToggleShowBoxes ? (
+              <ToolbarMenuItem
+                label={showBoxes ? t('cameras.hideBoxes') : t('cameras.showBoxes')}
+                onClick={() => {
+                  setOpenMenu(null)
+                  onToggleShowBoxes()
+                }}
+                icon={
+                  showBoxes ? (
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  ) : (
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.127 2.29" />
+                      <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" />
+                      <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" />
+                      <path d="m2 2 20 20" />
+                    </svg>
+                  )
+                }
+              />
+            ) : null}
+            {onToggleRecognition ? (
+              <ToolbarMenuItem
+                label={hasActiveRecognition ? t('cameras.disableRecognition') : t('cameras.enableRecognition')}
+                disabled={!hasRecognition}
+                onClick={() => {
+                  setOpenMenu(null)
+                  onToggleRecognition()
+                }}
+                icon={
+                  hasActiveRecognition ? (
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+                      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+                    </svg>
+                  ) : (
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M8.7 3A6 6 0 0 1 18 8c0 4 .7 6.4 1.5 7.7" />
+                      <path d="M6.3 6.3C6.1 6.9 6 7.4 6 8c0 7-3 9-3 9h14" />
+                      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+                      <path d="m2 2 20 20" />
+                    </svg>
+                  )
+                }
+              />
+            ) : null}
+            <ToolbarMenuItem
+              label={fillMode === 'cover' ? t('cameras.fitScreen') : t('cameras.fillScreen')}
+              onClick={() => {
+                setOpenMenu(null)
+                toggleFillMode()
+              }}
+              icon={
+                fillMode === 'cover' ? (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                    <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+                    <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+                    <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+                  </svg>
+                ) : (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 8V5a2 2 0 0 1 2-2h3" />
+                    <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+                    <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+                    <path d="M21 16v3a2 2 0 0 1-2 2h-3" />
+                  </svg>
+                )
+              }
+            />
+          </ToolbarDropdown>
+
+          <ToolbarDropdown
+            group="actions"
+            label={t('cameras.actionsGroup')}
+            isOpen={openMenu === 'actions'}
+            onToggle={() => setOpenMenu((prev) => (prev === 'actions' ? null : 'actions'))}
+            icon={
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+              </svg>
+            }
+          >
+            <ToolbarMenuItem
+              label={
+                printStatus === 'success'
+                  ? t('cameras.printSaved')
+                  : printStatus === 'capturing'
+                    ? t('cameras.capturing')
+                    : t('cameras.takeSnapshot')
+              }
+              disabled={printStatus === 'capturing'}
+              onClick={() => {
+                setOpenMenu(null)
+                void handleTakeSnapshot()
+              }}
+              icon={
+                printStatus === 'success' ? (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 6L9 17l-5-5" />
+                  </svg>
+                ) : printStatus === 'capturing' ? (
+                  <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                    <path d="M12 2a10 10 0 0 1 10 10" />
+                  </svg>
+                ) : (
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                    <circle cx="12" cy="13" r="4" />
+                  </svg>
+                )
+              }
+            />
+            {onCreateMonitor ? (
+              <ToolbarMenuItem
+                label={t('cameras.createMonitor')}
+                title={t('monitoring.addMonitor')}
+                onClick={() => {
+                  setOpenMenu(null)
+                  onCreateMonitor()
+                }}
+                icon={
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="8" />
+                    <circle cx="12" cy="12" r="3.5" />
+                    <line x1="12" y1="2" x2="12" y2="6" />
+                    <line x1="12" y1="18" x2="12" y2="22" />
+                    <line x1="2" y1="12" x2="6" y2="12" />
+                    <line x1="18" y1="12" x2="22" y2="12" />
+                  </svg>
+                }
+              />
+            ) : null}
+            {onReload ? (
+              <ToolbarMenuItem
+                label={t('cameras.reloadShort')}
+                title={t('cameras.reload')}
+                onClick={() => {
+                  setOpenMenu(null)
+                  onReload()
+                }}
+                icon={
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21.5 2v6h-6M2.5 22v-6h6" />
+                    <path d="M2 11.5a10 10 0 0 1 18.8-4.3L21.5 8M2.5 16l1.2 0.8A10 10 0 0 0 22 12.5" />
+                  </svg>
+                }
+              />
+            ) : null}
+          </ToolbarDropdown>
+
+          <ToolbarDropdown
+            group="camera"
+            label={t('cameras.cameraGroup')}
+            isOpen={openMenu === 'camera'}
+            onToggle={() => setOpenMenu((prev) => (prev === 'camera' ? null : 'camera'))}
+            align="right"
+            icon={
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="4" y1="21" x2="4" y2="14" />
+                <line x1="4" y1="10" x2="4" y2="3" />
+                <line x1="12" y1="21" x2="12" y2="12" />
+                <line x1="12" y1="8" x2="12" y2="3" />
+                <line x1="20" y1="21" x2="20" y2="16" />
+                <line x1="20" y1="12" x2="20" y2="3" />
+                <line x1="1" y1="14" x2="7" y2="14" />
+                <line x1="9" y1="8" x2="15" y2="8" />
+                <line x1="17" y1="16" x2="23" y2="16" />
+              </svg>
+            }
+          >
+            {onEdit ? (
+              <ToolbarMenuItem
+                label={t('common.edit')}
+                title={t('cameras.edit')}
+                onClick={() => {
+                  setOpenMenu(null)
+                  onEdit()
+                }}
+                icon={
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                  </svg>
+                }
+              />
+            ) : null}
+            {onCopyUrl ? (
+              <ToolbarMenuItem
+                label={t('cameras.copyUrl')}
+                onClick={() => {
+                  setOpenMenu(null)
+                  onCopyUrl()
+                }}
+                icon={
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                }
+              />
+            ) : null}
             {onToggleEditZone ? (
-              <button
-                type="button"
-                onClick={onToggleEditZone}
-                className={`text-xs font-semibold rounded-lg px-3 py-1.5 transition-all flex items-center gap-1.5 shadow-sm active:scale-95 border ${
+              <ToolbarMenuItem
+                label={
                   isEditingZone
-                    ? 'bg-accent text-white border-accent ring-2 ring-accent/30'
-                    : 'bg-input hover:bg-card border-border text-text'
-                }`}
+                    ? t('monitoring.zoneEditor.editing')
+                    : zone && zone.length >= 3
+                      ? t('monitoring.zoneEditor.activeState')
+                      : t('monitoring.zoneEditor.define')
+                }
                 title={
                   isEditingZone
                     ? t('cameras.zoneFinishCancel')
@@ -3880,106 +4585,105 @@ function ExpandedCameraModal({
                       ? t('cameras.zoneEditActive')
                       : t('cameras.zoneDefine')
                 }
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.623l4.353-1.32a2 2 0 0 0 .83-.497z" />
-                  <path d="m15 5 4 4" />
-                </svg>
-                <span>{isEditingZone ? t('monitoring.zoneEditor.editing') : zone && zone.length >= 3 ? t('monitoring.zoneEditor.activeState') : t('monitoring.zoneEditor.define')}</span>
-              </button>
+                onClick={() => {
+                  setOpenMenu(null)
+                  onToggleEditZone()
+                }}
+                icon={
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.623l4.353-1.32a2 2 0 0 0 .83-.497z" />
+                    <path d="m15 5 4 4" />
+                  </svg>
+                }
+              />
             ) : null}
+          </ToolbarDropdown>
+
+          <div className="flex items-center ml-auto shrink-0">
             <button
-              disabled={printStatus === 'capturing'}
-              onClick={handleTakeSnapshot}
-              className={`text-xs font-medium rounded-lg px-3 py-1.5 transition-all flex items-center gap-1.5 shadow-md active:scale-95 ${printStatus === 'success'
-                ? 'bg-emerald-500 text-white'
-                : printStatus === 'capturing'
-                  ? 'bg-emerald-700 text-white opacity-80'
-                  : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                }`}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onClose()
+              }}
+              title={t('common.close')}
+              aria-label={t('common.close')}
+              style={{ borderRadius: 10 }}
+              className="h-9 px-3 flex items-center gap-1.5 border border-border/40 bg-input/50 hover:bg-input text-text-muted hover:text-text cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40"
             >
-              {printStatus === 'success' ? (
-                <>
-                  <svg className="w-3.5 h-3.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                    <path d="M20 6L9 17l-5-5" />
-                  </svg>
-                  {t('cameras.printSaved')}
-                </>
-              ) : printStatus === 'capturing' ? (
-                <>
-                  <svg className="w-3.5 h-3.5 animate-spin text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
-                    <path d="M12 2a10 10 0 0 1 10 10" />
-                  </svg>
-                  {t('cameras.capturing')}
-                </>
-              ) : (
-                <>
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                    <circle cx="12" cy="13" r="4" />
-                  </svg>
-                  {t('cameras.takeSnapshot')}
-                </>
-              )}
-            </button>
-            <button
-              onClick={onClose}
-              className="text-text-muted hover:text-text rounded-lg p-1.5 hover:bg-input transition-colors"
-            >
-              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="18" y1="6" x2="6" y2="18" />
                 <line x1="6" y1="6" x2="18" y2="18" />
               </svg>
+              <span style={{ fontSize: 11 }} className="hidden md:inline whitespace-nowrap font-semibold leading-none">{t('common.close')}</span>
             </button>
           </div>
         </div>
 
-        <div
-          ref={frameBoxRef}
-          className="flex-1 min-h-0 relative bg-bg overflow-hidden flex items-center justify-center cursor-pointer select-none"
-          onDoubleClick={(e) => {
-            if (!isEditingZone && onClose) {
-              e.stopPropagation()
-              onClose()
-            }
-          }}
-          title={isEditingZone ? undefined : t('cameras.dblClickClose')}
-        >
-          <canvas
-            ref={frameCanvasRef}
-            className="max-w-full max-h-full w-full h-full object-contain"
-          />
+        <div className="flex-1 min-h-0 flex flex-col">
+          <div className="relative flex-1 min-w-0 min-h-0 bg-bg">
+            <div
+              ref={frameBoxRef}
+              className="absolute inset-0 overflow-hidden flex items-center justify-center cursor-pointer select-none"
+              onDoubleClick={(e) => {
+                if (!isEditingZone && onClose) {
+                  e.stopPropagation()
+                  onClose()
+                }
+              }}
+              title={isEditingZone ? undefined : t('cameras.dblClickClose')}
+            >
+              <canvas
+                ref={frameCanvasRef}
+                data-testid="expanded-video"
+                className={`max-w-full max-h-full w-full h-full ${fillMode === 'cover' ? 'object-cover' : 'object-contain'}`}
+              />
 
-          {/* Bounding boxes — SVG overlay with object-contain letterbox (filtrado por zona) */}
-          <SvgBoxOverlay boxes={myDetections} frameDims={frameDimsRef.current} fit="contain" zone={zone} />
+              {/* Bounding boxes — acompanha o enquadramento do vídeo (preencher/ajustar) */}
+              <SvgBoxOverlay boxes={showBoxes === false ? EMPTY_DETECTIONS : myDetections} frameDims={frameDimsRef.current} fit={fillMode === 'cover' ? 'slice' : 'contain'} zone={zone} />
 
-          {/* Camada interativa de seleção de área (polígono) */}
-          <ZoneOverlay
-            zone={zone}
-            draftPoints={draftPoints}
-            isEditing={isEditingZone}
-            frameDims={frameDimsRef.current}
-            fit="contain"
-            onAddPoint={handleAddDraftPoint}
-            onSetPoints={handleSetDraftPoints}
-            onSave={handleSaveDraftZone}
-            onClear={handleClearDraftZone}
-            onCancel={handleCancelDraftZone}
-            onUndo={handleUndoDraftPoint}
-          />
+              {/* Camada interativa de seleção de área (polígono) */}
+              <ZoneOverlay
+                zone={zone}
+                draftPoints={draftPoints}
+                isEditing={isEditingZone}
+                frameDims={frameDimsRef.current}
+                fit={fillMode === 'cover' ? 'slice' : 'contain'}
+                onAddPoint={handleAddDraftPoint}
+                onSetPoints={handleSetDraftPoints}
+                onSave={handleSaveDraftZone}
+                onClear={handleClearDraftZone}
+                onCancel={handleCancelDraftZone}
+                onUndo={handleUndoDraftPoint}
+              />
 
-          {/* Shutter Flash Effect */}
-          {flashing ? (
-            <div className="absolute inset-0 bg-white/80 z-30 transition-opacity duration-200 pointer-events-none" />
-          ) : null}
+              {/* Shutter Flash Effect */}
+              {flashing ? (
+                <div className="absolute inset-0 bg-white/80 z-30 transition-opacity duration-200 pointer-events-none" />
+              ) : null}
 
-          {error ? (
-            <div className={`absolute z-20 p-4 pointer-events-none ${ready ? 'bottom-6 left-6 right-6 flex justify-center' : 'inset-0 flex items-center justify-center bg-black/75'}`}>
-              <div className="flex items-center gap-2.5 bg-black/85 backdrop-blur-md px-4 py-2 rounded-full border border-amber-500/40 text-sm text-amber-300 shadow-xl animate-pulse">
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping shrink-0" />
-                <span>{error}</span>
-              </div>
+              {error ? (
+                <div className={`absolute z-20 p-4 pointer-events-none ${ready ? 'bottom-6 left-6 right-6 flex justify-center' : 'inset-0 flex items-center justify-center bg-black/75'}`}>
+                  <div className="flex items-center gap-2.5 bg-black/85 backdrop-blur-md px-4 py-2 rounded-full border border-amber-500/40 text-sm text-amber-300 shadow-xl animate-pulse">
+                    <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping shrink-0" />
+                    <span>{error}</span>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          {otherCameras.length > 0 && onSelectCamera ? (
+            <div
+              role="toolbar"
+              data-testid="expanded-camera-strip"
+              aria-label={t('cameras.otherCameras')}
+              style={{ gap: 12 }}
+              className="shrink-0 border-t border-border/30 bg-card/30 px-3 sm:px-6 py-3 flex items-center overflow-x-auto"
+            >
+              {otherCameras.map((cam) => (
+                <CameraThumb key={cam.id} camera={cam} onSelect={onSelectCamera} />
+              ))}
             </div>
           ) : null}
         </div>
@@ -4403,7 +5107,7 @@ const ENTITY_PARAM_KEYS = new Set(['contact', 'device_name', 'cameraId', 'camera
  * UX: labels em português, campos de entidade (ex.: contato) viram seletor com
  * busca, placeholders clicáveis para pré-preencher.
  */
-function ActionEditor({
+export function ActionEditor({
   actions,
   onChange,
   footerButton = false
@@ -4542,6 +5246,32 @@ function ActionEditor({
             ) : null}
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            <label
+              className="flex items-center gap-1 text-[10px] text-text-muted hover:text-text cursor-pointer select-none mr-1"
+              title={t('monitoring.sendWithBoxesHint')}
+            >
+              <input
+                type="checkbox"
+                checked={Boolean(a.args?.includeBoxes)}
+                onChange={(e) => {
+                  const checked = e.target.checked
+                  onChange(
+                    actions.map((item, j) => {
+                      if (j !== i) return item
+                      const nextArgs = { ...(item.args || {}) }
+                      if (checked) {
+                        nextArgs.includeBoxes = true
+                      } else {
+                        delete nextArgs.includeBoxes
+                      }
+                      return { ...item, args: Object.keys(nextArgs).length ? nextArgs : undefined }
+                    })
+                  )
+                }}
+                className="w-3 h-3 shrink-0"
+              />
+              {t('monitoring.sendWithBoxes')}
+            </label>
             <button
               type="button"
               onClick={() => startEdit(a)}
@@ -5529,6 +6259,10 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   const [confirmClearPrints, setConfirmClearPrints] = useState(false)
   const [confirmClearAlerts, setConfirmClearAlerts] = useState(false)
   const [editingZoneCameraId, setEditingZoneCameraId] = useState<string | null>(null)
+  const [editingTarget, setEditingTarget] = useState<EditingCameraTarget | null>(null)
+  // Cameras being watched after "Limpar Cache e Conexões": the reload icon
+  // spins until the next poll reports the camera online again.
+  const [reconnectingCameraIds, setReconnectingCameraIds] = useState<Set<string>>(() => new Set())
 
   const handleCameraContextMenu = useCallback((e: React.MouseEvent, camera: CameraInfo) => {
     e.preventDefault()
@@ -5584,6 +6318,114 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     setTimeout(() => setCopyToast(null), 2500)
   }, [])
 
+  const showCopyToast = useCallback((message: string) => {
+    setCopyToast(message)
+    setTimeout(() => setCopyToast(null), 2500)
+  }, [])
+
+  const resolveCameraUrl = useCallback((camera: CameraInfo): string => {
+    if (camera.source === 'ip' || camera.id.startsWith('ip:')) {
+      return camera.id.startsWith('ip:') ? camera.id.slice('ip:'.length) : camera.id
+    }
+    return camera.id
+  }, [])
+
+  const handleCopyCameraUrl = useCallback(async (camera: CameraInfo) => {
+    setContextMenu(null)
+    const url = resolveCameraUrl(camera)
+    if (!url) {
+      showCopyToast(t('page.noUrlToCopy'))
+      return
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url)
+        showCopyToast(t('page.urlCopied'))
+      } else {
+        showCopyToast(t('page.copyFailed'))
+      }
+    } catch {
+      showCopyToast(t('page.copyFailed'))
+    }
+  }, [resolveCameraUrl, showCopyToast])
+
+  const findCameraMonitors = useCallback((camera: CameraInfo, list: MonitorInfo[]) => {
+    return list.filter(
+      (m) =>
+        m.cameraId === camera.id ||
+        m.cameraName === camera.name ||
+        m.cameraName === camera.id ||
+        m.cameraId === camera.name
+    )
+  }, [])
+
+  const handleEditCamera = useCallback(async (camera: CameraInfo) => {
+    setContextMenu(null)
+    if (camera.source === 'ip' || camera.id.startsWith('ip:')) {
+      try {
+        const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp' }> } }>(
+          'configure',
+          {}
+        )
+        const entry = (configRes.config?.ipCameras || []).find((c) => c.id === camera.id)
+        const url = entry?.url || resolveCameraUrl(camera)
+        setEditingTarget({
+          id: camera.id,
+          name: entry?.name || camera.name,
+          source: 'ip',
+          url,
+          transport: entry?.transport === 'tcp' ? 'tcp' : 'udp'
+        })
+      } catch {
+        setEditingTarget({
+          id: camera.id,
+          name: camera.name,
+          source: 'ip',
+          url: resolveCameraUrl(camera),
+          transport: 'tcp'
+        })
+      }
+    } else {
+      setEditingTarget({
+        id: camera.id,
+        name: camera.name,
+        source: 'webcam',
+        url: camera.id,
+        transport: 'udp'
+      })
+    }
+  }, [resolveCameraUrl])
+
+  // "Limpar Cache e Conexões" finished: leave the modal (and the expanded
+  // view, when that is where the user came from) so the grid shows the card
+  // reconnecting, then stop the reload spinner once the poll brings the
+  // camera back online.
+  const handleCameraCacheCleared = useCallback((cameraId: string) => {
+    setEditingTarget(null)
+    setExpandedCamera(null)
+    setReconnectingCameraIds((prev) => {
+      const next = new Set(prev)
+      next.add(cameraId)
+      return next
+    })
+    setCameras((prev) => prev.map((c) => (c.id === cameraId ? { ...c, online: false } : c)))
+  }, [])
+
+  useEffect(() => {
+    setReconnectingCameraIds((prev) => {
+      if (prev.size === 0) return prev
+      let changed = false
+      const next = new Set(prev)
+      for (const id of prev) {
+        if (cameras.find((c) => c.id === id)?.online) {
+          next.delete(id)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [cameras])
+
   useEffect(() => {
     const handleClick = () => setContextMenu(null)
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -5633,7 +6475,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     try {
       const [camRes, statusRes, alertsRes, activeTriggersRes] = await Promise.all([
         command<{ cameras: CameraInfo[]; selectedCameras?: string[] | null }>('list_cameras'),
-        command<{ monitors: MonitorInfo[]; detectionZones?: Record<string, Point[]> }>('get_status'),
+        command<{ monitors: MonitorInfo[]; detectionZones?: Record<string, Point[]>; showBoxes?: Record<string, boolean> }>('get_status'),
         command<{ alerts: Alert[] }>('list_alerts').catch(() => null),
         fetchActiveAutomationTriggers()
       ])
@@ -5651,7 +6493,21 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           return next
         })
       }
-      const fetchedCams = camRes.cameras || []
+      if (statusRes?.showBoxes) {
+        setConfig((prev) => {
+          const currentStr = JSON.stringify(prev.showBoxes || {})
+          const newStr = JSON.stringify(statusRes.showBoxes || {})
+          if (currentStr === newStr) return prev
+          const next = { ...prev, showBoxes: statusRes.showBoxes }
+          try {
+            if (typeof localStorage !== 'undefined') {
+              localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+            }
+          } catch {}
+          return next
+        })
+      }
+      const fetchedCams = applyCameraNameAliases(camRes.cameras || [])
       setCameras(fetchedCams)
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(`${EXT_ID}:cameras`, JSON.stringify(fetchedCams))
@@ -5879,7 +6735,30 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   )
 
   useEffect(() => {
-    if (!isActive) return
+    const handleCloseModals = () => {
+      setIsModalOpen(false)
+      setEditingTarget(null)
+      setExpandedCamera(null)
+      setIsMonitorModalOpen(false)
+      setExpandedAlert(null)
+      setExpandedPrint(null)
+    }
+    window.addEventListener('momai:close_automation_modal', handleCloseModals)
+    return () => {
+      window.removeEventListener('momai:close_automation_modal', handleCloseModals)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isActive) {
+      setIsModalOpen(false)
+      setEditingTarget(null)
+      setExpandedCamera(null)
+      setIsMonitorModalOpen(false)
+      setExpandedAlert(null)
+      setExpandedPrint(null)
+      return
+    }
     void poll()
     void refreshGallery()
     const timer = setInterval(() => void poll(), 5000)
@@ -6037,6 +6916,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         return next
       })
 
+      if (isRemoving) clearCachedFrame(cameraId)
+
       // Se for remoção de câmera IP, remove também da lista de câmeras da tela imediatamente
       if (cameraId.startsWith('ip:')) {
         setCameras((prev) => prev.filter((c) => c.id !== cameraId))
@@ -6100,9 +6981,142 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     setExpandedCamera(cam)
   }, [])
 
+  const handleSelectExpandedCamera = useCallback((cam: CameraInfo) => {
+    // Trocar de câmera na lateral cancela qualquer edição de área em andamento:
+    // o estado de edição é por câmera e não deve vazar para a próxima.
+    setEditingZoneCameraId(null)
+    setExpandedCamera(cam)
+  }, [])
+
   const handleReloadCamera = useCallback(() => {
     void poll()
   }, [poll])
+
+  const handleToggleShowBoxes = useCallback(async (cameraId: string) => {
+    setContextMenu(null)
+    const next = { ...(config.showBoxes || {}) }
+    if (next[cameraId] === false) {
+      delete next[cameraId]
+    } else {
+      next[cameraId] = false
+    }
+    setConfig((prev) => {
+      const updated = { ...prev, showBoxes: next }
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(updated))
+        }
+      } catch {}
+      return updated
+    })
+    try {
+      await command('configure', { showBoxes: next })
+    } catch {
+      // Optimistic update stays; the next poll converges with the backend.
+    }
+    void poll()
+  }, [config.showBoxes, poll])
+
+  const handleToggleRecognition = useCallback(async (camera: CameraInfo) => {
+    setContextMenu(null)
+    const targets = findCameraMonitors(camera, monitors)
+    if (targets.length === 0) return
+    const hasActive = targets.some((m) => !m.paused)
+    const toToggle = targets.filter((m) => (hasActive ? !m.paused : m.paused))
+    if (toToggle.length === 0) return
+    setMonitors((prev) =>
+      prev.map((m) =>
+        toToggle.some((item) => item.id === m.id) ? { ...m, paused: hasActive } : m
+      )
+    )
+    for (const m of toToggle) {
+      try {
+        await command(hasActive ? 'pause_monitoring' : 'resume_monitoring', { monitorId: m.id })
+      } catch {
+        // Optimistic update stays; the next poll converges with the backend.
+      }
+    }
+    void poll()
+  }, [findCameraMonitors, monitors, poll])
+
+  const handleSaveEdit = useCallback(async (
+    oldId: string,
+    payload: { name: string; url: string; transport: 'tcp' | 'udp' }
+  ) => {
+    const target = cameras.find((c) => c.id === oldId)
+    if (!target) throw new Error('Camera not found')
+    const isIp = target.source === 'ip' || oldId.startsWith('ip:')
+    if (!isIp) {
+      const alias = payload.name.trim()
+      if (!alias) throw new Error('Name required')
+      try {
+        if (typeof localStorage !== 'undefined') {
+          const raw = localStorage.getItem(`${EXT_ID}:camera-names`)
+          const parsed = raw ? JSON.parse(raw) as Record<string, string> : {}
+          parsed[oldId] = alias
+          localStorage.setItem(`${EXT_ID}:camera-names`, JSON.stringify(parsed))
+        }
+      } catch {
+        // Alias is a display-only nicety; a storage failure must not block the save.
+      }
+      setCameras((prev) => prev.map((c) => (c.id === oldId ? { ...c, name: alias } : c)))
+      return
+    }
+    const nextUrl = payload.url.trim()
+    if (!/^(https?:\/\/|rtsp:\/\/).+/i.test(nextUrl)) {
+      throw new Error(t('cameras.addModal.invalidUrl'))
+    }
+    const nextId = `ip:${nextUrl}`
+    // A changed URL is a different stream: the old cached frame must not show
+    // under the new camera id.
+    if (nextId !== oldId) clearCachedFrame(oldId)
+    const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp' }>; selectedCameras?: string[] } }>(
+      'configure',
+      {}
+    )
+    const current = configRes.config || {}
+    const ipList = Array.isArray(current.ipCameras) ? [...current.ipCameras] : []
+    if (nextId !== oldId && ipList.some((c) => c.id === nextId)) {
+      throw new Error(t('cameras.addModal.alreadyRegistered'))
+    }
+    const nextEntry = { id: nextId, name: payload.name.trim() || t('cameras.defaultIpName'), url: nextUrl, transport: payload.transport }
+    const updatedIp = ipList.some((c) => c.id === oldId)
+      ? ipList.map((c) => (c.id === oldId ? nextEntry : c))
+      : [...ipList, nextEntry]
+    const currentSelected = config.selectedCameras ?? []
+    const nextSelected = nextId !== oldId
+      ? currentSelected.map((id) => (id === oldId ? nextId : id))
+      : currentSelected
+    const currentZones = config.detectionZones || {}
+    const nextZones = { ...currentZones }
+    if (nextId !== oldId && nextZones[oldId]) {
+      nextZones[nextId] = nextZones[oldId]
+      delete nextZones[oldId]
+    }
+    await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected, detectionZones: nextZones })
+    setCameras((prev) => prev.map((c) => (c.id === oldId ? { ...c, id: nextId, name: nextEntry.name } : c)))
+    setConfig((prev) => {
+      const next = { ...prev, selectedCameras: nextSelected, detectionZones: nextZones }
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+        }
+      } catch {}
+      return next
+    })
+    if (nextId !== oldId) {
+      const affected = findCameraMonitors(target, monitors).filter((m) => !m.paused)
+      if (affected.length > 0) {
+        setMonitors((prev) =>
+          prev.map((m) => (affected.some((item) => item.id === m.id) ? { ...m, paused: true } : m))
+        )
+        for (const m of affected) {
+          void command('pause_monitoring', { monitorId: m.id }).catch(() => {})
+        }
+      }
+    }
+    void poll()
+  }, [cameras, config.selectedCameras, config.detectionZones, findCameraMonitors, monitors, poll])
 
   // Applies the whole pending selection in one configure call: registers new
   // IP cameras and selects webcams/IPs together. Only called on confirm.
@@ -6170,7 +7184,12 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
             const id = `ip:${draft.url}`
             if (existingIpIds.has(id)) continue
             existingIpIds.add(id)
-            newIpCameras.push({ id, name: draft.name || t('cameras.defaultIpName'), url: draft.url, transport: draft.transport })
+            newIpCameras.push({
+              id,
+              name: draft.name || t('cameras.defaultIpName'),
+              url: draft.url,
+              transport: draft.transport
+            })
           }
 
           const updatedIp = [...ipCamerasList, ...newIpCameras]
@@ -6388,6 +7407,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 camera={camera}
                 boxes={detections[camera.id] || EMPTY_DETECTIONS}
                 zone={config.detectionZones?.[camera.id]}
+                showBoxes={config.showBoxes?.[camera.id] !== false}
+                onToggleShowBoxes={() => void handleToggleShowBoxes(camera.id)}
                 isEditingZone={editingZoneCameraId === camera.id}
                 onToggleEditZone={() => handleToggleEditZone(camera.id)}
                 onSaveZone={(points) => void handleSaveCameraZone(camera.id, points)}
@@ -6398,8 +7419,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 onExpand={handleExpandCamera}
                 onReload={handleReloadCamera}
                 onContextMenu={handleCameraContextMenu}
+                reconnecting={reconnectingCameraIds.has(camera.id)}
                 refreshKey={refreshKey}
-                isActive={isActive}
+                isActive={isActive && !expandedCamera}
                 index={idx}
                 isDragging={draggedIndex === idx}
                 isDragOver={dragOverIndex === idx}
@@ -6972,7 +7994,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
 
       {/* Modals */}
       <AddEditMonitorModal
-        key={isMonitorModalOpen ? (editingMonitor?.id || 'new') : 'closed'}
+        key={isMonitorModalOpen ? (editingMonitor?.id || 'new') : 'monitor-modal-closed'}
         isOpen={isMonitorModalOpen}
         onClose={() => {
           setIsMonitorModalOpen(false)
@@ -6991,15 +8013,24 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       />
 
       <AddCameraModal
-        isOpen={isModalOpen}
+        isOpen={isModalOpen && isActive}
+        isActive={isActive}
         onClose={() => setIsModalOpen(false)}
         allCameras={cameras}
         selectedCameraIds={activeSelectedIds}
         onConfirm={confirmAddCameras}
       />
 
+      <EditCameraModal
+        target={isActive ? editingTarget : null}
+        onClose={() => setEditingTarget(null)}
+        onSave={handleSaveEdit}
+        onCacheCleared={handleCameraCacheCleared}
+      />
+
       <ExpandedCameraModal
-        camera={expandedCamera}
+        key={expandedCamera ? expandedCamera.id : 'expanded-camera-closed'}
+        camera={isActive ? expandedCamera : null}
         detections={detections}
         onDetections={handleDetections}
         onClose={() => {
@@ -7009,10 +8040,29 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         onSnapshot={takeSnapshot}
         mode={config.trackingMode || 'balanced'}
         zone={expandedCamera ? config.detectionZones?.[expandedCamera.id] : null}
+        showBoxes={expandedCamera ? config.showBoxes?.[expandedCamera.id] !== false : true}
+        onToggleShowBoxes={expandedCamera ? () => void handleToggleShowBoxes(expandedCamera.id) : undefined}
+        hasActiveRecognition={expandedCamera ? findCameraMonitors(expandedCamera, monitors).some((m) => !m.paused) : false}
+        hasRecognition={expandedCamera ? findCameraMonitors(expandedCamera, monitors).length > 0 : false}
+        onToggleRecognition={expandedCamera ? () => void handleToggleRecognition(expandedCamera) : undefined}
+        onEdit={expandedCamera ? () => void handleEditCamera(expandedCamera) : undefined}
+        onCopyUrl={expandedCamera ? () => void handleCopyCameraUrl(expandedCamera) : undefined}
+        onReload={expandedCamera ? () => handleReloadCamera() : undefined}
+        onCreateMonitor={expandedCamera ? () => {
+          setEditingMonitor({
+            id: '',
+            cameraId: expandedCamera.id,
+            cameraName: expandedCamera.name,
+            triggers: []
+          })
+          setIsMonitorModalOpen(true)
+        } : undefined}
         isEditingZone={expandedCamera ? editingZoneCameraId === expandedCamera.id : false}
         onToggleEditZone={() => expandedCamera && handleToggleEditZone(expandedCamera.id)}
         onSaveZone={(points) => expandedCamera && void handleSaveCameraZone(expandedCamera.id, points)}
         onClearZone={() => expandedCamera && void handleClearCameraZone(expandedCamera.id)}
+        otherCameras={expandedCamera ? displayedCameras.filter((c) => c.id !== expandedCamera.id) : EMPTY_CAMERAS}
+        onSelectCamera={handleSelectExpandedCamera}
       />
 
       <ExpandedPrintModal
@@ -7028,7 +8078,31 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       {contextMenu ? (() => {
         const target = contextMenu.target
         const items = target.type === 'camera'
-          ? [
+          ? (() => {
+            const cameraMonitors = findCameraMonitors(target.camera, monitors)
+            const hasActiveRecognition = cameraMonitors.some((m) => !m.paused)
+            return [
+              {
+                id: 'edit',
+                label: t('cameras.edit'),
+                onClick: () => void handleEditCamera(target.camera)
+              },
+              {
+                id: 'copy-url',
+                label: t('cameras.copyUrl'),
+                onClick: () => void handleCopyCameraUrl(target.camera)
+              },
+              {
+                id: 'recognition',
+                label: hasActiveRecognition ? t('cameras.disableRecognition') : t('cameras.enableRecognition'),
+                disabled: cameraMonitors.length === 0,
+                onClick: () => void handleToggleRecognition(target.camera)
+              },
+              {
+                id: 'boxes',
+                label: config.showBoxes?.[target.camera.id] === false ? t('cameras.showBoxes') : t('cameras.hideBoxes'),
+                onClick: () => void handleToggleShowBoxes(target.camera.id)
+              },
               {
                 id: 'snapshot',
                 label: t('cameras.takeSnapshot'),
@@ -7073,6 +8147,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 onClick: () => void handleRemoveCamera(target.camera.id)
               }
             ]
+          })()
           : [
               {
                 id: 'copy',

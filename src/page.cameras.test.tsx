@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/react'
 import { getSDK } from 'momai:sdk'
 import VisionPage from './page'
+import { frameCacheKey } from './vision/frame-cache'
 
 const WEB_A = { id: 'webcam:a', name: 'Webcam A', source: 'webcam', online: true, monitors: 0 } as const
 const WEB_B = { id: 'webcam:b', name: 'Webcam B', source: 'webcam', online: false, monitors: 0 } as const
@@ -410,11 +411,18 @@ describe('VisionPage — modal Adicionar Câmeras respeita o container de overla
 })
 
 describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
-  it('usa UDP por padrão ao adicionar câmera RTSP', async () => {
+  it('usa UDP como padrão ao adicionar câmera RTSP, à esquerda de TCP', async () => {
     const { calls } = setupServer({ cameras: [] })
     render(<VisionPage />)
     await screen.findByText('MomAI Vision')
     await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    const group = screen.getByRole('radiogroup', { name: /Modo de conexão/i })
+    const radios = within(group).getAllByRole('radio') as HTMLInputElement[]
+    expect(radios[0].value).toBe('udp')
+    expect(radios[0].checked).toBe(true)
+    expect(radios[1].value).toBe('tcp')
 
     await stageIp('Quintal', 'rtsp://admin:pass@192.168.0.4:554/onvif2')
     fireEvent.click(screen.getByRole('button', { name: 'Adicionar 1 câmera' }))
@@ -423,25 +431,30 @@ describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
       const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
       expect(write).toBeTruthy()
       expect(write!.args.ipCameras).toEqual([
-        { id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2', name: 'Quintal', url: 'rtsp://admin:pass@192.168.0.4:554/onvif2', transport: 'udp' }
+        {
+          id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2',
+          name: 'Quintal',
+          url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+          transport: 'udp'
+        }
       ])
     })
   })
 
-  it('envia TCP quando o usuário seleciona TCP antes de adicionar', async () => {
+  it('envia UDP quando o usuário seleciona UDP antes de adicionar', async () => {
     const { calls } = setupServer({ cameras: [] })
     render(<VisionPage />)
     await screen.findByText('MomAI Vision')
     await openCameraModal()
     fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
 
-    fireEvent.click(screen.getByRole('radio', { name: 'TCP' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'UDP' }))
     fireEvent.change(screen.getByPlaceholderText('Nome da câmera (ex.: Garagem, Entrada)'), { target: { value: 'Quintal' } })
     fireEvent.change(screen.getByPlaceholderText(/URL \(http/), { target: { value: 'rtsp://admin:pass@192.168.0.4:554/onvif2' } })
     fireEvent.click(screen.getByText('Adicionar à seleção'))
 
     // The staged draft shows the chosen mode.
-    expect(screen.getAllByText('TCP').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('UDP').length).toBeGreaterThan(0)
 
     fireEvent.click(screen.getByRole('button', { name: 'Adicionar 1 câmera' }))
 
@@ -449,7 +462,12 @@ describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
       const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
       expect(write).toBeTruthy()
       expect(write!.args.ipCameras).toEqual([
-        { id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2', name: 'Quintal', url: 'rtsp://admin:pass@192.168.0.4:554/onvif2', transport: 'tcp' }
+        {
+          id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2',
+          name: 'Quintal',
+          url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+          transport: 'udp'
+        }
       ])
     })
   })
@@ -461,16 +479,16 @@ describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
     await openCameraModal()
     fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
 
-    expect(screen.queryByText(/mais simples e baratas/)).toBeNull()
+    expect(screen.queryByText(/Alternativa sem controle/)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Sobre o modo UDP' }))
-    await screen.findByText(/mais simples e baratas/)
+    await screen.findByText(/Alternativa sem controle/)
 
     // Clicking again closes the card.
     fireEvent.click(screen.getByRole('button', { name: 'Sobre o modo UDP' }))
-    await waitFor(() => expect(screen.queryByText(/mais simples e baratas/)).toBeNull())
+    await waitFor(() => expect(screen.queryByText(/Alternativa sem controle/)).toBeNull())
 
     fireEvent.click(screen.getByRole('button', { name: 'Sobre o modo TCP' }))
-    await screen.findByText(/mais avançadas/)
+    await screen.findByText(/Recomendado para a maioria/)
   })
 })
 
@@ -734,3 +752,181 @@ describe('VisionPage — pump do card continua vivo após falha/timeout do frame
     }
   })
 })
+
+describe('VisionPage — frame direto do host só para webcam', () => {
+  it('não bate em /media/camera/frame para câmera IP (evita 404 a cada ciclo)', async () => {
+    const IP_CAM = { id: 'ip:rtsp://192.168.0.2:554/onvif1', name: 'Rua', source: 'ip', online: true, monitors: 0 } as const
+    let pumpCount = 0
+    const sdk = getSDK()
+    vi.mocked(sdk.api.post).mockImplementation(async (path, body) => {
+      if (path !== '/extensions/momai-vision/command') return { ok: true, data: {} }
+      switch (body?.toolName) {
+        case 'list_cameras':
+          return { ok: true, data: { cameras: [IP_CAM], selectedCameras: [IP_CAM.id] } }
+        case 'get_status':
+          return { ok: true, data: { monitors: [], cameras: { [IP_CAM.id]: { online: true, monitors: 0 } } } }
+        case 'list_alerts':
+          return { ok: true, data: { alerts: [] } }
+        case 'list_snapshots':
+          return { ok: true, data: { snapshots: [] } }
+        case 'get_frame':
+          return { ok: true, data: { jpegBase64: 'data:image/jpeg;base64,AAA' } }
+        case 'frame_pump':
+          pumpCount++
+          return { ok: true, data: { detections: [] } }
+        default:
+          return { ok: true, data: {} }
+      }
+    })
+
+    // O stream MJPEG responde sem body → o parser falha e o pump cai no
+    // get_frame; o fetch direto NÃO pode ser chamado para IP.
+    const fetchMock = vi.fn(async (_url: RequestInfo | URL) => ({ ok: true, body: null, json: async () => ({}) }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    try {
+      render(<VisionPage />)
+      await screen.findByText('MomAI Vision')
+      await waitFor(() => expect(pumpCount).toBeGreaterThan(0), { timeout: 8000 })
+
+      const hitDirectFrame = fetchMock.mock.calls.some((call) => String(call[0]).includes('/media/camera/frame/'))
+      expect(hitDirectFrame).toBe(false)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('VisionPage — Limpar Cache e Conexões da câmera IP', () => {
+  it('chama clear_camera_cache ao clicar no botão de limpar cache no modal de adicionar câmera', async () => {
+    const { calls } = setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    fireEvent.change(screen.getByPlaceholderText(/URL \(http/), { target: { value: 'rtsp://admin:pass@192.168.0.2:554/onvif1' } })
+    const clearBtn = screen.getByRole('button', { name: /Limpar Cache e Conexões/i })
+    expect(clearBtn).toBeTruthy()
+    fireEvent.click(clearBtn)
+
+    await waitFor(() => {
+      const clearCall = calls.find((c) => c.toolName === 'clear_camera_cache')
+      expect(clearCall).toBeTruthy()
+      expect(clearCall!.args.url).toBe('rtsp://admin:pass@192.168.0.2:554/onvif1')
+    })
+
+    await screen.findByText(/Conexões e cache limpos!/i)
+  })
+
+  it('mantém o modo de conexão selecionado (UDP) ao limpar o cache', async () => {
+    setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    // Seleciona UDP
+    const udpRadio = screen.getByRole('radio', { name: /UDP/i }) as HTMLInputElement
+    fireEvent.click(udpRadio)
+    expect(udpRadio.checked).toBe(true)
+
+    // Clica em limpar cache
+    const clearBtn = screen.getByRole('button', { name: /Limpar Cache e Conexões/i })
+    fireEvent.click(clearBtn)
+    await screen.findByText(/Conexões e cache limpos!/i)
+
+    // Confirma que UDP continua selecionado (não foi forçado para TCP)
+    expect(udpRadio.checked).toBe(true)
+  })
+
+  it('fecha o modal ao disparar o evento momai:close_automation_modal (navegação lateral)', async () => {
+    setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    expect(screen.getByRole('dialog')).toBeTruthy()
+
+    // Simula clique na barra lateral (evento global disparado pelo App)
+    window.dispatchEvent(new CustomEvent('momai:close_automation_modal'))
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+
+  it('fecha o modal ao clicar na tecla Escape', async () => {
+    setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    expect(screen.getByRole('dialog')).toBeTruthy()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).toBeNull()
+    })
+  })
+})
+
+describe('VisionPage — botões removidos do modal de adicionar câmera', () => {
+  it('não exibe perfil de estabilidade nem busca na rede', async () => {
+    setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    expect(screen.queryByText('Perfil de estabilidade')).toBeNull()
+    expect(screen.queryByText('Estável / Wi-Fi')).toBeNull()
+    expect(screen.queryByText('Baixa Latência / Cabo')).toBeNull()
+    expect(screen.queryByText('Buscar na rede')).toBeNull()
+    expect(screen.queryByText('Câmeras na rede local')).toBeNull()
+  })
+
+  it('não exibe a dica de substream ao digitar uma URL onvif1', async () => {
+    setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+    fireEvent.change(screen.getByPlaceholderText(/URL \(http/), { target: { value: 'rtsp://admin:pass@192.168.0.2:554/onvif1' } })
+
+    expect(screen.queryByText(/Mudar para Substream/)).toBeNull()
+    expect(screen.queryByText(/canal secundário \(substream\)/)).toBeNull()
+  })
+})
+
+describe('VisionPage — último frame em cache no card', () => {
+  it('mostra o último frame salvo e gira o ícone de recarregar até a conexão voltar', async () => {
+    const CAM = {
+      id: 'ip:rtsp://192.168.0.2:554/onvif2',
+      name: 'Quintal',
+      source: 'ip',
+      online: true,
+      monitors: 0
+    } as const
+    localStorage.setItem(frameCacheKey(CAM.id), 'data:image/jpeg;base64,/9j/4AAQSkZJRg==')
+    setupServer({
+      cameras: [{ ...CAM }],
+      selectedCameras: [CAM.id],
+      ipCameras: [{ id: CAM.id, name: 'Quintal', url: 'rtsp://192.168.0.2:554/onvif2' }]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    // The card opens already showing the stored frame — no placeholder.
+    await waitFor(() => {
+      const canvas = document.querySelector('canvas')
+      expect(canvas).toBeTruthy()
+      expect(canvas!.className).not.toContain('opacity-0')
+    })
+    expect(screen.queryByText('Iniciando...')).toBeNull()
+
+    // Until the live stream takes over, the reload icon keeps spinning.
+    const reloadBtn = screen.getByRole('button', { name: 'Recarregar câmera' })
+    expect(reloadBtn.querySelector('svg')?.classList.contains('animate-spin')).toBe(true)
+  })
+})
+

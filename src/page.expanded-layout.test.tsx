@@ -43,14 +43,11 @@ describe('VisionPage — expanded camera stays inside content area', () => {
 
     await screen.findByTitle(/Dois cliques para fechar|Double-click to close/i)
 
-    const root = container.firstElementChild as HTMLElement
-    const expanded = root.querySelector('[title*="para fechar"], [title*="to close"]')?.closest('div.flex-1')
-      ?.parentElement?.parentElement as HTMLElement | null
-    expect(expanded).toBeTruthy()
+    const expanded = screen.getByTestId('expanded-camera')
     // Must be contained in the page (absolute), never a viewport-fixed layer
     // that competes with the host sidebar stacking order.
-    expect(expanded!.className).toMatch(/\babsolute\b/)
-    expect(expanded!.className).not.toMatch(/\bfixed\b/)
+    expect(expanded.className).toMatch(/\babsolute\b/)
+    expect(expanded.className).not.toMatch(/\bfixed\b/)
   })
 
   it('stays outside the spaced content wrapper so space-y never offsets inset-0', async () => {
@@ -71,7 +68,7 @@ describe('VisionPage — expanded camera stays inside content area', () => {
 
   it('keeps expanded header responsive without overlap', async () => {
     setupServer()
-    const { container } = render(<VisionPage />)
+    render(<VisionPage />)
     await screen.findByText('MomAI Vision')
 
     const expandBtn = await screen.findByTitle(/Ampliar imagem|Enlarge image/i)
@@ -79,15 +76,12 @@ describe('VisionPage — expanded camera stays inside content area', () => {
 
     await screen.findByTitle(/Dois cliques para fechar|Double-click to close/i)
 
-    const root = container.firstElementChild as HTMLElement
-    const expanded = root.querySelector('[title*="para fechar"], [title*="to close"]')?.closest('div.flex-1')
-      ?.parentElement?.parentElement as HTMLElement | null
-    expect(expanded).toBeTruthy()
+    const expanded = screen.getByTestId('expanded-camera')
+    const header = screen.getByTestId('expanded-header')
+    expect(expanded.contains(header)).toBe(true)
     // Header must wrap on narrow widths and the title must truncate.
-    const header = expanded!.querySelector('div.border-b') as HTMLElement | null
-    expect(header).toBeTruthy()
-    expect(header!.className).toMatch(/flex-wrap/)
-    const title = header!.querySelector('h2') as HTMLElement | null
+    expect(header.className).toMatch(/flex-wrap/)
+    const title = header.querySelector('h2') as HTMLElement | null
     expect(title).toBeTruthy()
     expect(title!.className).toMatch(/truncate/)
   })

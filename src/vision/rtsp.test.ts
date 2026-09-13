@@ -6,26 +6,18 @@ import {
   RTSP_MID_STREAM_STALL_MS,
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
   RTSP_RESTART_DELAY_MS,
-  RTSP_TRANSPORT_FAILOVER_DELAY_MS,
-  applyPinnedTransport,
   buildRtspFfmpegArgs,
   decideRtspReconnect,
   isRtspAuthFailure,
   isRtspMidStreamStalled,
   nextReconnectDelayMs,
-  otherTransport,
   resolveInitialTransport,
   shouldLogRetry
 } from './rtsp'
 
 describe('rtsp connection policy', () => {
-  it('defaults to TCP first (most IP cameras require interleaved RTP)', () => {
+  it('defaults to TCP for legacy cameras without a choice', () => {
     expect(RTSP_PREFERRED_TRANSPORT_DEFAULT).toBe('tcp')
-  })
-
-  it('flips transports', () => {
-    expect(otherTransport('tcp')).toBe('udp')
-    expect(otherTransport('udp')).toBe('tcp')
   })
 
   it('builds low-latency ffmpeg args with the requested transport', () => {
@@ -55,26 +47,24 @@ describe('rtsp connection policy', () => {
     expect(isRtspAuthFailure('')).toBe(false)
   })
 
-  it('fails over to the other transport on ANY early failure, not just mismatch strings', () => {
-    // UDP first attempt timing out (generic timeout, no "nonmatching transport").
+  it('never flips transports on early failure — retries the same manual choice', () => {
+    // UDP attempt timing out stays on UDP.
     expect(
       decideRtspReconnect({
         failedTransport: 'udp',
         stderrLower: 'operation timed out',
-        hadFirstFrame: false,
-        transportsTried: 1
+        hadFirstFrame: false
       })
-    ).toEqual({ action: 'retry-other-transport', delayMs: RTSP_TRANSPORT_FAILOVER_DELAY_MS })
+    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS })
 
-    // TCP first attempt refused.
+    // TCP attempt refused stays on TCP.
     expect(
       decideRtspReconnect({
         failedTransport: 'tcp',
         stderrLower: 'connection to tcp refused',
-        hadFirstFrame: false,
-        transportsTried: 1
+        hadFirstFrame: false
       })
-    ).toEqual({ action: 'retry-other-transport', delayMs: RTSP_TRANSPORT_FAILOVER_DELAY_MS })
+    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS })
   })
 
   it('backs off on auth failures instead of hammering the camera', () => {
@@ -82,55 +72,36 @@ describe('rtsp connection policy', () => {
       decideRtspReconnect({
         failedTransport: 'tcp',
         stderrLower: 'rtsp: server returned 401 unauthorized',
-        hadFirstFrame: false,
-        transportsTried: 1
+        hadFirstFrame: false
       })
     ).toEqual({ action: 'backoff-auth', delayMs: RTSP_AUTH_RETRY_DELAY_MS })
   })
 
-  it('restarts fast on the proven transport after a mid-stream drop', () => {
+  it('restarts fast on the same transport after a mid-stream drop', () => {
     expect(
       decideRtspReconnect({
         failedTransport: 'tcp',
         stderrLower: 'connection reset by peer',
-        hadFirstFrame: true,
-        transportsTried: 1
+        hadFirstFrame: true
       })
     ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_RESTART_DELAY_MS })
   })
 
-  it('retries with backoff once both transports failed in the same cycle', () => {
+  it('retries the same transport with backoff on repeated early failures', () => {
     expect(
       decideRtspReconnect({
         failedTransport: 'udp',
         stderrLower: 'no route to host',
-        hadFirstFrame: false,
-        transportsTried: 2
+        hadFirstFrame: false
       })
     ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS })
   })
 
-  it('prefers the user-configured transport over learned and default ones', () => {
+  it('sticks to the user-configured transport', () => {
     expect(resolveInitialTransport('udp', 'tcp')).toBe('udp')
     expect(resolveInitialTransport('tcp', 'udp')).toBe('tcp')
-    expect(resolveInitialTransport(undefined, 'udp')).toBe('udp')
+    expect(resolveInitialTransport(undefined, 'udp')).toBe(RTSP_PREFERRED_TRANSPORT_DEFAULT)
     expect(resolveInitialTransport()).toBe(RTSP_PREFERRED_TRANSPORT_DEFAULT)
-  })
-
-  it('keeps a pinned transport instead of failing over to the other one', () => {
-    const failover = decideRtspReconnect({
-      failedTransport: 'udp',
-      stderrLower: 'invalid data found when processing input',
-      hadFirstFrame: false,
-      transportsTried: 1
-    })
-    expect(failover.action).toBe('retry-other-transport')
-    expect(applyPinnedTransport(failover, 'udp')).toEqual({
-      action: 'retry-same-transport',
-      delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS
-    })
-    // Without a pinned choice the failover decision passes through untouched.
-    expect(applyPinnedTransport(failover)).toEqual(failover)
   })
 
   it('backs off progressively on repeated never-connected failures', () => {

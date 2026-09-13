@@ -110,7 +110,8 @@
         },
         "description": { "label": "Descrição", "type": "string" },
         "ts": { "label": "Horário", "type": "number" },
-        "imageDataUri": { "label": "Imagem", "type": "image" }
+        "imageDataUri": { "label": "Imagem", "type": "image" },
+        "annotatedImageDataUri": { "label": "Imagem com boxes", "type": "image", "description": "Snapshot com as caixas de detecção desenhadas (só quando há detecções)" }
       }
     },
     "vision_status": { "label": "Status do Motor de Visão Alterado" },
