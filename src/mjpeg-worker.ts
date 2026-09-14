@@ -19,7 +19,7 @@ type WorkerOutgoingMessage =
   | { type: 'bitmap'; bitmap: ImageBitmap; origW: number; origH: number }
   | { type: 'frame'; buffer: ArrayBuffer }
   | { type: 'get_frame_response'; buffer: ArrayBuffer | null }
-  | { type: 'fps'; fps: number }
+  | { type: 'fps'; fps: number; kbs?: number }
   | { type: 'error'; message: string }
   | { type: 'ready' }
 
@@ -41,6 +41,7 @@ let lastFrame: Uint8Array | null = null // frame aguardando emissão (latest-win
 let emitScheduled = false
 let lastEmit = 0
 let frameCount = 0
+let bytesReceived = 0
 let fpsTs = 0
 let isDecoding = false
 
@@ -70,8 +71,10 @@ async function emitLatest(): Promise<void> {
   if (fpsNow - fpsTs >= 1000) {
     const elapsedSec = Math.max(0.5, (fpsNow - fpsTs) / 1000)
     const measuredFps = Math.min(30, Math.round(frameCount / elapsedSec))
-    scope.postMessage({ type: 'fps', fps: measuredFps })
+    const measuredKbs = Math.round((bytesReceived / elapsedSec) / 1024)
+    scope.postMessage({ type: 'fps', fps: measuredFps, kbs: measuredKbs })
     frameCount = 0
+    bytesReceived = 0
     fpsTs = fpsNow
   }
 
@@ -132,13 +135,16 @@ async function run(url: string): Promise<void> {
     let sessionActive = true
     let lastFrameTs = Date.now()
 
-    // Watchdog de inatividade: se nenhum frame for recebido por mais de 4.5s, força reconexão
+    let hasFirstFrame = false
+    // Watchdog de inatividade: concede até 12s para o primeiro keyframe da câmera IP
+    // (essencial em streams H.265 / HEVC), e 5s entre frames subsequentes.
     const watchdogTimer = setInterval(() => {
       if (!sessionActive || !isRunning) {
         clearInterval(watchdogTimer)
         return
       }
-      if (Date.now() - lastFrameTs > 4500) {
+      const timeoutMs = hasFirstFrame ? 5000 : 12000
+      if (Date.now() - lastFrameTs > timeoutMs) {
         clearInterval(watchdogTimer)
         try { ac?.abort() } catch {}
       }
@@ -166,7 +172,11 @@ async function run(url: string): Promise<void> {
       for (;;) {
         const { done, value } = await reader.read()
         if (done || !isRunning) break
+        hasFirstFrame = true
         lastFrameTs = Date.now()
+        if (value) {
+          bytesReceived += value.byteLength
+        }
         chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
         let joined: Uint8Array
         if (chunks.length === 1 && pending.length === 0) {

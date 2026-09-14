@@ -14,6 +14,8 @@ import { MotionGate } from './vision/motion'
 import { ptLabel } from './vision/labels'
 import { LatestWinsQueue } from './vision/detect-queue'
 import { createFramePushQueue, type FramePushQueue } from './vision/frame-push'
+import { shouldPushFrame } from './vision/frame-push-gate'
+import { buildOrphanFfmpegKillScript, encodePowerShellCommand } from './vision/orphan-ffmpeg'
 import { assertCameraUrlSafe, validateCameraUrl } from './vision/camera-url'
 import {
   RTSP_FIRST_FRAME_WATCHDOG_MS,
@@ -23,10 +25,14 @@ import {
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
   buildRtspFfmpegArgs,
   decideRtspReconnect,
+  isBenignRtspStderr,
   isRtspMidStreamStalled,
   nextReconnectDelayMs,
   resolveInitialTransport,
+  resolvePreviewWidth,
+  resolveRtspCodec,
   shouldLogRetry,
+  type RtspCodec,
   type RtspTransport
 } from './vision/rtsp'
 import {
@@ -153,6 +159,10 @@ interface CameraEntry {
   url?: string
   /** User-chosen RTSP transport. Retries never switch transports. */
   transport?: RtspTransport
+  /** MJPEG preview width in px (curated set; 640 default). */
+  previewWidth?: number
+  /** Video codec protocol for RTSP cameras ('h264' default or 'h265'). */
+  codec?: RtspCodec
 }
 
 const ipCameras: CameraEntry[] = []
@@ -162,11 +172,19 @@ interface StoredConfig {
   retentionDays?: number
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
-  ipCameras?: Array<{ id: string; name: string; url: string; transport?: RtspTransport }>
+  ipCameras?: Array<{
+    id: string
+    name: string
+    url: string
+    transport?: RtspTransport
+    previewWidth?: number
+    codec?: RtspCodec
+  }>
   selectedCameras?: string[]
   sendActions?: MonitorAction[]
   detectionZones?: Record<string, Point[]>
   showBoxes?: Record<string, boolean>
+  showZones?: Record<string, boolean>
 }
 
 // Cache da config: o bridge.storage.get lê o config.json do DISCO a cada
@@ -223,8 +241,36 @@ async function syncIpCameras(): Promise<void> {
   for (const cam of config.ipCameras || []) {
     if (cam && cam.url && typeof cam.url === 'string') {
       const transport = cam.transport === 'tcp' || cam.transport === 'udp' ? cam.transport : undefined
-      ipCameras.push({ id: `ip:${cam.url}`, name: cam.name || 'Câmera IP', source: 'ip', url: cam.url, transport })
+      ipCameras.push({
+        id: `ip:${cam.url}`,
+        name: cam.name || 'Câmera IP',
+        source: 'ip',
+        url: cam.url,
+        transport,
+        previewWidth: resolvePreviewWidth(cam.previewWidth),
+        codec: resolveRtspCodec(cam.codec)
+      })
     }
+  }
+  restartStreamsOnPreviewWidthChange()
+}
+
+/**
+ * A preview-width or codec change in the config only takes effect on a new FFmpeg
+ * session, so restart just the affected camera (best effort, background).
+ */
+function restartStreamsOnPreviewWidthChange(): void {
+  for (const cam of ipCameras) {
+    const entry = mjpegStreams.get(cam.id)
+    if (!entry) continue
+    const widthMatches = entry.previewWidth === resolvePreviewWidth(cam.previewWidth)
+    const codecMatches = entry.codec === resolveRtspCodec(cam.codec)
+    if (widthMatches && codecMatches) continue
+    bridge?.log(
+      `[vision] stream settings for ${cam.name} changed (${entry.previewWidth}w/${entry.codec} → ${resolvePreviewWidth(cam.previewWidth)}w/${resolveRtspCodec(cam.codec)}), restarting stream`
+    )
+    stopMjpeg(cam.id)
+    void startMjpeg(cam).catch(() => {})
   }
 }
 
@@ -292,6 +338,14 @@ interface StreamEntry {
   latestTs: number
   /** Última vez que um consumidor (ticker/get_frame/snapshot) leu o frame. */
   lastConsumerTs: number
+  /** Preview subscribers reported by the host (null until the first response). */
+  subscribers: number | null
+  /** Last frame push to the host, used by the subscriber-aware cadence gate. */
+  lastPushAt: number
+  /** Preview width this session was spawned with (restart on change). */
+  previewWidth: number
+  /** Video codec this session was spawned with (restart on change). */
+  codec: RtspCodec
 }
 const mjpegStreams = new Map<string, StreamEntry>()
 function parseCameraUrl(rawUrl: string): { urlsToTry: string[]; headers: Record<string, string> } {
@@ -344,12 +398,24 @@ function framePushQueueFor(cameraId: string): FramePushQueue {
         const ac = new AbortController()
         const t = setTimeout(() => ac.abort(), FRAME_PUSH_TIMEOUT_MS)
         try {
-          await hostFetch(`/media/camera/frame/${encodeURIComponent(cameraId)}`, {
+          const res = await hostFetch(`/media/camera/frame/${encodeURIComponent(cameraId)}`, {
             method: 'POST',
             headers: { 'Content-Type': 'image/jpeg' },
             body: new Uint8Array(buf),
             signal: ac.signal as any
           })
+          // The host reports the live preview subscriber count so the push
+          // gate can drop to a heartbeat when nobody is watching. Older hosts
+          // omit the field; subscribers stays null ("unknown" = no throttle).
+          if (res.ok) {
+            const payload = (await res.json().catch(() => null)) as {
+              subscribers?: unknown
+            } | null
+            const entry = mjpegStreams.get(cameraId)
+            if (entry && payload && typeof payload.subscribers === 'number') {
+              entry.subscribers = payload.subscribers
+            }
+          }
         } finally {
           clearTimeout(t)
         }
@@ -373,6 +439,16 @@ function disposeFramePushQueue(cameraId: string): void {
 }
 
 function pushIpFrameToHost(cameraId: string, frameData: Buffer | string): void {
+  const entry = mjpegStreams.get(cameraId)
+  const now = Date.now()
+  if (
+    entry &&
+    !shouldPushFrame({ lastPushAt: entry.lastPushAt, now, subscribers: entry.subscribers })
+  ) {
+    metricFor(cameraId).pushThrottled++
+    return
+  }
+  if (entry) entry.lastPushAt = now
   const buf = Buffer.isBuffer(frameData) ? frameData : Buffer.from(frameData, 'base64')
   framePushQueueFor(cameraId).push(buf)
 }
@@ -407,7 +483,11 @@ async function startMjpeg(camera: CameraEntry): Promise<void> {
     controller,
     latest: null,
     latestTs: 0,
-    lastConsumerTs: Date.now()
+    lastConsumerTs: Date.now(),
+    subscribers: null,
+    lastPushAt: 0,
+    previewWidth: resolvePreviewWidth(camera.previewWidth),
+    codec: resolveRtspCodec(camera.codec)
   }
   mjpegStreams.set(camera.id, entry)
 
@@ -575,21 +655,21 @@ const ipFrozenLightAttempts = new Map<string, number>()
 const ipLastHardResetTs = new Map<string, number>()
 const ipHardCooldownUntil = new Map<string, number>()
 
-function killOrphanFfmpegForCamera(camera: CameraEntry): void {
+async function killOrphanFfmpegForCamera(camera: CameraEntry): Promise<void> {
+  if (process.platform !== 'win32') return
+  const host = extractRtspHost(camera.url || camera.id)
+  if (!host) return
   try {
-    if (process.platform !== 'win32') return
-    const host = extractRtspHost(camera.url || camera.id)
-    if (!host) return
-    void import('node:child_process').then(({ execSync }) => {
-      try {
-        const psCmd = `Get-CimInstance Win32_Process -Filter "name = 'ffmpeg.exe'" | Where-Object { $_.CommandLine -like "*${host}*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
-        execSync(`powershell -NoProfile -NonInteractive -Command "${psCmd}"`, {
-          stdio: 'ignore',
-          timeout: 5000
-        })
-      } catch {}
-    }).catch(() => {})
-  } catch {}
+    const { execSync } = await import('node:child_process')
+    const script = buildOrphanFfmpegKillScript(host)
+    execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellCommand(script)}`, {
+      stdio: 'ignore',
+      timeout: 10000
+    })
+  } catch {
+    // Best-effort cleanup: a missing PowerShell or a locked process just
+    // leaves the previous behavior (the strategy retry handles it).
+  }
 }
 
 // TTL dos streams MJPEG/RTSP: um stream sem consumidor ativo (monitor ativo,
@@ -733,11 +813,24 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
     controller: new AbortController(),
     latest: null,
     latestTs: 0,
-    lastConsumerTs: Date.now()
+    lastConsumerTs: Date.now(),
+    subscribers: null,
+    lastPushAt: 0,
+    previewWidth: resolvePreviewWidth(camera.previewWidth),
+    codec: resolveRtspCodec(camera.codec)
   }
   mjpegStreams.set(camera.id, entry)
 
   const connectState = connectStateFor(camera.id)
+  // A fresh supervisor (worker restart/hot reload) can coexist with an orphan
+  // FFmpeg from the previous process. These cameras commonly accept a single
+  // RTSP session, so clear the orphan before the first attempt — otherwise
+  // every retry gets a silent "no RTP" until the stale session dies inside
+  // the camera.
+  const isFreshSupervisor = connectState.failures === 0 && connectState.firstFrameAt === 0
+  if (isFreshSupervisor) {
+    await killOrphanFfmpegForCamera(camera)
+  }
   connectState.startedAt = Date.now()
   connectState.firstFrameAt = 0
   connectState.lastError = ''
@@ -758,8 +851,8 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       logRtspCooldownSkip(camera, cooldown)
       return
     }
-    bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) [${transport}]...`)
-    const ffmpegArgs = buildRtspFfmpegArgs(url, transport)
+    bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) [${transport}] [${resolveRtspCodec(camera.codec)}]...`)
+    const ffmpegArgs = buildRtspFfmpegArgs(url, transport, camera.previewWidth, camera.codec)
     const ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
     const session: RtspSession = { ffmpeg, alive: true }
@@ -817,6 +910,7 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
         connectState.firstFrameAt = Date.now()
         connectState.lastError = ''
         connectState.failures = 0
+        bridge?.log(`[vision] RTSP: first frame received for ${camera.name}!`)
         startMidStreamWatchdog()
       }
       if (jpegBuf.length === 0) jpegBuf = chunk
@@ -847,14 +941,9 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       const msg = data.toString()
       stderrBuf += msg
       if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000)
+      if (isBenignRtspStderr(msg)) return
       if (msg.includes('POC') || msg.includes('RPS') || msg.includes('NALU') || msg.includes('PPS id')) return
-      // Long never-connected streaks already report via lastError + the
-      // periodic restart line — don't echo ffmpeg's identical error per
-      // attempt. Mid-stream failures always log (rare and actionable).
-      const streakQuiet = !hadFirstFrame && connectState.failures >= 3
-      if (!streakQuiet && (msg.toLowerCase().includes('error') || msg.toLowerCase().includes('failed') || msg.toLowerCase().includes('fatal') || msg.toLowerCase().includes('timeout') || msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('401'))) {
-        bridge?.log(`[vision] RTSP FFmpeg (${camera.name}) [${transport}]: ${msg.slice(0, 250)}`)
-      }
+      bridge?.log(`[vision] RTSP FFmpeg stderr (${camera.name}): ${msg.slice(0, 200)}`)
     })
 
     ffmpeg.on('error', (err) => {
@@ -871,6 +960,7 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
     ffmpeg.on('exit', (code, signal) => {
       clearTimeout(firstFrameWatchdog)
       stopMidStreamWatchdog()
+      bridge?.log(`[vision] RTSP FFmpeg exit for ${camera.name} code=${code} signal=${signal} hadFirstFrame=${hadFirstFrame} stderr=${stderrBuf.slice(-200)}`)
       if (!session.alive) return
       session.alive = false
       rtspSessions.delete(camera.id)
@@ -1269,6 +1359,7 @@ interface CameraMetrics {
   parseMs: number[]
   pushDropped: number
   pushFailed: number
+  pushThrottled: number
   snapshotPollMs: number[]
 }
 
@@ -1277,7 +1368,7 @@ const cameraMetrics = new Map<string, CameraMetrics>()
 function metricFor(cameraId: string): CameraMetrics {
   let m = cameraMetrics.get(cameraId)
   if (!m) {
-    m = { captureAt: 0, yoloAt: 0, yoloMs: [], renderAt: 0, framesIn: 0, framesYolo: 0, framesDropped: 0, fetchMs: [], parseMs: [], pushDropped: 0, pushFailed: 0, snapshotPollMs: [] }
+    m = { captureAt: 0, yoloAt: 0, yoloMs: [], renderAt: 0, framesIn: 0, framesYolo: 0, framesDropped: 0, fetchMs: [], parseMs: [], pushDropped: 0, pushFailed: 0, pushThrottled: 0, snapshotPollMs: [] }
     cameraMetrics.set(cameraId, m)
   }
   return m
@@ -1305,6 +1396,7 @@ function summaryMetrics(cameraId: string): Record<string, number> {
     framesDropped: m.framesDropped,
     pushDropped: m.pushDropped,
     pushFailed: m.pushFailed,
+    pushThrottled: m.pushThrottled,
     yoloAvgMs: avgMs(m.yoloMs),
     fetchAvgMs: avgMs(m.fetchMs),
     parseAvgMs: avgMs(m.parseMs),
@@ -1804,6 +1896,14 @@ function getActiveMonitorsForCamera(cameraId: string): ActiveMonitor[] {
   return [...localActive, ...autoActive]
 }
 
+function isCameraSelected(cameraId: string): boolean {
+  const selectedList = _configCache?.selectedCameras || []
+  if (selectedList.includes(cameraId)) return true
+  const cam = findCamera(cameraId)
+  if (cam && selectedList.includes(cam.id)) return true
+  return false
+}
+
 function stopCameraTickerIfIdle(cameraId: string): void {
   const active = getActiveMonitorsForCamera(cameraId)
   if (active.length > 0) return
@@ -1811,6 +1911,10 @@ function stopCameraTickerIfIdle(cameraId: string): void {
   if (timer) {
     clearInterval(timer)
     cameraTickers.delete(cameraId)
+  }
+  motionGates.delete(cameraId)
+  if (isCameraSelected(cameraId)) {
+    return
   }
   const camera = findCamera(cameraId)
   if (camera && camera.source === 'ip') stopMjpeg(cameraId)
@@ -1822,7 +1926,6 @@ function stopCameraTickerIfIdle(cameraId: string): void {
       body: JSON.stringify({ deviceId: camera.deviceId })
     }).catch(() => {})
   }
-  motionGates.delete(cameraId)
 }
 
 async function tickCamera(cameraId: string): Promise<void> {
@@ -2264,7 +2367,7 @@ async function reconnectIpIfStale(camera: CameraEntry): Promise<void> {
     ipFrozenLightAttempts.delete(camera.id)
     ipLastHardResetTs.set(camera.id, Date.now())
     ipHardCooldownUntil.set(camera.id, Date.now() + FROZEN_HARD_COOLDOWN_MS)
-    killOrphanFfmpegForCamera(camera)
+    await killOrphanFfmpegForCamera(camera)
     setTimeout(() => {
       ipHardCooldownUntil.delete(camera.id)
       void startMjpeg(camera).catch((e) => bridge?.log(`[vision] hard reset IP ${camera.name} falhou: ${e}`))
@@ -3265,7 +3368,8 @@ async function toolGetStatus(): Promise<unknown> {
     monitors: combined,
     cameras: status,
     detectionZones: cfg.detectionZones || {},
-    showBoxes: cfg.showBoxes || {}
+    showBoxes: cfg.showBoxes || {},
+    showZones: cfg.showZones || {}
   }
 }
 
@@ -3550,8 +3654,12 @@ const FRAME_PUMP_FIRST_GRACE_MS = 1000
 // POST /extensions/momai-vision/frame — the dashboard page pumps webcam & IP camera
 // frames for live bounding boxes.
 async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): Promise<unknown> {
-  if (!args.jpegBase64) return { ok: false, error: 'jpegBase64 required' }
   const cameraId = args.cameraId || 'page'
+  // Cameras streamed by this worker already hold the newest frame in memory:
+  // the page can request detection without shipping the JPEG back through
+  // renderer → node-core → worker (~150KB base64 per second per visible card).
+  const jpegBase64 = args.jpegBase64 || mjpegStreams.get(cameraId)?.latest?.toString('base64')
+  if (!jpegBase64) return { ok: false, error: 'no frame available' }
   const cached = lastPumpBoxes.get(cameraId)
 
   const publish = (result: EngineResult): void => {
@@ -3600,7 +3708,7 @@ async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): 
   // está ocupado — em vez de devolver [] após o grace para sempre.
   const engineBusy = engineInferenceCount > 0
 
-  const pending = engineDetectSerial(cameraId, args.jpegBase64)
+  const pending = engineDetectSerial(cameraId, jpegBase64)
     .then(publish)
     .catch((err: unknown) => {
       bridge?.log(`[vision] frame_pump background detect failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -3640,11 +3748,19 @@ async function toolConfigure(args: {
   retentionDays?: number
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
-  ipCameras?: Array<{ id: string; name: string; url: string; transport?: RtspTransport }>
+  ipCameras?: Array<{
+    id: string
+    name: string
+    url: string
+    transport?: RtspTransport
+    previewWidth?: number
+    codec?: RtspCodec
+  }>
   selectedCameras?: string[]
   sendActions?: MonitorAction[]
   detectionZones?: Record<string, Point[]>
   showBoxes?: Record<string, boolean>
+  showZones?: Record<string, boolean>
 }): Promise<unknown> {
   // SSRF: valida cada URL de câmera IP ANTES de persistir (esquema http/https/
   // rtsp, bloqueia loopback/link-local/metadata + resolução de hostname). Uma
@@ -3658,6 +3774,13 @@ async function toolConfigure(args: {
       // to the automatic TCP-first failover instead of failing the save.
       if (cam.transport !== undefined && cam.transport !== 'tcp' && cam.transport !== 'udp') {
         delete cam.transport
+      }
+      // Preview width only accepts the curated set; junk falls back to 640.
+      if (cam.previewWidth !== undefined) {
+        cam.previewWidth = resolvePreviewWidth(cam.previewWidth)
+      }
+      if (cam.codec !== undefined) {
+        cam.codec = resolveRtspCodec(cam.codec)
       }
       const validation = await assertCameraUrlSafe(cam.url)
       if (!validation.ok) {
@@ -3680,6 +3803,7 @@ async function toolConfigure(args: {
     if (args.sendActions !== undefined) cfg.sendActions = args.sendActions
     if (args.detectionZones !== undefined) cfg.detectionZones = args.detectionZones
     if (args.showBoxes !== undefined) cfg.showBoxes = args.showBoxes
+    if (args.showZones !== undefined) cfg.showZones = args.showZones
   })
 
   // Se câmeras foram desselecionadas/removidas, pausa automaticamente os monitoramentos associados

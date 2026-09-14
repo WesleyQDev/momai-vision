@@ -204,7 +204,13 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
       expect(write).toBeTruthy()
       expect(write!.args.selectedCameras).toEqual(['webcam:a', 'ip:http://192.168.0.5:8080/video'])
       expect(write!.args.ipCameras).toEqual([
-        { id: 'ip:http://192.168.0.5:8080/video', name: 'Garagem', url: 'http://192.168.0.5:8080/video', transport: 'udp' }
+        {
+          id: 'ip:http://192.168.0.5:8080/video',
+          name: 'Garagem',
+          url: 'http://192.168.0.5:8080/video',
+          transport: 'udp',
+          previewWidth: 640
+        }
       ])
     })
   })
@@ -356,7 +362,15 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
       const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
       expect(write).toBeTruthy()
       expect(write!.args.selectedCameras).toEqual(['webcam:a', 'ip:http://10.0.0.9:8080/video'])
-      expect(write!.args.ipCameras).toEqual([{ id: 'ip:http://10.0.0.9:8080/video', name: 'Câmera IP', url: 'http://10.0.0.9:8080/video', transport: 'udp' }])
+      expect(write!.args.ipCameras).toEqual([
+        {
+          id: 'ip:http://10.0.0.9:8080/video',
+          name: 'Câmera IP',
+          url: 'http://10.0.0.9:8080/video',
+          transport: 'udp',
+          previewWidth: 640
+        }
+      ])
     })
   })
 })
@@ -435,7 +449,8 @@ describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
           id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2',
           name: 'Quintal',
           url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
-          transport: 'udp'
+          transport: 'udp',
+          previewWidth: 640
         }
       ])
     })
@@ -466,7 +481,8 @@ describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
           id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2',
           name: 'Quintal',
           url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
-          transport: 'udp'
+          transport: 'udp',
+          previewWidth: 640
         }
       ])
     })
@@ -508,7 +524,8 @@ describe('VisionPage — lembrar nome e URL da câmera IP', () => {
     expect(JSON.parse(localStorage.getItem('momai-vision:ip-draft') || '{}')).toEqual({
       name: 'Quintal',
       url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
-      transport: 'udp'
+      transport: 'udp',
+      previewWidth: 640
     })
 
     first.unmount()
@@ -533,6 +550,94 @@ describe('VisionPage — lembrar nome e URL da câmera IP', () => {
     expect((screen.getByRole('checkbox', { name: 'Lembrar nome e URL' }) as HTMLInputElement).checked).toBe(true)
     fireEvent.click(screen.getByRole('checkbox', { name: 'Lembrar nome e URL' }))
     expect(localStorage.getItem('momai-vision:ip-draft')).toBeNull()
+  })
+
+  it('mantém a confirmação congelada enquanto o rascunho lembrado não muda', async () => {
+    localStorage.setItem('momai-vision:ip-draft', JSON.stringify({
+      name: 'Quintal',
+      url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+      transport: 'udp',
+      previewWidth: 640
+    }))
+    setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    // O rascunho lembrado preenche nome e URL...
+    expect((screen.getByPlaceholderText('Nome da câmera (ex.: Garagem, Entrada)') as HTMLInputElement).value).toBe('Quintal')
+    expect((screen.getByPlaceholderText(/URL \(http/) as HTMLInputElement).value).toBe('rtsp://admin:pass@192.168.0.4:554/onvif2')
+
+    // ...mas não conta como seleção: o rodapé só libera depois de uma alteração.
+    expectButtonDisabled(screen.getByRole('button', { name: 'Nenhuma câmera selecionada' }))
+    expect(screen.queryByRole('button', { name: 'Adicionar 1 câmera' })).toBeNull()
+  })
+
+  it('libera a confirmação quando o usuário altera o nome do rascunho lembrado', async () => {
+    localStorage.setItem('momai-vision:ip-draft', JSON.stringify({
+      name: 'Quintal',
+      url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+      transport: 'udp',
+      previewWidth: 640
+    }))
+    const { calls } = setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    expectButtonDisabled(screen.getByRole('button', { name: 'Nenhuma câmera selecionada' }))
+
+    fireEvent.change(screen.getByPlaceholderText('Nome da câmera (ex.: Garagem, Entrada)'), { target: { value: 'Quintal Norte' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Adicionar 1 câmera' }))
+
+    await waitFor(() => {
+      const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
+      expect(write).toBeTruthy()
+      expect(write!.args.ipCameras).toEqual([
+        {
+          id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2',
+          name: 'Quintal Norte',
+          url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+          transport: 'udp',
+          previewWidth: 640
+        }
+      ])
+    })
+  })
+
+  it('libera a confirmação quando o usuário altera outro dado do rascunho lembrado', async () => {
+    localStorage.setItem('momai-vision:ip-draft', JSON.stringify({
+      name: 'Quintal',
+      url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+      transport: 'udp',
+      previewWidth: 640
+    }))
+    const { calls } = setupServer({ cameras: [] })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    expectButtonDisabled(screen.getByRole('button', { name: 'Nenhuma câmera selecionada' }))
+
+    fireEvent.click(screen.getByRole('radio', { name: 'TCP' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Adicionar 1 câmera' }))
+
+    await waitFor(() => {
+      const write = calls.find((c) => c.toolName === 'configure' && c.args.selectedCameras !== undefined)
+      expect(write).toBeTruthy()
+      expect(write!.args.ipCameras).toEqual([
+        {
+          id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2',
+          name: 'Quintal',
+          url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+          transport: 'tcp',
+          previewWidth: 640
+        }
+      ])
+    })
   })
 })
 
@@ -757,9 +862,12 @@ describe('VisionPage — frame direto do host só para webcam', () => {
   it('não bate em /media/camera/frame para câmera IP (evita 404 a cada ciclo)', async () => {
     const IP_CAM = { id: 'ip:rtsp://192.168.0.2:554/onvif1', name: 'Rua', source: 'ip', online: true, monitors: 0 } as const
     let pumpCount = 0
+    const toolsCalled: string[] = []
+    const pumpPayloads: Array<Record<string, unknown>> = []
     const sdk = getSDK()
     vi.mocked(sdk.api.post).mockImplementation(async (path, body) => {
       if (path !== '/extensions/momai-vision/command') return { ok: true, data: {} }
+      toolsCalled.push(String(body?.toolName))
       switch (body?.toolName) {
         case 'list_cameras':
           return { ok: true, data: { cameras: [IP_CAM], selectedCameras: [IP_CAM.id] } }
@@ -773,14 +881,16 @@ describe('VisionPage — frame direto do host só para webcam', () => {
           return { ok: true, data: { jpegBase64: 'data:image/jpeg;base64,AAA' } }
         case 'frame_pump':
           pumpCount++
+          pumpPayloads.push((body?.args || {}) as Record<string, unknown>)
           return { ok: true, data: { detections: [] } }
         default:
           return { ok: true, data: {} }
       }
     })
 
-    // O stream MJPEG responde sem body → o parser falha e o pump cai no
-    // get_frame; o fetch direto NÃO pode ser chamado para IP.
+    // O stream MJPEG responde sem body. Para IP o pump usa o frame que o
+    // worker já mantém: não pode cair no get_frame nem reenviar o JPEG pelo
+    // renderer; o fetch direto ao host também NÃO pode ser chamado para IP.
     const fetchMock = vi.fn(async (_url: RequestInfo | URL) => ({ ok: true, body: null, json: async () => ({}) }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -789,6 +899,13 @@ describe('VisionPage — frame direto do host só para webcam', () => {
       await screen.findByText('MomAI Vision')
       await waitFor(() => expect(pumpCount).toBeGreaterThan(0), { timeout: 8000 })
 
+      // O warmup de montagem dispara UM get_frame para iniciar o stream; o pump
+      // não pode depender dele (no código antigo cada ciclo chamava get_frame e
+      // reenviava o JPEG pelo renderer).
+      const getFrameCalls = toolsCalled.filter((tool) => tool === 'get_frame').length
+      expect(getFrameCalls).toBeLessThanOrEqual(1)
+      expect(pumpPayloads.length).toBeGreaterThan(0)
+      expect(pumpPayloads.every((args) => args.jpegBase64 === undefined)).toBe(true)
       const hitDirectFrame = fetchMock.mock.calls.some((call) => String(call[0]).includes('/media/camera/frame/'))
       expect(hitDirectFrame).toBe(false)
     } finally {

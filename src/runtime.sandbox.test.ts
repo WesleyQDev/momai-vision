@@ -51,6 +51,58 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   // Frames are delivered as binary image/jpeg by the host mock.
   const WEB_FRAME_BUF = Buffer.from(WEB_FRAME, 'base64')
 
+  // Host storage IPC contract: the worker's bridge (worker-storage.ts) sends
+  // { type: 'storage-request', requestId, method, args } and waits for
+  // { type: 'storage-response', requestId, result }. The real host persists
+  // this in SQLite; an in-memory map keeps the sandbox contract honest — and
+  // outlives worker restarts, which is what the restore test exercises.
+  const storageState = new Map<string, unknown>()
+
+  function handleStorageRequest(m: { requestId?: string; method?: string; args?: unknown[] }): void {
+    if (!m.requestId) return
+    const result: { ok: boolean; value?: unknown; error?: string } = { ok: true }
+    try {
+      const args = m.args || []
+      switch (m.method) {
+        case 'storage.get':
+          result.value = storageState.has(String(args[0])) ? storageState.get(String(args[0])) : null
+          break
+        case 'storage.set':
+          storageState.set(String(args[0]), args[1])
+          break
+        case 'storage.delete':
+          storageState.delete(String(args[0]))
+          break
+        case 'storage.listKeys':
+          result.value = [...storageState.keys()]
+          break
+        case 'storage.getMany':
+          result.value = (Array.isArray(args[0]) ? args[0] : []).map((key) =>
+            storageState.has(String(key)) ? storageState.get(String(key)) : null
+          )
+          break
+        case 'storage.setMany':
+          for (const entry of Array.isArray(args[0]) ? args[0] : []) {
+            if (Array.isArray(entry)) storageState.set(String(entry[0]), entry[1])
+          }
+          break
+        case 'storage.migrate':
+          break
+        default:
+          result.ok = false
+          result.error = `unsupported storage method: ${String(m.method)}`
+      }
+    } catch (err) {
+      result.ok = false
+      result.error = err instanceof Error ? err.message : String(err)
+    }
+    try {
+      child.send({ type: 'storage-response', requestId: m.requestId, result })
+    } catch {
+      // Channel closed (worker shutting down): the pending request dies with it.
+    }
+  }
+
   function spawnWorker(): Promise<void> {
     events.length = 0
     child = spawn(
@@ -62,7 +114,11 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       }
     )
     child.on('message', (msg: unknown) => {
-      const m = msg as { type?: string; id?: string; requestId?: string }
+      const m = msg as { type?: string; id?: string; requestId?: string; method?: string; args?: unknown[] }
+      if (m.type === 'storage-request') {
+        handleStorageRequest(m)
+        return
+      }
       if (m.type === 'event') {
         events.push({ eventType: (msg as { eventType: string }).eventType, data: (msg as { data: unknown }).data })
       }
@@ -487,6 +543,21 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   )
 
   it(
+    'frame_pump without jpegBase64 answers no frame available when the worker has no frame',
+    async () => {
+      // Câmera IP sem stream no worker: resposta explícita, sem exigir o JPEG
+      // do renderer (o pump do card IP manda só o cameraId).
+      const missing = (await execute({
+        toolName: 'frame_pump',
+        args: { cameraId: 'ip:rtsp://192.168.0.9:554/onvif2' }
+      })) as { ok: boolean; error?: string }
+      expect(missing.ok).toBe(false)
+      expect(missing.error).toBe('no frame available')
+    },
+    60000
+  )
+
+  it(
     'frame_pump with cache responds immediately (never awaits the engine), even with an idle slot',
     async () => {
       // Primeiro pump da câmera: aquece o cache (realmente roda o YOLO).
@@ -671,5 +742,30 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       expect(status.monitors[0].label).toBe('Entrada Principal')
     },
     120000
+  )
+
+  // Last on purpose: it registers an extra IP camera in the shared config.
+  it(
+    'normalizes and persists the preview width through configure',
+    async () => {
+      const url = 'rtsp://192.168.0.9:554/onvif2'
+      const camera = { id: `ip:${url}`, name: 'Rua', url, transport: 'udp' as const }
+
+      const configured = (await execute({
+        toolName: 'configure',
+        args: { ipCameras: [{ ...camera, previewWidth: 1280 }] }
+      })) as { ok: boolean; config?: { ipCameras?: Array<{ id: string; previewWidth?: number }> } }
+      expect(configured.ok).toBe(true)
+      expect(configured.config?.ipCameras?.find((c) => c.id === camera.id)?.previewWidth).toBe(1280)
+
+      // Junk values never reach the ffmpeg scale: fall back to the 640 default.
+      const normalized = (await execute({
+        toolName: 'configure',
+        args: { ipCameras: [{ ...camera, previewWidth: 4096 }] }
+      })) as { ok: boolean; config?: { ipCameras?: Array<{ id: string; previewWidth?: number }> } }
+      expect(normalized.ok).toBe(true)
+      expect(normalized.config?.ipCameras?.find((c) => c.id === camera.id)?.previewWidth).toBe(640)
+    },
+    60000
   )
 })

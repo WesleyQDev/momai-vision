@@ -1,17 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import {
   RTSP_AUTH_RETRY_DELAY_MS,
-  RTSP_EXHAUSTED_RETRY_DELAY_MS,
+  RTSP_CONNECT_TIMEOUT_US,
+  RTSP_EARLY_RETRY_DELAY_MS,
   RTSP_FIRST_FRAME_WATCHDOG_MS,
   RTSP_MID_STREAM_STALL_MS,
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
   RTSP_RESTART_DELAY_MS,
+  RTSP_RETRY_MAX_DELAY_MS,
+  PREVIEW_WIDTH_DEFAULT,
+  PREVIEW_WIDTH_OPTIONS,
+  RTSP_CODEC_DEFAULT,
+  RTSP_CODEC_OPTIONS,
   buildRtspFfmpegArgs,
   decideRtspReconnect,
+  isBenignRtspStderr,
   isRtspAuthFailure,
   isRtspMidStreamStalled,
   nextReconnectDelayMs,
   resolveInitialTransport,
+  resolvePreviewWidth,
+  resolveRtspCodec,
   shouldLogRetry
 } from './rtsp'
 
@@ -31,7 +40,58 @@ describe('rtsp connection policy', () => {
     expect(args).toContain('-analyzeduration')
     expect(args).toContain(url)
     // Still transcodes to an MJPEG pipe for the preview pipeline.
-    expect(args.slice(-4)).toEqual(['mjpeg', '-q:v', '3', 'pipe:1'])
+    expect(args.slice(-4)).toEqual(['mjpeg', '-q:v', '5', 'pipe:1'])
+  })
+
+  it('waits long enough for a slow first RTP packet instead of failing at 3s', () => {
+    // The camera needs ~2.5-3.2s to deliver the first UDP RTP packet; a 3s
+    // budget turned a healthy camera into a coin flip.
+    expect(Number(RTSP_CONNECT_TIMEOUT_US)).toBeGreaterThanOrEqual(8_000_000)
+    expect(Number(RTSP_CONNECT_TIMEOUT_US)).toBeLessThan(Number(RTSP_FIRST_FRAME_WATCHDOG_MS) * 1000)
+  })
+
+  it('keeps the camera cadence instead of duplicating frames to 25fps', () => {
+    const args = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif2', 'udp')
+    expect(args.join(' ')).not.toContain('fps=25')
+    expect(args).toContain('-fps_mode')
+    expect(args[args.indexOf('-fps_mode') + 1]).toBe('passthrough')
+  })
+
+  it('resolves the preview width to the allowed values with a 640 default', () => {
+    expect(PREVIEW_WIDTH_DEFAULT).toBe(640)
+    expect(PREVIEW_WIDTH_OPTIONS).toEqual([640, 960, 1280])
+    expect(resolvePreviewWidth(640)).toBe(640)
+    expect(resolvePreviewWidth(960)).toBe(960)
+    expect(resolvePreviewWidth(1280)).toBe(1280)
+    // Legacy cameras without a choice and junk values keep the old behavior.
+    expect(resolvePreviewWidth(undefined)).toBe(640)
+    expect(resolvePreviewWidth(null)).toBe(640)
+    expect(resolvePreviewWidth(4096)).toBe(640)
+    expect(resolvePreviewWidth('1280')).toBe(640)
+  })
+
+  it('caps the preview width without upscaling a smaller source', () => {
+    const args = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif2', 'udp', 1280)
+    expect(args[args.indexOf('-vf') + 1]).toBe("scale=w='min(1280,iw)':h=-2")
+    // Default stays 640 (today's behavior) and never upscales.
+    const fallback = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif2', 'udp')
+    expect(fallback[fallback.indexOf('-vf') + 1]).toBe("scale=w='min(640,iw)':h=-2")
+  })
+
+  it('resolves the codec to allowed values and configures H.265 args', () => {
+    expect(RTSP_CODEC_DEFAULT).toBe('h264')
+    expect(RTSP_CODEC_OPTIONS).toEqual(['h264', 'h265'])
+    expect(resolveRtspCodec('h264')).toBe('h264')
+    expect(resolveRtspCodec('h265')).toBe('h265')
+    expect(resolveRtspCodec(undefined)).toBe('h264')
+    expect(resolveRtspCodec('unknown')).toBe('h264')
+
+    const h264Args = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif1', 'tcp', 640, 'h264')
+    expect(h264Args).not.toContain('-reorder_queue_size')
+
+    const h265Args = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif1', 'tcp', 640, 'h265')
+    expect(h265Args).toContain('-reorder_queue_size')
+    expect(h265Args[h265Args.indexOf('-reorder_queue_size') + 1]).toBe('0')
   })
 
   it('bounds the first-frame wait so a silent UDP stall cannot hang forever', () => {
@@ -47,6 +107,17 @@ describe('rtsp connection policy', () => {
     expect(isRtspAuthFailure('')).toBe(false)
   })
 
+  it('marks duplicate timestamp muxer warnings as benign log noise', () => {
+    expect(
+      isBenignRtspStderr(
+        '[image2pipe @ 00000181ae4decc0] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 775 >= 775'
+      )
+    ).toBe(true)
+    expect(isBenignRtspStderr('non monotonically increasing dts to muxer in stream 0')).toBe(true)
+    expect(isBenignRtspStderr('server returned 401 unauthorized')).toBe(false)
+    expect(isBenignRtspStderr('')).toBe(false)
+  })
+
   it('never flips transports on early failure — retries the same manual choice', () => {
     // UDP attempt timing out stays on UDP.
     expect(
@@ -55,7 +126,7 @@ describe('rtsp connection policy', () => {
         stderrLower: 'operation timed out',
         hadFirstFrame: false
       })
-    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS })
+    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })
 
     // TCP attempt refused stays on TCP.
     expect(
@@ -64,7 +135,7 @@ describe('rtsp connection policy', () => {
         stderrLower: 'connection to tcp refused',
         hadFirstFrame: false
       })
-    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS })
+    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })
   })
 
   it('backs off on auth failures instead of hammering the camera', () => {
@@ -94,7 +165,7 @@ describe('rtsp connection policy', () => {
         stderrLower: 'no route to host',
         hadFirstFrame: false
       })
-    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EXHAUSTED_RETRY_DELAY_MS })
+    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })
   })
 
   it('sticks to the user-configured transport', () => {
@@ -104,16 +175,22 @@ describe('rtsp connection policy', () => {
     expect(resolveInitialTransport()).toBe(RTSP_PREFERRED_TRANSPORT_DEFAULT)
   })
 
-  it('backs off progressively on repeated never-connected failures', () => {
-    expect(nextReconnectDelayMs(1)).toBe(3000)
-    expect(nextReconnectDelayMs(2)).toBe(6000)
-    expect(nextReconnectDelayMs(3)).toBe(12000)
-    expect(nextReconnectDelayMs(5)).toBe(48000)
-    // Capped so a dead camera or wrong pinned transport never waits longer.
-    expect(nextReconnectDelayMs(6)).toBe(60000)
-    expect(nextReconnectDelayMs(100)).toBe(60000)
-    // Defensive clamp for unexpected counts.
-    expect(nextReconnectDelayMs(0)).toBe(3000)
+  it('retries fast at first, then backs off with a short cap', () => {
+    // Transient "handshake ok, no RTP" failures are common on this camera
+    // class: the first attempts must retry fast instead of freezing the
+    // preview for a minute behind the progressive backoff.
+    expect(RTSP_EARLY_RETRY_DELAY_MS).toBe(1500)
+    expect(nextReconnectDelayMs(0)).toBe(RTSP_EARLY_RETRY_DELAY_MS)
+    expect(nextReconnectDelayMs(1)).toBe(RTSP_EARLY_RETRY_DELAY_MS)
+    expect(nextReconnectDelayMs(3)).toBe(RTSP_EARLY_RETRY_DELAY_MS)
+    // Only after a real failing streak does it slow down...
+    expect(nextReconnectDelayMs(4)).toBe(3000)
+    expect(nextReconnectDelayMs(5)).toBe(6000)
+    expect(nextReconnectDelayMs(6)).toBe(12000)
+    // ...and the cap stays short enough for a live preview to recover.
+    expect(RTSP_RETRY_MAX_DELAY_MS).toBe(15000)
+    expect(nextReconnectDelayMs(7)).toBe(15000)
+    expect(nextReconnectDelayMs(100)).toBe(15000)
   })
 
   it('quiets the log after the first attempts of a failing streak', () => {

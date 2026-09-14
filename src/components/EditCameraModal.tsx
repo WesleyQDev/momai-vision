@@ -2,6 +2,14 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { getSDK } from 'momai:sdk'
 import { useI18n } from '../hooks/useI18n'
+import {
+  PREVIEW_WIDTH_DEFAULT,
+  PREVIEW_WIDTH_OPTIONS,
+  RTSP_CODEC_DEFAULT,
+  resolvePreviewWidth,
+  resolveRtspCodec,
+  type RtspCodec
+} from '../vision/rtsp'
 import visionIconPng from '../../icon.png'
 
 const sdk = getSDK()
@@ -12,12 +20,17 @@ export interface EditingCameraTarget {
   source: 'webcam' | 'ip'
   url: string
   transport: 'tcp' | 'udp'
+  previewWidth: number
+  codec?: RtspCodec
 }
 
 interface EditCameraModalProps {
   target: EditingCameraTarget | null
   onClose: () => void
-  onSave: (oldId: string, payload: { name: string; url: string; transport: 'tcp' | 'udp' }) => Promise<void>
+  onSave: (
+    oldId: string,
+    payload: { name: string; url: string; transport: 'tcp' | 'udp'; previewWidth: number; codec: RtspCodec }
+  ) => Promise<void>
   /** Called after "Limpar Cache e Conexões" succeeds so the parent can leave the modal and watch the reconnect. */
   onCacheCleared?: (cameraId: string) => void
 }
@@ -33,6 +46,8 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [transport, setTransport] = useState<'tcp' | 'udp'>('udp')
+  const [previewWidth, setPreviewWidth] = useState<number>(PREVIEW_WIDTH_DEFAULT)
+  const [codec, setCodec] = useState<RtspCodec>(RTSP_CODEC_DEFAULT)
   const [modalError, setModalError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [clearingCache, setClearingCache] = useState(false)
@@ -43,6 +58,8 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
     setName(target.name || '')
     setUrl(target.url || '')
     setTransport(target.transport === 'tcp' ? 'tcp' : 'udp')
+    setPreviewWidth(resolvePreviewWidth(target.previewWidth))
+    setCodec(resolveRtspCodec(target.codec))
     setModalError(null)
     setSubmitting(false)
   }, [target])
@@ -63,7 +80,14 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
   const trimmedUrl = url.trim()
   const urlChanged = isIp && trimmedUrl !== target.url
   const canSave = isIp
-    ? trimmedName !== '' && (urlChanged || transport !== target.transport || trimmedName !== target.name) && isValidCameraUrl(trimmedUrl) && !submitting
+    ? trimmedName !== '' &&
+      (urlChanged ||
+        transport !== target.transport ||
+        previewWidth !== resolvePreviewWidth(target.previewWidth) ||
+        codec !== resolveRtspCodec(target.codec) ||
+        trimmedName !== target.name) &&
+      isValidCameraUrl(trimmedUrl) &&
+      !submitting
     : trimmedName !== '' && trimmedName !== target.name && !submitting
 
   const handleSubmit = async () => {
@@ -74,7 +98,9 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
       await onSave(target.id, {
         name: trimmedName,
         url: trimmedUrl || target.url,
-        transport: isIp ? transport : 'tcp'
+        transport: isIp ? transport : 'tcp',
+        previewWidth,
+        codec
       })
       onClose()
     } catch (err) {
@@ -207,6 +233,45 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
                   )
                 })}
               </div>
+
+              {/* Preview width caps the MJPEG scale; the stream never
+                  upscales, so a smaller source keeps its size. */}
+              <div className="pt-3">
+                <label htmlFor="vision-edit-preview-width" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                  {t('cameras.addModal.previewWidthLabel')}
+                </label>
+                <select
+                  id="vision-edit-preview-width"
+                  value={previewWidth}
+                  onChange={(e) => setPreviewWidth(resolvePreviewWidth(Number(e.target.value)))}
+                  className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                >
+                  {PREVIEW_WIDTH_OPTIONS.map((width) => (
+                    <option key={width} value={width}>
+                      {t(`cameras.addModal.previewWidth${width}`)}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.previewWidthHelp')}</p>
+              </div>
+
+              {/* Protocol / Codec: H.264 (default stable) or H.265 (HEVC lower bandwidth) */}
+              <div className="pt-3">
+                <label htmlFor="vision-edit-codec" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                  {t('cameras.addModal.codecLabel')}
+                </label>
+                <select
+                  id="vision-edit-codec"
+                  value={codec}
+                  onChange={(e) => setCodec(resolveRtspCodec(e.target.value))}
+                  className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                >
+                  <option value="h264">{t('cameras.addModal.codecH264')}</option>
+                  <option value="h265">{t('cameras.addModal.codecH265')}</option>
+                </select>
+                <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.codecHelp')}</p>
+              </div>
+
               <div className="flex items-center justify-between gap-2 pt-2">
                 <button
                   type="button"

@@ -153,4 +153,102 @@ describe('VisionPage — Mostrar boxes por câmera (MOM-173)', () => {
     )
     expect(boxLabels(shown.container).length).toBeGreaterThan(0)
   })
+
+  it('menu de contexto oferece Esconder área selecionada e persiste showZones', async () => {
+    const { calls } = setupServer({
+      cameras: [{ ...IP_CAM }],
+      selectedCameras: [IP_CAM.id],
+      monitors: []
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    fireEvent.contextMenu(await screen.findByTitle('Portão'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Esconder área selecionada' }))
+
+    await waitFor(() => {
+      const write = calls.find((c) => c.toolName === 'configure' && c.args.showZones !== undefined)
+      expect(write).toBeTruthy()
+      expect((write!.args.showZones as Record<string, boolean>)[IP_CAM.id]).toBe(false)
+    })
+  })
+
+  it('ampliada tem o toggle de área selecionada dentro do botão Ver e persiste', async () => {
+    const { calls } = setupServer({
+      cameras: [{ ...IP_CAM }],
+      selectedCameras: [IP_CAM.id],
+      monitors: []
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Ampliar imagem (tela cheia)' }))
+    await screen.findByTitle('Dois cliques para fechar')
+
+    const header = screen.getByTestId('expanded-header')
+    fireEvent.click(within(header).getByRole('button', { name: 'Ver' }))
+    fireEvent.click(within(header).getByRole('menuitem', { name: 'Esconder área selecionada' }))
+    await waitFor(() => {
+      const write = calls.find((c) => c.toolName === 'configure' && c.args.showZones !== undefined)
+      expect(write).toBeTruthy()
+      expect((write!.args.showZones as Record<string, boolean>)[IP_CAM.id]).toBe(false)
+    })
+    expect(await screen.findByTitle('Dois cliques para fechar')).toBeTruthy()
+  })
+
+  it('vídeo ampliado abre menu de contexto com clique direito', async () => {
+    setupServer({
+      cameras: [{ ...IP_CAM }],
+      selectedCameras: [IP_CAM.id],
+      monitors: []
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Ampliar imagem (tela cheia)' }))
+    const expandedVideo = await screen.findByTestId('expanded-video')
+
+    fireEvent.contextMenu(expandedVideo)
+    expect(await screen.findByRole('menuitem', { name: 'Editar Câmera' })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: 'Copiar URL' })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: 'Tirar print' })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: 'Esconder boxes' })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: 'Esconder área selecionada' })).toBeTruthy()
+  })
+
+  it('CameraCard com showZone=false não desenha o polígono da área', async () => {
+    const zone = [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }]
+    const camera = { id: IP_CAM.id, name: 'Portão', source: 'ip' as const, online: true, monitors: 0 }
+
+    const hidden = render(
+      <CameraCard camera={camera} zone={zone} showZone={false} onSnapshot={() => {}} index={0} />
+    )
+    expect(hidden.container.querySelectorAll('polygon')).toHaveLength(0)
+
+    cleanup()
+    const shown = render(
+      <CameraCard camera={camera} zone={zone} showZone={true} onSnapshot={() => {}} index={0} />
+    )
+    expect(shown.container.querySelectorAll('polygon')).toHaveLength(1)
+  })
+
+  it('card da câmera tem botão de alternar área selecionada e persiste', async () => {
+    const { calls } = setupServer({
+      cameras: [{ ...IP_CAM }],
+      selectedCameras: [IP_CAM.id],
+      monitors: []
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    const toggleZoneBtn = await screen.findByRole('button', { name: 'Esconder área selecionada' })
+    expect(toggleZoneBtn).toBeTruthy()
+
+    fireEvent.click(toggleZoneBtn)
+    await waitFor(() => {
+      const write = calls.find((c) => c.toolName === 'configure' && c.args.showZones !== undefined)
+      expect(write).toBeTruthy()
+      expect((write!.args.showZones as Record<string, boolean>)[IP_CAM.id]).toBe(false)
+    })
+  })
 })

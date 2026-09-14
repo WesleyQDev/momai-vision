@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decideRtspReconnect, resolveInitialTransport } from './rtsp'
+import { RTSP_EARLY_RETRY_DELAY_MS, decideRtspReconnect, resolveInitialTransport } from './rtsp'
 
 describe('manual transport lock (no auto UDP/TCP flip)', () => {
   it('never flips transports on early failure — retries the same manual choice', () => {
@@ -8,7 +8,7 @@ describe('manual transport lock (no auto UDP/TCP flip)', () => {
       stderrLower: 'operation timed out',
       hadFirstFrame: false
     })
-    expect(decision).toEqual({ action: 'retry-same-transport', delayMs: 3000 })
+    expect(decision).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })
   })
 
   it('ignores learned transport and sticks to the user choice', () => {

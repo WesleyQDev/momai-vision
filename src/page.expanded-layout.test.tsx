@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import { getSDK } from 'momai:sdk'
 import VisionPage from './page'
 
@@ -84,5 +84,39 @@ describe('VisionPage — expanded camera stays inside content area', () => {
     const title = header.querySelector('h2') as HTMLElement | null
     expect(title).toBeTruthy()
     expect(title!.className).toMatch(/truncate/)
+  })
+})
+
+describe('VisionPage — fundo da câmera ampliada segue o tema', () => {
+  it('não pinta preto nas sobras do vídeo quando há uma câmera só', async () => {
+    setupServer()
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    fireEvent.click(await screen.findByTitle(/Ampliar imagem|Enlarge image/i))
+    const frame = await screen.findByTitle(/Dois cliques para fechar|Double-click to close/i)
+
+    // Without the thumbnail strip the leftover area around the 16:9 stream is
+    // tall; the theme surface keeps it identical to the multi-camera view.
+    expect(frame.className).toContain('bg-bg')
+    expect(frame.className).not.toContain('bg-black')
+    expect((frame.parentElement as HTMLElement).className).not.toContain('bg-black')
+  })
+
+  it('placeholder de conexão usa superfície e texto do tema', async () => {
+    setupServer()
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    fireEvent.click(await screen.findByTitle(/Ampliar imagem|Enlarge image/i))
+    await screen.findByTitle(/Dois cliques para fechar|Double-click to close/i)
+
+    const expanded = screen.getByTestId('expanded-camera')
+    const placeholder = within(expanded).getByText('Iniciando...').parentElement as HTMLElement
+
+    expect(placeholder.className).toContain('bg-input/60')
+    expect(placeholder.className).toContain('text-text-muted')
+    expect(placeholder.className).not.toContain('bg-black')
+    expect(placeholder.className).not.toContain('text-white')
   })
 })

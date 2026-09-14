@@ -13,10 +13,19 @@ import { getSDK } from 'momai:sdk'
 import { ptLabel, PT_CLASS, triggerLabel, localizedClassLabel, localizedTriggerLabel } from './vision/labels'
 import { AlertCanvasOverlay } from './panel'
 import { useI18n } from './hooks/useI18n'
-import { classColor } from './vision/theme-color'
 import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
-import { isRtspMidStreamStalled } from './vision/rtsp'
+import {
+  isRtspMidStreamStalled,
+  resolvePreviewWidth,
+  resolveRtspCodec,
+  PREVIEW_WIDTH_DEFAULT,
+  PREVIEW_WIDTH_OPTIONS,
+  RTSP_CODEC_DEFAULT,
+  type RtspCodec
+} from './vision/rtsp'
+import { classColor } from './vision/theme-color'
 import { filterDetectionsInZone, orderPointsClockwise, createBoxFromCorners, simplifyPolygon, type Point } from './vision/zone'
+import { nextPumpIntervalMs } from './vision/pump-cadence'
 import visionIconPng from '../icon.png'
 import ContextMenu from './components/ContextMenu'
 import EditCameraModal, { type EditingCameraTarget } from './components/EditCameraModal'
@@ -209,6 +218,7 @@ interface VisionConfig {
   sendActions?: MonitorActionUI[]
   detectionZones?: Record<string, Point[]>
   showBoxes?: Record<string, boolean>
+  showZones?: Record<string, boolean>
 }
 
 // Array vazio estável (módulo): evita criar referência nova a cada render do
@@ -659,6 +669,7 @@ function createMjpegReader(
     // decodifica direto com createImageBitmap(frame) — sem Blob intermediário.
     onFrame: (frame: Uint8Array) => void
     onError: (err: unknown) => void
+    onKbs?: (kbs: number) => void
   },
   signal: AbortSignal
 ): void {
@@ -673,13 +684,15 @@ function createMjpegReader(
       let sessionAc: AbortController | null = null
       let sessionActive = true
       let lastFrameTs = Date.now()
+      let hasFirstFrame = false
 
       const watchdogTimer = setInterval(() => {
         if (!sessionActive || signal.aborted) {
           clearInterval(watchdogTimer)
           return
         }
-        if (Date.now() - lastFrameTs > 4500) {
+        const timeoutMs = hasFirstFrame ? 5000 : 12000
+        if (Date.now() - lastFrameTs > timeoutMs) {
           clearInterval(watchdogTimer)
           try { sessionAc?.abort() } catch {}
         }
@@ -750,10 +763,24 @@ function createMjpegReader(
           handlers.onFrame(frame)
         }
 
+        let bytesReceived = 0
+        let lastKbsTs = Date.now()
+
         while (!signal.aborted) {
           const { done, value } = await reader.read()
           if (done || signal.aborted) break
+          hasFirstFrame = true
           lastFrameTs = Date.now()
+          if (value) {
+            bytesReceived += value.byteLength
+            const now = Date.now()
+            if (now - lastKbsTs >= 1000) {
+              const elapsedSec = Math.max(0.5, (now - lastKbsTs) / 1000)
+              handlers.onKbs?.(Math.round((bytesReceived / elapsedSec) / 1024))
+              bytesReceived = 0
+              lastKbsTs = now
+            }
+          }
           chunks.push(new Uint8Array(value.buffer, value.byteOffset, value.byteLength))
           let joined: Uint8Array
           if (chunks.length === 1 && pending.length === 0) {
@@ -861,6 +888,7 @@ function createParserWorker(opts: {
   onFrame?: (frame: Uint8Array) => void
   onError?: () => void
   onFps?: (fps: number) => void
+  onKbs?: (kbs: number) => void
 }): ParserWorker | null {
   if (typeof Worker === 'undefined') return null
   let worker: Worker
@@ -901,6 +929,9 @@ function createParserWorker(opts: {
         break
       case 'fps':
         opts.onFps?.(Number(msg.fps) || 0)
+        if (typeof msg.kbs === 'number') {
+          opts.onKbs?.(msg.kbs)
+        }
         break
       case 'error':
         opts.onError?.()
@@ -1213,15 +1244,234 @@ function SvgBoxOverlay({
 }
 
 // ---------------------------------------------------------------------------
+// ZoneEditorBar: interactive toolbar for drawing mode & zone actions
+// ---------------------------------------------------------------------------
+
+type DrawMode = 'freehand' | 'box' | 'points'
+
+function ZoneEditorBar({
+  drawMode,
+  onChangeDrawMode,
+  draftPoints,
+  onUndo,
+  onClear,
+  onCancel,
+  onSave,
+  compact = false,
+  testId
+}: {
+  drawMode: DrawMode
+  onChangeDrawMode: (mode: DrawMode) => void
+  draftPoints: Point[]
+  onUndo?: () => void
+  onClear?: () => void
+  onCancel?: () => void
+  onSave?: (points: Point[]) => void
+  compact?: boolean
+  testId?: string
+}): JSX.Element {
+  const { t } = useI18n()
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false)
+  const dropdownRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!isDropdownOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsDropdownOpen(false)
+      }
+    }
+    window.addEventListener('mousedown', handleClickOutside)
+    return () => window.removeEventListener('mousedown', handleClickOutside)
+  }, [isDropdownOpen])
+
+  return (
+    <div
+      data-testid={testId}
+      className={`flex flex-row items-center justify-center flex-nowrap shrink-0 select-none ${
+        compact ? 'gap-1' : 'gap-1.5 sm:gap-2'
+      }`}
+    >
+      {/* Seletor de ferramenta de desenho */}
+      <div ref={dropdownRef} className="relative shrink-0">
+        <button
+          type="button"
+          onClick={() => setIsDropdownOpen((v) => !v)}
+          className={`${
+            compact ? 'h-7 px-1.5 text-[11px] rounded-lg' : 'h-8 sm:h-9 px-2.5 sm:px-3 text-xs rounded-xl'
+          } bg-input/60 hover:bg-input text-text font-semibold border border-border/40 transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer`}
+          title={t('monitoring.zoneEditor.selectTool')}
+          aria-label={t('monitoring.zoneEditor.selectTool')}
+        >
+          {drawMode === 'freehand' ? (
+            <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+            </svg>
+          ) : drawMode === 'box' ? (
+            <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+            </svg>
+          ) : (
+            <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+              <circle cx="12" cy="10" r="3" />
+            </svg>
+          )}
+          {!compact ? (
+            <span>
+              {drawMode === 'freehand'
+                ? t('monitoring.zoneEditor.freehand')
+                : drawMode === 'box'
+                  ? t('monitoring.zoneEditor.box')
+                  : t('monitoring.zoneEditor.points')}
+            </span>
+          ) : null}
+          <svg className={`w-2.5 h-2.5 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+
+        {isDropdownOpen ? (
+          <div className="absolute bottom-full mb-2 left-0 z-50 min-w-[190px] py-1 bg-card/95 border border-border/50 rounded-xl shadow-2xl backdrop-blur-md text-xs animate-fadeIn overflow-hidden">
+            <button
+              type="button"
+              onClick={() => { onChangeDrawMode('freehand'); setIsDropdownOpen(false) }}
+              className={`w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'freehand' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
+            >
+              <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+              </svg>
+              <div>
+                <div className="font-semibold">{t('monitoring.zoneEditor.freehand')}</div>
+                <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.freehandHint')}</div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => { onChangeDrawMode('box'); setIsDropdownOpen(false) }}
+              className={`w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'box' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
+            >
+              <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+              </svg>
+              <div>
+                <div className="font-semibold">{t('monitoring.zoneEditor.box')}</div>
+                <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.boxHint')}</div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => { onChangeDrawMode('points'); setIsDropdownOpen(false) }}
+              className={`w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'points' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
+            >
+              <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
+                <circle cx="12" cy="10" r="3" />
+              </svg>
+              <div>
+                <div className="font-semibold">{t('monitoring.zoneEditor.points')}</div>
+                <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.pointsHint')}</div>
+              </div>
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="w-px h-4 bg-border/40 mx-0.5 shrink-0" aria-hidden="true" />
+
+      {onUndo ? (
+        <button
+          type="button"
+          disabled={draftPoints.length === 0}
+          onClick={onUndo}
+          className={`${
+            compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
+          } bg-transparent hover:bg-input text-text font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer`}
+          title={t('monitoring.zoneEditor.undoShort')}
+          aria-label={t('monitoring.zoneEditor.undoShort')}
+        >
+          <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 7v6h6" />
+            <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
+          </svg>
+          {!compact ? <span>{t('monitoring.zoneEditor.undoShort')}</span> : null}
+        </button>
+      ) : null}
+
+      {onClear ? (
+        <button
+          type="button"
+          onClick={onClear}
+          className={`${
+            compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
+          } bg-transparent hover:bg-red-500/20 text-red-500 hover:text-red-400 font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer`}
+          title={t('monitoring.zoneEditor.clearShort')}
+          aria-label={t('monitoring.zoneEditor.clearShort')}
+        >
+          <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+          </svg>
+          {!compact ? <span>{t('monitoring.zoneEditor.clearShort')}</span> : null}
+        </button>
+      ) : null}
+
+      {onCancel ? (
+        <button
+          type="button"
+          onClick={onCancel}
+          className={`${
+            compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
+          } bg-transparent hover:bg-input text-text font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer`}
+          title={t('common.cancel')}
+          aria-label={t('common.cancel')}
+        >
+          <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+          {!compact ? <span>{t('common.cancel')}</span> : null}
+        </button>
+      ) : null}
+
+      {onSave ? (
+        <button
+          type="button"
+          disabled={draftPoints.length < 3}
+          onClick={() => onSave(draftPoints)}
+          className={`${
+            compact ? 'h-7 px-2.5 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-3 sm:px-4 rounded-xl text-xs'
+          } font-semibold transition-all shadow-md flex items-center gap-1.5 whitespace-nowrap shrink-0 border ${
+            draftPoints.length >= 3
+              ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 cursor-pointer'
+              : 'bg-transparent text-text-muted/40 border-border/30 cursor-not-allowed'
+          }`}
+          title={draftPoints.length >= 3 ? t('monitoring.zoneEditor.saveReady') : t('monitoring.zoneEditor.saveNeedPoints')}
+          aria-label={t('common.save')}
+        >
+          <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+          <span>{t('common.save')}</span>
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // ZoneOverlay: interactive polygon selection & detection zone perimeter display
 // ---------------------------------------------------------------------------
 
 function ZoneOverlay({
   zone,
+  showZone = true,
   draftPoints,
   isEditing,
   frameDims,
   fit,
+  drawMode: externalDrawMode,
+  onDrawModeChange: externalOnDrawModeChange,
+  hideControls = false,
   onAddPoint,
   onSetPoints,
   onSave,
@@ -1230,10 +1480,14 @@ function ZoneOverlay({
   onUndo
 }: {
   zone?: Point[] | null
+  showZone?: boolean
   draftPoints: Point[]
   isEditing: boolean
   frameDims: { w: number; h: number } | null
   fit: 'cover' | 'contain' | 'slice'
+  drawMode?: DrawMode
+  onDrawModeChange?: (mode: DrawMode) => void
+  hideControls?: boolean
   onAddPoint?: (pt: Point) => void
   onSetPoints?: (pts: Point[]) => void
   onSave?: (points: Point[]) => void
@@ -1254,8 +1508,9 @@ function ZoneOverlay({
   const vbH = usesFrame ? frameH : 1000
 
   // Modo de desenho: 'freehand' (lápis livre), 'box' (retângulo) ou 'points' (clicar ponto a ponto)
-  type DrawMode = 'freehand' | 'box' | 'points'
-  const [drawMode, setDrawMode] = useState<DrawMode>('freehand')
+  const [internalDrawMode, setInternalDrawMode] = useState<DrawMode>('freehand')
+  const drawMode = externalDrawMode ?? internalDrawMode
+  const setDrawMode = externalOnDrawModeChange ?? setInternalDrawMode
   const [isDropdownOpen, setIsDropdownOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement | null>(null)
 
@@ -1432,8 +1687,8 @@ function ZoneOverlay({
     }
   }
 
-  // Pontos ativos para renderizar: rascunho durante edição ou zona salva
-  const activePoints = isEditing ? draftPoints : (hasSavedZone ? zone! : [])
+  // Pontos ativos para renderizar: rascunho durante edição ou zona salva (respeita showZone quando não estiver em edição)
+  const activePoints = isEditing ? draftPoints : (hasSavedZone && showZone !== false ? zone! : [])
   const svgPointsStr = activePoints.map((p) => `${p.x * vbW},${p.y * vbH}`).join(' ')
 
   const style: React.CSSProperties = usesFrame
@@ -1519,262 +1774,23 @@ function ZoneOverlay({
           })}
       </svg>
 
-      {/* Durante edição: barra flutuante no canto inferior direito adaptada aos temas e sem contagem de pontos */}
-      {isEditing ? (
-        isCompact ? (
-          /* Modo Card Compacto: ultra compacto com ícones elegantes para caber perfeitamente no card pequeno */
-          <div className="absolute bottom-1.5 right-1.5 z-40 flex items-center gap-0.5 p-0.5 rounded-lg bg-black/75 backdrop-blur-md border border-white/20 text-white text-[9px] shadow-2xl animate-fadeIn pointer-events-auto">
-            {/* Dropdown de Ferramentas no Card Pequeno */}
-            <div ref={dropdownRef} className="relative">
-              <button
-                type="button"
-                onClick={() => setIsDropdownOpen((v) => !v)}
-                className="h-5 px-1 rounded bg-white/10 hover:bg-white/20 text-white font-bold text-[9px] border border-white/10 transition-all flex items-center gap-0.5 cursor-pointer"
-                title={t('monitoring.zoneEditor.drawTool')}
-              >
-                <span>
-                  {drawMode === 'freehand' ? '✏️' : drawMode === 'box' ? '▢' : '📍'}
-                </span>
-                <svg className={`w-2 h-2 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M6 9l6 6 6-6" />
-                </svg>
-              </button>
-
-              {isDropdownOpen ? (
-                <div className="absolute bottom-full mb-1 left-0 z-50 min-w-[110px] py-1 bg-card/95 border border-border/50 rounded-lg shadow-xl backdrop-blur-md text-[10px] animate-fadeIn">
-                  <button
-                    type="button"
-                    onClick={() => { setDrawMode('freehand'); setIsDropdownOpen(false) }}
-                    className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'freehand' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
-                  >
-                    <span>✏️</span> <span>{t('monitoring.zoneEditor.freehand')}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setDrawMode('box'); setIsDropdownOpen(false) }}
-                    className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'box' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
-                  >
-                    <span>▢</span> <span>{t('monitoring.zoneEditor.box')}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setDrawMode('points'); setIsDropdownOpen(false) }}
-                    className={`w-full text-left px-2 py-1 flex items-center gap-1.5 hover:bg-input transition-colors cursor-pointer ${drawMode === 'points' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
-                  >
-                    <span>📍</span> <span>{t('monitoring.zoneEditor.points')}</span>
-                  </button>
-                </div>
-              ) : null}
-            </div>
-
-            {draftPoints.length > 0 && onUndo ? (
-              <button
-                type="button"
-                onClick={onUndo}
-                className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white font-medium text-[9px] border border-white/10 transition-all flex items-center justify-center active:scale-90 cursor-pointer"
-                title={t('monitoring.zoneEditor.undo')}
-              >
-                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 7v6h6" />
-                  <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
-                </svg>
-              </button>
-            ) : null}
-
-            {onClear ? (
-              <button
-                type="button"
-                onClick={onClear}
-                className="w-5 h-5 rounded bg-white/10 hover:bg-red-500/30 text-red-400 font-medium text-[9px] border border-white/10 transition-all flex items-center justify-center active:scale-90 cursor-pointer"
-                title={t('monitoring.zoneEditor.clear')}
-              >
-                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                </svg>
-              </button>
-            ) : null}
-
-            {onCancel ? (
-              <button
-                type="button"
-                onClick={onCancel}
-                className="w-5 h-5 rounded bg-white/10 hover:bg-white/20 text-white/80 hover:text-white font-bold text-[9px] border border-white/10 transition-all flex items-center justify-center active:scale-90 cursor-pointer"
-                title={t('monitoring.zoneEditor.cancelEdit')}
-              >
-                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
-            ) : null}
-
-            {onSave ? (
-              <button
-                type="button"
-                disabled={draftPoints.length < 3}
-                onClick={() => onSave(draftPoints)}
-                className={`h-5 px-1.5 rounded font-bold text-[9px] transition-all shadow-sm border flex items-center gap-0.5 active:scale-90 ${
-                  draftPoints.length >= 3
-                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 cursor-pointer'
-                    : 'bg-white/5 text-white/30 border-white/10 cursor-not-allowed'
-                }`}
-                title={draftPoints.length >= 3 ? t('monitoring.zoneEditor.saveReady') : t('monitoring.zoneEditor.saveNeedPoints')}
-              >
-                <svg className="w-2.5 h-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-                <span>{t('common.save')}</span>
-              </button>
-            ) : null}
-          </div>
-        ) : (
-          /* Modo Modal Ampliado: dock central no padrão do cabeçalho (ícone + rótulo) */
-          <div
-            data-testid="expanded-zone-dock"
-            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-40 flex flex-wrap items-center justify-center gap-1.5 p-1.5 rounded-2xl bg-card/95 backdrop-blur-md border border-border/40 text-text shadow-2xl animate-fadeIn pointer-events-auto"
-          >
-            {/* Seletor de ferramenta de desenho */}
-            <div ref={dropdownRef} className="relative">
-              <button
-                type="button"
-                onClick={() => setIsDropdownOpen((v) => !v)}
-                className="h-9 px-3 rounded-xl bg-input/60 hover:bg-input text-text font-semibold text-xs border border-border/40 transition-colors flex items-center gap-2"
-                title={t('monitoring.zoneEditor.selectTool')}
-              >
-                {drawMode === 'freehand' ? (
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                  </svg>
-                ) : drawMode === 'box' ? (
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="3" width="18" height="18" rx="2" />
-                  </svg>
-                ) : (
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
-                    <circle cx="12" cy="10" r="3" />
-                  </svg>
-                )}
-                <span>
-                  {drawMode === 'freehand'
-                    ? t('monitoring.zoneEditor.freehand')
-                    : drawMode === 'box'
-                      ? t('monitoring.zoneEditor.box')
-                      : t('monitoring.zoneEditor.points')}
-                </span>
-                <svg className={`w-3 h-3 transition-transform ${isDropdownOpen ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M6 9l6 6 6-6" />
-                </svg>
-              </button>
-
-              {isDropdownOpen ? (
-                <div className="absolute bottom-full mb-2 left-0 z-50 min-w-[190px] py-1 bg-card/95 border border-border/50 rounded-xl shadow-2xl backdrop-blur-md text-xs animate-fadeIn overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => { setDrawMode('freehand'); setIsDropdownOpen(false) }}
-                    className={`w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-input transition-colors ${drawMode === 'freehand' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
-                  >
-                    <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                    </svg>
-                    <div>
-                      <div className="font-semibold">{t('monitoring.zoneEditor.freehand')}</div>
-                      <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.freehandHint')}</div>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setDrawMode('box'); setIsDropdownOpen(false) }}
-                    className={`w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-input transition-colors ${drawMode === 'box' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
-                  >
-                    <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="3" y="3" width="18" height="18" rx="2" />
-                    </svg>
-                    <div>
-                      <div className="font-semibold">{t('monitoring.zoneEditor.box')}</div>
-                      <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.boxHint')}</div>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setDrawMode('points'); setIsDropdownOpen(false) }}
-                    className={`w-full text-left px-3 py-2 flex items-center gap-2.5 hover:bg-input transition-colors ${drawMode === 'points' ? 'font-bold text-text bg-input/60' : 'text-text-muted hover:text-text'}`}
-                  >
-                    <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z" />
-                      <circle cx="12" cy="10" r="3" />
-                    </svg>
-                    <div>
-                      <div className="font-semibold">{t('monitoring.zoneEditor.points')}</div>
-                      <div className="text-[10px] text-text-muted">{t('monitoring.zoneEditor.pointsHint')}</div>
-                    </div>
-                  </button>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="w-px h-6 bg-border/40 mx-0.5" aria-hidden="true" />
-
-            {draftPoints.length > 0 && onUndo ? (
-              <button
-                type="button"
-                onClick={onUndo}
-                className="h-9 px-3 rounded-xl bg-transparent hover:bg-input text-text font-semibold text-xs border border-border/40 transition-colors flex items-center gap-1.5"
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 7v6h6" />
-                  <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" />
-                </svg>
-                <span>{t('monitoring.zoneEditor.undoShort')}</span>
-              </button>
-            ) : null}
-
-            {onClear ? (
-              <button
-                type="button"
-                onClick={onClear}
-                className="h-9 px-3 rounded-xl bg-transparent hover:bg-red-500/20 text-red-500 hover:text-red-400 font-semibold text-xs border border-border/40 transition-colors flex items-center gap-1.5"
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                </svg>
-                <span>{t('monitoring.zoneEditor.clearShort')}</span>
-              </button>
-            ) : null}
-
-            {onCancel ? (
-              <button
-                type="button"
-                onClick={onCancel}
-                className="h-9 px-3 rounded-xl bg-transparent hover:bg-input text-text font-semibold text-xs border border-border/40 transition-colors flex items-center gap-1.5"
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-                <span>{t('common.cancel')}</span>
-              </button>
-            ) : null}
-
-            {onSave ? (
-              <button
-                type="button"
-                disabled={draftPoints.length < 3}
-                onClick={() => onSave(draftPoints)}
-                className={`h-9 px-4 rounded-xl font-semibold text-xs transition-all shadow-md flex items-center gap-1.5 border ${
-                  draftPoints.length >= 3
-                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400'
-                    : 'bg-transparent text-text-muted/40 border-border/30 cursor-not-allowed'
-                }`}
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-                <span>{t('common.save')}</span>
-              </button>
-            ) : null}
-          </div>
-        )
+      {/* Durante edição: se os controles não forem ocultados para exibição externa, renderiza a barra */}
+      {isEditing && !hideControls ? (
+        <div
+          data-testid={isCompact ? 'compact-zone-dock' : 'expanded-zone-dock'}
+          className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 p-1.5 rounded-2xl bg-card/95 backdrop-blur-md border border-border/40 text-text shadow-2xl animate-fadeIn pointer-events-auto"
+        >
+          <ZoneEditorBar
+            compact={isCompact}
+            drawMode={drawMode}
+            onChangeDrawMode={setDrawMode}
+            draftPoints={draftPoints}
+            onUndo={onUndo}
+            onClear={onClear}
+            onCancel={onCancel}
+            onSave={onSave}
+          />
+        </div>
       ) : null}
     </>
   )
@@ -1979,6 +1995,8 @@ export const CameraCard = memo(function CameraCard({
   zone,
   showBoxes = true,
   onToggleShowBoxes,
+  showZone = true,
+  onToggleShowZone,
   isEditingZone = false,
   onToggleEditZone,
   onSaveZone,
@@ -2008,6 +2026,8 @@ export const CameraCard = memo(function CameraCard({
   zone?: Point[] | null
   showBoxes?: boolean
   onToggleShowBoxes?: () => void
+  showZone?: boolean
+  onToggleShowZone?: () => void
   isEditingZone?: boolean
   onToggleEditZone?: () => void
   onSaveZone?: (points: Point[]) => void
@@ -2044,6 +2064,7 @@ export const CameraCard = memo(function CameraCard({
   const [cachedFrameShown, setCachedFrameShown] = useState(false)
   const cachedFrameShownRef = useRef(false)
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
+  const [drawMode, setDrawMode] = useState<DrawMode>('freehand')
 
   const wasEditingRef = useRef(false)
   useEffect(() => {
@@ -2096,6 +2117,7 @@ export const CameraCard = memo(function CameraCard({
   const [printStatus, setPrintStatus] = useState<'idle' | 'capturing' | 'success'>('idle')
   const [reloading, setReloading] = useState(false)
   const [fps, setFps] = useState(0)
+  const [kbs, setKbs] = useState(0)
   const [confirmingRemove, setConfirmingRemove] = useState(false)
   // Fase de conexão lenta/indisponível: se demorar demais sem frame, mostra feedback amigável
   const [isSlow, setIsSlow] = useState(false)
@@ -2130,6 +2152,17 @@ export const CameraCard = memo(function CameraCard({
 
   // Redraw de boxes apenas quando as detecções DESTA câmera mudam.
   const myDetections = boxes
+
+  const handleTriggerExpand = useCallback(() => {
+    if (frameCanvasRef.current && (hasFrame || cachedFrameShown)) {
+      try {
+        storeCachedFrame(camera.id, frameCanvasRef.current.toDataURL('image/jpeg', 0.7))
+      } catch {
+        // ignore
+      }
+    }
+    onExpand?.(camera)
+  }, [camera, hasFrame, cachedFrameShown, onExpand])
 
   const fetchingRef = useRef(false)
   // A corrida visual de 8 s abaixo não cancela o POST do SDK. Sem este ref, o
@@ -2493,7 +2526,10 @@ export const CameraCard = memo(function CameraCard({
           setError(errorRef.current)
         }
       },
-      onFps: () => {}
+      onFps: () => {},
+      onKbs: (measuredKbs) => {
+        if (!cancelled) setKbs(measuredKbs)
+      }
     })
     if (parser) {
       parserWorkerRef.current = parser
@@ -2517,6 +2553,9 @@ export const CameraCard = memo(function CameraCard({
                 errorRef.current = t('cameras.unstable')
                 setError(errorRef.current)
               }
+            },
+            onKbs: (measuredKbs) => {
+              if (!cancelled) setKbs(measuredKbs)
             }
           },
           ac.signal
@@ -2553,6 +2592,7 @@ export const CameraCard = memo(function CameraCard({
         onFrame: (frame) => {
           if (cancelled) return
           lastFrameRef.current = frame
+          lastPreviewFrameAtRef.current = Date.now()
           drawNext(frame)
         },
         onError: () => {
@@ -2561,6 +2601,9 @@ export const CameraCard = memo(function CameraCard({
             errorRef.current = t('cameras.unstable')
             setError(errorRef.current)
           }
+        },
+        onKbs: (measuredKbs) => {
+          if (!cancelled) setKbs(measuredKbs)
         }
       },
       ac.signal
@@ -2588,7 +2631,8 @@ export const CameraCard = memo(function CameraCard({
   useEffect(() => {
     if (!isActive) return
     let cancelled = false
-    const interval = PUMP_INTERVAL_MS
+    // Cadence adapts to the engine round-trip (see pump-cadence).
+    let interval = PUMP_INTERVAL_MS
     // Último resultado de detecção recebido por esta câmera (persiste entre os
     // ciclos do pump dentro deste effect). Quando um frame_pump não responde a
     // tempo (timeout de PUMP_COMMAND_TIMEOUT_MS — engine ocupado / fila do
@@ -2616,6 +2660,9 @@ export const CameraCard = memo(function CameraCard({
       }
       try {
         let jpegBase64: string | null = null
+        // IP cameras: the worker already holds the newest stream frame, so the
+        // pump carries only the camera id — no base64 JPEG round-trip.
+        const useWorkerFrame = !isWebcam
         if (isWebcam && videoRef.current && (videoRef.current.readyState >= 2 || videoRef.current.videoWidth > 0)) {
           const v = videoRef.current
           const vw = v.videoWidth || 640
@@ -2630,12 +2677,12 @@ export const CameraCard = memo(function CameraCard({
             ctx.drawImage(v, 0, 0, tempCanvas.width, tempCanvas.height)
             jpegBase64 = await canvasToBase64(tempCanvas, 0.7)
           }
-        } else if (lastFrameRef.current && lastFrameRef.current.length > 0) {
+        } else if (!useWorkerFrame && lastFrameRef.current && lastFrameRef.current.length > 0) {
           // Câmera IP: extrai os bytes do ÚLTIMO frame JPEG recebido pelo leitor MJPEG
           jpegBase64 = await blobToBase64(
             new Blob([lastFrameRef.current as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' })
           )
-        } else if (frameCanvasRef.current && (hasFrameRef.current || (frameDimsRef.current.w > 0 && frameDimsRef.current.h > 0))) {
+        } else if (!useWorkerFrame && frameCanvasRef.current && (hasFrameRef.current || (frameDimsRef.current.w > 0 && frameDimsRef.current.h > 0))) {
           const c = frameCanvasRef.current
           const cw = frameDimsRef.current.w || c.width || 640
           const ch = frameDimsRef.current.h || c.height || 360
@@ -2648,7 +2695,7 @@ export const CameraCard = memo(function CameraCard({
             ctx.drawImage(c, 0, 0, tempCanvas.width, tempCanvas.height)
             jpegBase64 = await canvasToBase64(tempCanvas, 0.7)
           }
-        } else {
+        } else if (!useWorkerFrame) {
           const parser = parserWorkerRef.current
           if (parser) {
             const buf = await parser.getFrame()
@@ -2662,20 +2709,26 @@ export const CameraCard = memo(function CameraCard({
         // O cache de frame direto do host só recebe frames de webcam (push da
         // janela oculta). Para IP o frame vive no stream do worker: pular evita
         // um GET garantido em 404 a cada ciclo do pump.
-        if (!jpegBase64 && isWebcam) {
-          jpegBase64 = await fetchDirectFrame(camera.id).catch(() => null)
+        if (isWebcam) {
+          if (!jpegBase64) {
+            jpegBase64 = await fetchDirectFrame(camera.id).catch(() => null)
+          }
+          if (!jpegBase64) {
+            const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id }).catch(() => null)
+            jpegBase64 = res?.jpegBase64 || null
+          }
         }
-        if (!jpegBase64) {
-          const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id }).catch(() => null)
-          jpegBase64 = res?.jpegBase64 || null
-        }
-        if (jpegBase64 && !cancelled) {
+        const startedAt = Date.now()
+        if (!cancelled && (useWorkerFrame || jpegBase64)) {
           // Timeout curto específico do pump: o frame_pump pode ficar na fila
           // do worker quando o poll (list_cameras a cada 5s) está processando
           // startMjpeg/ffmpeg. Com o timeout global de 35s, o pump ficava 35s
           // pendurado (POST órfão no node-core + "demorou demais"). Aqui ele
           // desiste em PUMP_COMMAND_TIMEOUT_MS e tenta no próximo ciclo.
-          const request = command<{ detections?: Detection[]; engineBusy?: boolean; stale?: boolean }>('frame_pump', { cameraId: camera.id, jpegBase64 })
+          const request = command<{ detections?: Detection[]; engineBusy?: boolean; stale?: boolean }>(
+            'frame_pump',
+            useWorkerFrame ? { cameraId: camera.id } : { cameraId: camera.id, jpegBase64 }
+          )
           pumpingRef.current = true
           void request.catch(() => {}).finally(() => {
             pumpingRef.current = false
@@ -2723,13 +2776,23 @@ export const CameraCard = memo(function CameraCard({
             )
           }
         }
+        // Backs off when the engine round-trip is slow, recovers when free.
+        interval = nextPumpIntervalMs(interval, Date.now() - startedAt)
       } catch (err) {
         // DIAG: erros silenciosos
         pumpingRef.current = false
         const now = Date.now()
-        if (now - lastWarnTime >= WARN_MIN_INTERVAL_MS) {
+        const message = err instanceof Error ? err.message : String(err)
+        if (message === 'no frame available') {
+          // Câmera IP ainda sem frame no worker (iniciando/reconectando): é o
+          // mesmo caso do caminho "sem frame", nunca um erro de engine.
+          if (now - lastWarnTime >= WARN_MIN_INTERVAL_MS) {
+            lastWarnTime = now
+            console.warn(`[vision-diag][${camera.id}] pump sem frame (worker sem frame local)`)
+          }
+        } else if (now - lastWarnTime >= WARN_MIN_INTERVAL_MS) {
           lastWarnTime = now
-          console.warn(`[vision-diag][${camera.id}] pump erro:`, err instanceof Error ? err.message : String(err))
+          console.warn(`[vision-diag][${camera.id}] pump erro:`, message)
         }
       } finally {
         if (!cancelled) {
@@ -2831,6 +2894,7 @@ export const CameraCard = memo(function CameraCard({
       if (now - lastAutoReloadAtRef.current < 30000) return
       lastAutoReloadAtRef.current = now
       setFps(0)
+      setKbs(0)
       void handleReloadCameraRef.current()
     }, 5000)
     return () => clearInterval(timer)
@@ -2882,7 +2946,7 @@ export const CameraCard = memo(function CameraCard({
           onDoubleClick={(e) => {
             if (!isEditingZone && onExpand) {
               e.stopPropagation()
-              onExpand(camera)
+              handleTriggerExpand()
             }
           }}
           title={isEditingZone ? undefined : t('cameras.dblClickZoom')}
@@ -2906,10 +2970,14 @@ export const CameraCard = memo(function CameraCard({
           {/* Camada interativa de seleção de área (polígono) */}
           <ZoneOverlay
             zone={zone}
+            showZone={showZone}
             draftPoints={draftPoints}
             isEditing={isEditingZone}
             frameDims={frameDimsRef.current}
             fit="cover"
+            drawMode={drawMode}
+            onDrawModeChange={setDrawMode}
+            hideControls={true}
             onAddPoint={handleAddDraftPoint}
             onSetPoints={handleSetDraftPoints}
             onSave={handleSaveDraftZone}
@@ -2918,10 +2986,10 @@ export const CameraCard = memo(function CameraCard({
             onUndo={handleUndoDraftPoint}
           />
 
-          {/* FPS real do preview (diagnóstico de desempenho) */}
-          {hasFrame && fps > 0 && !isEditingZone ? (
-            <div className="absolute bottom-2 right-2 z-20 text-[10px] font-mono bg-black/60 text-emerald-300 px-1.5 py-0.5 rounded">
-              {fps} fps
+          {/* Real-time transfer rate in KB/S (top-right corner, Yoosee style) */}
+          {hasFrame && kbs > 0 && !isEditingZone ? (
+            <div className="absolute top-2 right-2 z-20 text-[10px] font-mono font-semibold bg-black/65 text-emerald-300 px-1.5 py-0.5 rounded shadow-sm tracking-wide">
+              {kbs} KB/S
             </div>
           ) : null}
 
@@ -2993,11 +3061,36 @@ export const CameraCard = memo(function CameraCard({
                 }
               />
             ) : null}
+            {onToggleShowZone ? (
+              <CardHeaderActionButton
+                isActive={showZone !== false}
+                hoverTransform="scale(1.35)"
+                title={showZone === false ? t('cameras.showZone') : t('cameras.hideZone')}
+                onClick={() => onToggleShowZone()}
+                icon={
+                  showZone === false ? (
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="4 4 19 3 20 15 13 21 3 14" strokeDasharray="3 2" fill="none" />
+                      <line x1="2" y1="2" x2="22" y2="22" strokeWidth="2.2" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="4 4 19 3 20 15 13 21 3 14" strokeDasharray="3 2" fill="none" />
+                      <circle cx="4" cy="4" r="1.5" fill="currentColor" />
+                      <circle cx="19" cy="3" r="1.5" fill="currentColor" />
+                      <circle cx="20" cy="15" r="1.5" fill="currentColor" />
+                      <circle cx="13" cy="21" r="1.5" fill="currentColor" />
+                      <circle cx="3" cy="14" r="1.5" fill="currentColor" />
+                    </svg>
+                  )
+                }
+              />
+            ) : null}
             {onExpand ? (
               <CardHeaderActionButton
                 hoverTransform="scale(1.35)"
                 title={t('cameras.expandImage')}
-                onClick={() => onExpand(camera)}
+                onClick={() => handleTriggerExpand()}
                 icon={
                   <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
@@ -3078,72 +3171,90 @@ export const CameraCard = memo(function CameraCard({
           ) : null}
         </div>
 
-      <div className="flex items-center justify-between px-3 py-2 bg-card/95 shrink-0 border-t border-border/30">
-        <span className="text-[11px] text-text-muted font-medium px-1 flex items-center gap-1.5">
-          <span className={`w-1.5 h-1.5 rounded-full ${camera.online ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-          {camera.source === 'webcam' ? t('cameras.optWebcam') : t('cameras.mjpegTag')}
-        </span>
-
-        <div className="flex items-center gap-1.5 shrink-0">
-          {/* Reload: rebuild the camera source when the feed is stuck */}
-          <button
-            disabled={reloading}
-            onClick={() => void handleReloadCamera()}
-            className="w-7 h-7 rounded-lg bg-input hover:bg-card border border-border/40 text-text transition-all flex items-center justify-center shadow-md active:scale-95 disabled:opacity-70"
-            title={t('cameras.reload')}
-            aria-label={t('cameras.reload')}
-          >
-            <svg
-              className={`w-3.5 h-3.5 ${reloading || reconnecting || cachedFrameShown ? 'animate-spin' : ''}`}
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-            </svg>
-          </button>
-
-          {/* Interactive Print Button with Depth & State Feedback */}
-          <button
-            disabled={printStatus === 'capturing'}
-            onClick={handleTakeSnapshot}
-            className={`text-[11px] font-medium rounded-lg px-3 py-1.5 transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-border/40 ${printStatus === 'success'
-              ? 'bg-emerald-600 text-white border-transparent'
-              : printStatus === 'capturing'
-                ? 'bg-input text-text opacity-80'
-                : 'bg-input hover:bg-card text-text'
-              }`}
-          >
-            {printStatus === 'success' ? (
-              <>
-                <svg className={`w-3.5 h-3.5 ${isEditingZone ? "text-sky-400" : "text-white"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                  <path d="M20 6L9 17l-5-5" />
-                </svg>
-                {t('cameras.printSaved')}
-              </>
-            ) : printStatus === 'capturing' ? (
-              <>
-                <svg className="w-3.5 h-3.5 animate-spin text-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
-                  <path d="M12 2a10 10 0 0 1 10 10" />
-                </svg>
-                {t('cameras.capturing')}
-              </>
-            ) : (
-              <>
-                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                  <circle cx="12" cy="13" r="4" />
-                </svg>
-                {t('cameras.takeSnapshot')}
-              </>
-            )}
-          </button>
+      {isEditingZone ? (
+        <div
+          data-testid="card-zone-dock"
+          className="flex items-center justify-center px-2 py-2 bg-card/95 shrink-0 border-t border-border/30 overflow-x-auto animate-fadeIn select-none"
+        >
+          <ZoneEditorBar
+            compact
+            drawMode={drawMode}
+            onChangeDrawMode={setDrawMode}
+            draftPoints={draftPoints}
+            onUndo={handleUndoDraftPoint}
+            onClear={handleClearDraftZone}
+            onCancel={handleCancelDraftZone}
+            onSave={handleSaveDraftZone}
+          />
         </div>
-      </div>
+      ) : (
+        <div className="flex items-center justify-between px-3 py-2 bg-card/95 shrink-0 border-t border-border/30">
+          <span className="text-[11px] text-text-muted font-medium px-1 flex items-center gap-1.5">
+            <span className={`w-1.5 h-1.5 rounded-full ${camera.online ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+            {camera.source === 'webcam' ? t('cameras.optWebcam') : t('cameras.mjpegTag')}
+          </span>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Reload: rebuild the camera source when the feed is stuck */}
+            <button
+              disabled={reloading}
+              onClick={() => void handleReloadCamera()}
+              className="w-7 h-7 rounded-lg bg-input hover:bg-card border border-border/40 text-text transition-all flex items-center justify-center shadow-md active:scale-95 disabled:opacity-70"
+              title={t('cameras.reload')}
+              aria-label={t('cameras.reload')}
+            >
+              <svg
+                className={`w-3.5 h-3.5 ${reloading || reconnecting || cachedFrameShown ? 'animate-spin' : ''}`}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+            </button>
+
+            {/* Interactive Print Button with Depth & State Feedback */}
+            <button
+              disabled={printStatus === 'capturing'}
+              onClick={handleTakeSnapshot}
+              className={`text-[11px] font-medium rounded-lg px-3 py-1.5 transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-border/40 ${printStatus === 'success'
+                ? 'bg-emerald-600 text-white border-transparent'
+                : printStatus === 'capturing'
+                  ? 'bg-input text-text opacity-80'
+                  : 'bg-input hover:bg-card text-text'
+                }`}
+            >
+              {printStatus === 'success' ? (
+                <>
+                  <svg className={`w-3.5 h-3.5 ${isEditingZone ? "text-sky-400" : "text-white"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                    <path d="M20 6L9 17l-5-5" />
+                  </svg>
+                  {t('cameras.printSaved')}
+                </>
+              ) : printStatus === 'capturing' ? (
+                <>
+                  <svg className="w-3.5 h-3.5 animate-spin text-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                    <path d="M12 2a10 10 0 0 1 10 10" />
+                  </svg>
+                  {t('cameras.capturing')}
+                </>
+              ) : (
+                <>
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                    <circle cx="12" cy="13" r="4" />
+                  </svg>
+                  {t('cameras.takeSnapshot')}
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   )
@@ -3179,6 +3290,14 @@ function AddCameraCard({ onClick }: { onClick: () => void }): JSX.Element {
   )
 }
 
+interface IpCameraDraft {
+  name: string
+  url: string
+  transport: 'tcp' | 'udp'
+  previewWidth: number
+  codec?: RtspCodec
+}
+
 function AddCameraModal({
   isOpen,
   isActive = true,
@@ -3192,19 +3311,24 @@ function AddCameraModal({
   onClose: () => void
   allCameras: CameraInfo[]
   selectedCameraIds: string[]
-  onConfirm: (webcamIds: string[], ipDrafts: Array<{ name: string; url: string; transport: 'tcp' | 'udp' }>) => Promise<void>
+  onConfirm: (webcamIds: string[], ipDrafts: IpCameraDraft[]) => Promise<void>
 }): JSX.Element | null {
   const { t } = useI18n()
   const isMaximized = useWindowMaximized()
   const [activeTab, setActiveTab] = useState<'webcam' | 'ip'>('webcam')
   const [selectedWebcamId, setSelectedWebcamId] = useState<string>('')
   const [pendingWebcamIds, setPendingWebcamIds] = useState<string[]>([])
-  const [pendingIpDrafts, setPendingIpDrafts] = useState<Array<{ name: string; url: string; transport: 'tcp' | 'udp' }>>([])
+  const [pendingIpDrafts, setPendingIpDrafts] = useState<IpCameraDraft[]>([])
   const [ipUrl, setIpUrl] = useState('')
   const [ipName, setIpName] = useState('')
   const [ipTransport, setIpTransport] = useState<'tcp' | 'udp'>('udp')
+  const [ipPreviewWidth, setIpPreviewWidth] = useState<number>(PREVIEW_WIDTH_DEFAULT)
+  const [ipCodec, setIpCodec] = useState<RtspCodec>(RTSP_CODEC_DEFAULT)
   const [transportHelp, setTransportHelp] = useState<'tcp' | 'udp' | null>(null)
   const [rememberIp, setRememberIp] = useState(false)
+  // Snapshot of the draft restored from "Lembrar nome e URL". The footer
+  // confirm ignores it until the user edits one of its fields.
+  const [rememberedDraft, setRememberedDraft] = useState<IpCameraDraft | null>(null)
   const [modalError, setModalError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [confirmUnsaved, setConfirmUnsaved] = useState(false)
@@ -3230,18 +3354,32 @@ function AddCameraModal({
     setClearCacheSuccess(false)
     try {
       const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:ip-draft`) : null
-      const saved = raw ? JSON.parse(raw) as { name?: unknown; url?: unknown; transport?: unknown } : null
+      const saved = raw ? JSON.parse(raw) as { name?: unknown; url?: unknown; transport?: unknown; previewWidth?: unknown; codec?: unknown } : null
       if (saved && typeof saved.url === 'string' && saved.url.trim()) {
-        setIpUrl(saved.url)
-        setIpName(typeof saved.name === 'string' ? saved.name : '')
-        setIpTransport(saved.transport === 'udp' ? 'udp' : 'tcp')
+        const restoredCodec = resolveRtspCodec(saved.codec)
+        const restoredDraft: IpCameraDraft = {
+          name: typeof saved.name === 'string' ? saved.name.trim() : '',
+          url: saved.url.trim(),
+          transport: saved.transport === 'udp' ? 'udp' : 'tcp',
+          previewWidth: resolvePreviewWidth(saved.previewWidth),
+          codec: restoredCodec
+        }
+        setRememberedDraft(restoredDraft)
+        setIpUrl(restoredDraft.url)
+        setIpName(restoredDraft.name)
+        setIpTransport(restoredDraft.transport)
+        setIpPreviewWidth(restoredDraft.previewWidth)
+        setIpCodec(restoredCodec)
         setRememberIp(true)
         return
       }
     } catch {}
+    setRememberedDraft(null)
     setIpUrl('')
     setIpName('')
+    setIpCodec(RTSP_CODEC_DEFAULT)
     setIpTransport('udp')
+    setIpPreviewWidth(PREVIEW_WIDTH_DEFAULT)
     setRememberIp(false)
   }, [isOpen, isActive])
 
@@ -3275,11 +3413,20 @@ function AddCameraModal({
     void command('warm_webcam', { cameraId: val }).catch(() => {})
   }
 
-  const persistIpDraft = (draft: { name: string; url: string; transport: 'tcp' | 'udp' } | null) => {
+  const persistIpDraft = (draft: IpCameraDraft | null) => {
     try {
       if (typeof localStorage === 'undefined') return
       if (draft && draft.url.trim()) {
-        localStorage.setItem(`${EXT_ID}:ip-draft`, JSON.stringify(draft))
+        const payload: Record<string, unknown> = {
+          name: draft.name,
+          url: draft.url,
+          transport: draft.transport,
+          previewWidth: draft.previewWidth
+        }
+        if (draft.codec && draft.codec !== 'h264') {
+          payload.codec = draft.codec
+        }
+        localStorage.setItem(`${EXT_ID}:ip-draft`, JSON.stringify(payload))
       } else {
         localStorage.removeItem(`${EXT_ID}:ip-draft`)
       }
@@ -3288,7 +3435,17 @@ function AddCameraModal({
 
   const handleToggleRememberIp = (checked: boolean) => {
     setRememberIp(checked)
-    persistIpDraft(checked ? { name: ipName.trim(), url: ipUrl.trim(), transport: ipTransport } : null)
+    persistIpDraft(
+      checked
+        ? {
+            name: ipName.trim(),
+            url: ipUrl.trim(),
+            transport: ipTransport,
+            previewWidth: ipPreviewWidth,
+            ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
+          }
+        : null
+    )
   }
 
   const handleStageIp = () => {
@@ -3303,8 +3460,15 @@ function AddCameraModal({
       setModalError(t('cameras.addModal.alreadyStaged'))
       return
     }
-    if (rememberIp) persistIpDraft({ name: ipName.trim(), url, transport: ipTransport })
-    setPendingIpDrafts((prev) => [...prev, { name: ipName.trim(), url, transport: ipTransport }])
+    const stagedDraft: IpCameraDraft = {
+      name: ipName.trim(),
+      url,
+      transport: ipTransport,
+      previewWidth: ipPreviewWidth,
+      ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
+    }
+    if (rememberIp) persistIpDraft(stagedDraft)
+    setPendingIpDrafts((prev) => [...prev, stagedDraft])
     setIpUrl('')
     setIpName('')
     setModalError(null)
@@ -3335,11 +3499,21 @@ function AddCameraModal({
   }
 
   const hasUnsavedValidIp = hasUnsavedIpInput && isValidIpUrl(ipUrl)
+  // A restored "Lembrar nome e URL" draft is prefilled data, not a selection:
+  // it only counts once the user edits one of its fields.
+  const rememberedDraftUntouched =
+    rememberedDraft !== null &&
+    ipName.trim() === rememberedDraft.name &&
+    ipUrl.trim() === rememberedDraft.url &&
+    ipTransport === rememberedDraft.transport &&
+    ipPreviewWidth === rememberedDraft.previewWidth &&
+    ipCodec === (rememberedDraft.codec ?? RTSP_CODEC_DEFAULT)
+  const hasCountableIpDraft = hasUnsavedValidIp && !rememberedDraftUntouched
   // Contagem efetiva: inclui o draft ainda não clicado em "Adicionar à seleção"
   // para que 1 clique no rodapé já adicione uma única IP sem passo extra.
-  const effectivePendingCount = pendingCount + (hasUnsavedValidIp ? 1 : 0)
+  const effectivePendingCount = pendingCount + (hasCountableIpDraft ? 1 : 0)
 
-  const doConfirm = async (overrideWebcams?: string[], overrideIps?: Array<{ name: string; url: string; transport: 'tcp' | 'udp' }>) => {
+  const doConfirm = async (overrideWebcams?: string[], overrideIps?: IpCameraDraft[]) => {
     const webcamsToAdd = overrideWebcams ?? pendingWebcamIds
     const ipsToAdd = overrideIps ?? pendingIpDrafts
     if (webcamsToAdd.length + ipsToAdd.length === 0) return
@@ -3370,7 +3544,7 @@ function AddCameraModal({
   const handleConfirm = async () => {
     // Se há um IP válido digitado mas ainda não "Adicionado à seleção",
     // inclui automaticamente no confirm — evita o 2º clique + prompt.
-    if (hasUnsavedValidIp) {
+    if (hasCountableIpDraft) {
       const url = ipUrl.trim()
       const id = `ip:${url}`
       if (ipCameras.some((c) => c.id === id)) {
@@ -3381,8 +3555,15 @@ function AddCameraModal({
         setModalError(t('cameras.addModal.alreadyStaged'))
         return
       }
-      const nextIps = [...pendingIpDrafts, { name: ipName.trim(), url, transport: ipTransport }]
-      if (rememberIp) persistIpDraft({ name: ipName.trim(), url, transport: ipTransport })
+      const draftItem: IpCameraDraft = {
+        name: ipName.trim(),
+        url,
+        transport: ipTransport,
+        previewWidth: ipPreviewWidth,
+        ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
+      }
+      const nextIps = [...pendingIpDrafts, draftItem]
+      if (rememberIp) persistIpDraft(draftItem)
       await doConfirm(pendingWebcamIds, nextIps)
       return
     }
@@ -3611,6 +3792,44 @@ function AddCameraModal({
                         ) : null}
                       </div>
 
+                      {/* Preview width caps the MJPEG scale; the stream never
+                          upscales, so a smaller source keeps its size. */}
+                      <div>
+                        <label htmlFor="vision-ip-preview-width" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                          {t('cameras.addModal.previewWidthLabel')}
+                        </label>
+                        <select
+                          id="vision-ip-preview-width"
+                          value={ipPreviewWidth}
+                          onChange={(e) => setIpPreviewWidth(resolvePreviewWidth(Number(e.target.value)))}
+                          className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                        >
+                          {PREVIEW_WIDTH_OPTIONS.map((width) => (
+                            <option key={width} value={width}>
+                              {t(`cameras.addModal.previewWidth${width}`)}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.previewWidthHelp')}</p>
+                      </div>
+
+                      {/* Video Protocol / Codec: H.264 (default) or H.265 (HEVC) */}
+                      <div>
+                        <label htmlFor="vision-ip-codec" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                          {t('cameras.addModal.codecLabel')}
+                        </label>
+                        <select
+                          id="vision-ip-codec"
+                          value={ipCodec}
+                          onChange={(e) => setIpCodec(resolveRtspCodec(e.target.value))}
+                          className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                        >
+                          <option value="h264">{t('cameras.addModal.codecH264')}</option>
+                          <option value="h265">{t('cameras.addModal.codecH265')}</option>
+                        </select>
+                        <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.codecHelp')}</p>
+                      </div>
+
                       <div className="flex items-center justify-between gap-2 pt-1">
                         <button
                           type="button"
@@ -3645,7 +3864,7 @@ function AddCameraModal({
                           <span>{t('cameras.addModal.clearCacheSuccess')}</span>
                         </p>
                       ) : null}
-                      {hasUnsavedValidIp ? (
+                      {hasCountableIpDraft ? (
                         <p className="text-[11px] text-text-muted text-center">{t('cameras.addModal.addHint')}</p>
                       ) : null}
                     </div>
@@ -3873,6 +4092,9 @@ function ExpandedCameraModal({
   zone,
   showBoxes = true,
   onToggleShowBoxes,
+  showZone = true,
+  onToggleShowZone,
+  onContextMenu,
   hasActiveRecognition = false,
   hasRecognition = false,
   onToggleRecognition,
@@ -3896,6 +4118,9 @@ function ExpandedCameraModal({
   zone?: Point[] | null
   showBoxes?: boolean
   onToggleShowBoxes?: () => void
+  showZone?: boolean
+  onToggleShowZone?: () => void
+  onContextMenu?: (e: React.MouseEvent, camera: CameraInfo) => void
   hasActiveRecognition?: boolean
   hasRecognition?: boolean
   onToggleRecognition?: () => void
@@ -3914,6 +4139,47 @@ function ExpandedCameraModal({
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const frameBoxRef = useRef<HTMLDivElement | null>(null)
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
+  const [drawMode, setDrawMode] = useState<DrawMode>('freehand')
+  const [kbs, setKbs] = useState(0)
+
+  const [cachedFrameShown, setCachedFrameShown] = useState(false)
+  const cachedFrameShownRef = useRef(false)
+  const hasLiveFrameRef = useRef(false)
+
+  // Carrega e desenha o frame em cache imediatamente ao abrir ou alternar a câmera,
+  // eliminando o card branco / tela em branco enquanto o stream ao vivo conecta.
+  useEffect(() => {
+    if (!camera) return
+    hasLiveFrameRef.current = false
+    const cached = readCachedFrame(camera.id)
+    if (!cached) {
+      setCachedFrameShown(false)
+      cachedFrameShownRef.current = false
+      return
+    }
+    cachedFrameShownRef.current = true
+    setCachedFrameShown(true)
+    const canvas = frameCanvasRef.current
+    const ctx = canvas?.getContext('2d')
+    if (!canvas || !ctx) return
+    const img = new Image()
+    img.onload = () => {
+      if (hasLiveFrameRef.current) return
+      try {
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        ctx.drawImage(img, 0, 0)
+        frameDimsRef.current = { w: img.naturalWidth, h: img.naturalHeight }
+        if (!readyRef.current) {
+          readyRef.current = true
+          setReady(true)
+        }
+      } catch {
+        // ignore
+      }
+    }
+    img.src = cached
+  }, [camera?.id])
 
   const wasEditingRef = useRef(false)
   useEffect(() => {
@@ -4031,6 +4297,9 @@ function ExpandedCameraModal({
       pumpingRef.current = true
       try {
         let jpegBase64: string | null = null
+        // IP cameras: the worker already holds the newest stream frame, so the
+        // pump carries only the camera id — no base64 JPEG round-trip.
+        const useWorkerFrame = !isWebcam
         if (isWebcam && videoRef.current && (videoRef.current.readyState >= 2 || videoRef.current.videoWidth > 0)) {
           const v = videoRef.current
           const vw = v.videoWidth || 640
@@ -4045,7 +4314,7 @@ function ExpandedCameraModal({
             ctx.drawImage(v, 0, 0, tempCanvas.width, tempCanvas.height)
             jpegBase64 = await canvasToBase64(tempCanvas, 0.7)
           }
-        } else if (frameCanvasRef.current && (frameDimsRef.current.w > 0 && frameDimsRef.current.h > 0)) {
+        } else if (!useWorkerFrame && frameCanvasRef.current && (frameDimsRef.current.w > 0 && frameDimsRef.current.h > 0)) {
           const c = frameCanvasRef.current
           const cw = frameDimsRef.current.w || c.width || 640
           const ch = frameDimsRef.current.h || c.height || 360
@@ -4058,7 +4327,7 @@ function ExpandedCameraModal({
             ctx.drawImage(c, 0, 0, tempCanvas.width, tempCanvas.height)
             jpegBase64 = await canvasToBase64(tempCanvas, 0.7)
           }
-        } else {
+        } else if (!useWorkerFrame) {
           const parser = parserWorkerRef.current
           if (parser) {
             const buf = await parser.getFrame()
@@ -4077,21 +4346,25 @@ function ExpandedCameraModal({
           }
         }
         // Mesmo motivo do pump do card: frame direto do host só existe para
-        // webcam; IP usa o stream mantido pelo worker via get_frame.
-        if (!jpegBase64 && isWebcam) {
-          jpegBase64 = await fetchDirectFrame(camera.id)
-        }
-        if (!jpegBase64) {
-          const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
-          jpegBase64 = res?.jpegBase64 || null
-        }
-        if (!jpegBase64) {
-          pumpingRef.current = false
-          return
+        // webcam; IP usa o stream mantido pelo worker.
+        if (isWebcam) {
+          if (!jpegBase64) {
+            jpegBase64 = await fetchDirectFrame(camera.id)
+          }
+          if (!jpegBase64) {
+            const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
+            jpegBase64 = res?.jpegBase64 || null
+          }
+          if (!jpegBase64) {
+            pumpingRef.current = false
+            return
+          }
         }
         pumpingRef.current = true
-        const request = command<{ detections?: Detection[]; stale?: boolean }>('frame_pump', { cameraId: camera.id, jpegBase64 })
-        void request.finally(() => { pumpingRef.current = false })
+        const request = useWorkerFrame
+          ? command<{ detections?: Detection[]; stale?: boolean }>('frame_pump', { cameraId: camera.id })
+          : command<{ detections?: Detection[]; stale?: boolean }>('frame_pump', { cameraId: camera.id, jpegBase64 })
+        void request.catch(() => {}).finally(() => { pumpingRef.current = false })
         const res = await Promise.race([
           request,
           new Promise<null>((resolve) => setTimeout(() => resolve(null), PUMP_COMMAND_TIMEOUT_MS))
@@ -4152,6 +4425,11 @@ function ExpandedCameraModal({
     ro?.observe(frameCanvas)
 
     const drawToCanvas = (bitmap: ImageBitmap | HTMLImageElement): void => {
+      hasLiveFrameRef.current = true
+      if (cachedFrameShownRef.current) {
+        cachedFrameShownRef.current = false
+        setCachedFrameShown(false)
+      }
       if (frameCanvas.width !== bitmap.width) frameCanvas.width = bitmap.width
       if (frameCanvas.height !== bitmap.height) frameCanvas.height = bitmap.height
       ctx.drawImage(bitmap, 0, 0)
@@ -4163,6 +4441,21 @@ function ExpandedCameraModal({
       if (errorRef.current !== null) {
         errorRef.current = null
         setError(null)
+      }
+      if (shouldCaptureFrameCache(camera.id)) {
+        try {
+          const scaled = document.createElement('canvas')
+          const scale = Math.min(1, 640 / Math.max(bitmap.width, bitmap.height))
+          scaled.width = Math.round(bitmap.width * scale)
+          scaled.height = Math.round(bitmap.height * scale)
+          const sctx = scaled.getContext('2d')
+          if (sctx) {
+            sctx.drawImage(bitmap, 0, 0, scaled.width, scaled.height)
+            storeCachedFrame(camera.id, scaled.toDataURL('image/jpeg', 0.7))
+          }
+        } catch {
+          // ignore
+        }
       }
     }
 
@@ -4244,7 +4537,10 @@ function ExpandedCameraModal({
           setError(errorRef.current)
         }
       },
-      onFps: () => {}
+      onFps: () => {},
+      onKbs: (measuredKbs) => {
+        if (!cancelled) setKbs(measuredKbs)
+      }
     })
     if (parser) {
       parserWorkerRef.current = parser
@@ -4267,6 +4563,9 @@ function ExpandedCameraModal({
                 errorRef.current = t('cameras.unstable')
                 setError(errorRef.current)
               }
+            },
+            onKbs: (measuredKbs) => {
+              if (!cancelled) setKbs(measuredKbs)
             }
           },
           ac.signal
@@ -4301,6 +4600,9 @@ function ExpandedCameraModal({
             errorRef.current = t('cameras.unstable')
             setError(errorRef.current)
           }
+        },
+        onKbs: (measuredKbs) => {
+          if (!cancelled) setKbs(measuredKbs)
         }
       },
       ac.signal
@@ -4348,9 +4650,19 @@ function ExpandedCameraModal({
       <div className="h-full flex flex-col min-h-0">
         <div ref={headerRef} data-testid="expanded-header" className="relative z-40 flex flex-wrap items-center gap-x-3 gap-y-2 px-3 sm:px-6 py-3 border-b border-border/40 bg-card/85 backdrop-blur-md shrink-0">
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
+            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${cachedFrameShown ? 'bg-amber-400 animate-pulse' : camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
             <h2 className="text-sm sm:text-base font-bold text-text truncate min-w-0">{formatCameraName(camera.name, camera.source, t)}</h2>
             <span className="hidden sm:inline text-xs text-text-muted shrink-0">({isWebcam ? t('cameras.optWebcam') : t('cameras.ipSlashRtsp')})</span>
+            {kbs > 0 ? (
+              <span className="text-[11px] font-mono font-semibold bg-black/60 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/20 shrink-0">
+                {kbs} KB/S
+              </span>
+            ) : null}
+            {cachedFrameShown ? (
+              <span className="text-[10px] font-medium text-amber-300 bg-amber-500/20 px-1.5 py-0.5 rounded-full border border-amber-500/30 shrink-0 animate-pulse">
+                {t('cameras.connecting')}
+              </span>
+            ) : null}
           </div>
           <ToolbarDropdown
             group="view"
@@ -4385,6 +4697,25 @@ function ExpandedCameraModal({
                       <path d="m2 2 20 20" />
                     </svg>
                   )
+                }
+              />
+            ) : null}
+            {onToggleShowZone ? (
+              <ToolbarMenuItem
+                label={showZone !== false ? t('cameras.hideZone') : t('cameras.showZone')}
+                onClick={() => {
+                  setOpenMenu(null)
+                  onToggleShowZone()
+                }}
+                icon={
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polygon points="4 4 19 3 20 15 13 21 3 14" strokeDasharray="3 2" fill="none" />
+                    <circle cx="4" cy="4" r="1.5" fill="currentColor" />
+                    <circle cx="19" cy="3" r="1.5" fill="currentColor" />
+                    <circle cx="20" cy="15" r="1.5" fill="currentColor" />
+                    <circle cx="13" cy="21" r="1.5" fill="currentColor" />
+                    <circle cx="3" cy="14" r="1.5" fill="currentColor" />
+                  </svg>
                 }
               />
             ) : null}
@@ -4549,7 +4880,8 @@ function ExpandedCameraModal({
                 }}
                 icon={
                   <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                    <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                    <circle cx="12" cy="12" r="3" />
                   </svg>
                 }
               />
@@ -4621,14 +4953,22 @@ function ExpandedCameraModal({
         </div>
 
         <div className="flex-1 min-h-0 flex flex-col">
+          {/* Theme surface instead of black: with a single camera there is no
+              thumbnail strip, so the letterbox area around the 16:9 stream is
+              tall and black bars would dominate the view. */}
           <div className="relative flex-1 min-w-0 min-h-0 bg-bg">
             <div
               ref={frameBoxRef}
-              className="absolute inset-0 overflow-hidden flex items-center justify-center cursor-pointer select-none"
+              className="absolute inset-0 overflow-hidden flex items-center justify-center cursor-pointer select-none bg-bg"
               onDoubleClick={(e) => {
                 if (!isEditingZone && onClose) {
                   e.stopPropagation()
                   onClose()
+                }
+              }}
+              onContextMenu={(e) => {
+                if (!isEditingZone && onContextMenu && camera) {
+                  onContextMenu(e, camera)
                 }
               }}
               title={isEditingZone ? undefined : t('cameras.dblClickClose')}
@@ -4636,8 +4976,15 @@ function ExpandedCameraModal({
               <canvas
                 ref={frameCanvasRef}
                 data-testid="expanded-video"
-                className={`max-w-full max-h-full w-full h-full ${fillMode === 'cover' ? 'object-cover' : 'object-contain'}`}
+                className={`max-w-full max-h-full w-full h-full ${fillMode === 'cover' ? 'object-cover' : 'object-contain'} ${ready || cachedFrameShown ? 'block' : 'opacity-0'}`}
               />
+
+              {!ready && !cachedFrameShown && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-xs text-text-muted bg-input/60 p-4 text-center gap-2 pointer-events-none z-10">
+                  <span className="w-6 h-6 rounded-full border-2 border-emerald-400/30 border-t-emerald-400 animate-spin" />
+                  <span className="font-medium">{cameraPlaceholderStatus(camera, false, error, false, false, t)}</span>
+                </div>
+              )}
 
               {/* Bounding boxes — acompanha o enquadramento do vídeo (preencher/ajustar) */}
               <SvgBoxOverlay boxes={showBoxes === false ? EMPTY_DETECTIONS : myDetections} frameDims={frameDimsRef.current} fit={fillMode === 'cover' ? 'slice' : 'contain'} zone={zone} />
@@ -4645,10 +4992,14 @@ function ExpandedCameraModal({
               {/* Camada interativa de seleção de área (polígono) */}
               <ZoneOverlay
                 zone={zone}
+                showZone={showZone}
                 draftPoints={draftPoints}
                 isEditing={isEditingZone}
                 frameDims={frameDimsRef.current}
                 fit={fillMode === 'cover' ? 'slice' : 'contain'}
+                drawMode={drawMode}
+                onDrawModeChange={setDrawMode}
+                hideControls={true}
                 onAddPoint={handleAddDraftPoint}
                 onSetPoints={handleSetDraftPoints}
                 onSave={handleSaveDraftZone}
@@ -4656,6 +5007,13 @@ function ExpandedCameraModal({
                 onCancel={handleCancelDraftZone}
                 onUndo={handleUndoDraftPoint}
               />
+
+              {/* Real-time transfer rate in KB/S (top-right corner of video) */}
+              {ready && kbs > 0 && !isEditingZone ? (
+                <div className="absolute top-3 right-3 z-20 text-xs font-mono font-semibold bg-black/65 text-emerald-300 px-2 py-0.5 rounded shadow-sm tracking-wide pointer-events-none">
+                  {kbs} KB/S
+                </div>
+              ) : null}
 
               {/* Shutter Flash Effect */}
               {flashing ? (
@@ -4672,6 +5030,24 @@ function ExpandedCameraModal({
               ) : null}
             </div>
           </div>
+
+          {/* Barra de rodapé para edição de área: FORA da imagem do vídeo e com botões lado a lado */}
+          {isEditingZone ? (
+            <div
+              className="shrink-0 border-t border-border/40 bg-card/95 backdrop-blur-md px-3 sm:px-6 py-2.5 flex items-center justify-center overflow-x-auto z-40 animate-fadeIn select-none"
+            >
+              <ZoneEditorBar
+                testId="expanded-zone-dock"
+                drawMode={drawMode}
+                onChangeDrawMode={setDrawMode}
+                draftPoints={draftPoints}
+                onUndo={handleUndoDraftPoint}
+                onClear={handleClearDraftZone}
+                onCancel={handleCancelDraftZone}
+                onSave={handleSaveDraftZone}
+              />
+            </div>
+          ) : null}
 
           {otherCameras.length > 0 && onSelectCamera ? (
             <div
@@ -6363,7 +6739,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     setContextMenu(null)
     if (camera.source === 'ip' || camera.id.startsWith('ip:')) {
       try {
-        const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp' }> } }>(
+        const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec }> } }>(
           'configure',
           {}
         )
@@ -6374,7 +6750,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           name: entry?.name || camera.name,
           source: 'ip',
           url,
-          transport: entry?.transport === 'tcp' ? 'tcp' : 'udp'
+          transport: entry?.transport === 'tcp' ? 'tcp' : 'udp',
+          previewWidth: resolvePreviewWidth(entry?.previewWidth),
+          codec: resolveRtspCodec(entry?.codec)
         })
       } catch {
         setEditingTarget({
@@ -6382,7 +6760,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           name: camera.name,
           source: 'ip',
           url: resolveCameraUrl(camera),
-          transport: 'tcp'
+          transport: 'tcp',
+          previewWidth: PREVIEW_WIDTH_DEFAULT,
+          codec: RTSP_CODEC_DEFAULT
         })
       }
     } else {
@@ -6391,7 +6771,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         name: camera.name,
         source: 'webcam',
         url: camera.id,
-        transport: 'udp'
+        transport: 'udp',
+        previewWidth: PREVIEW_WIDTH_DEFAULT
       })
     }
   }, [resolveCameraUrl])
@@ -6475,7 +6856,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     try {
       const [camRes, statusRes, alertsRes, activeTriggersRes] = await Promise.all([
         command<{ cameras: CameraInfo[]; selectedCameras?: string[] | null }>('list_cameras'),
-        command<{ monitors: MonitorInfo[]; detectionZones?: Record<string, Point[]>; showBoxes?: Record<string, boolean> }>('get_status'),
+        command<{ monitors: MonitorInfo[]; detectionZones?: Record<string, Point[]>; showBoxes?: Record<string, boolean>; showZones?: Record<string, boolean> }>('get_status'),
         command<{ alerts: Alert[] }>('list_alerts').catch(() => null),
         fetchActiveAutomationTriggers()
       ])
@@ -6499,6 +6880,20 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           const newStr = JSON.stringify(statusRes.showBoxes || {})
           if (currentStr === newStr) return prev
           const next = { ...prev, showBoxes: statusRes.showBoxes }
+          try {
+            if (typeof localStorage !== 'undefined') {
+              localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+            }
+          } catch {}
+          return next
+        })
+      }
+      if (statusRes?.showZones) {
+        setConfig((prev) => {
+          const currentStr = JSON.stringify(prev.showZones || {})
+          const newStr = JSON.stringify(statusRes.showZones || {})
+          if (currentStr === newStr) return prev
+          const next = { ...prev, showZones: statusRes.showZones }
           try {
             if (typeof localStorage !== 'undefined') {
               localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
@@ -7017,6 +7412,31 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     void poll()
   }, [config.showBoxes, poll])
 
+  const handleToggleShowZones = useCallback(async (cameraId: string) => {
+    setContextMenu(null)
+    const next = { ...(config.showZones || {}) }
+    if (next[cameraId] === false) {
+      delete next[cameraId]
+    } else {
+      next[cameraId] = false
+    }
+    setConfig((prev) => {
+      const updated = { ...prev, showZones: next }
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(updated))
+        }
+      } catch {}
+      return updated
+    })
+    try {
+      await command('configure', { showZones: next })
+    } catch {
+      // Optimistic update stays; the next poll converges with the backend.
+    }
+    void poll()
+  }, [config.showZones, poll])
+
   const handleToggleRecognition = useCallback(async (camera: CameraInfo) => {
     setContextMenu(null)
     const targets = findCameraMonitors(camera, monitors)
@@ -7041,7 +7461,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
 
   const handleSaveEdit = useCallback(async (
     oldId: string,
-    payload: { name: string; url: string; transport: 'tcp' | 'udp' }
+    payload: { name: string; url: string; transport: 'tcp' | 'udp'; previewWidth: number; codec?: RtspCodec }
   ) => {
     const target = cameras.find((c) => c.id === oldId)
     if (!target) throw new Error('Camera not found')
@@ -7070,7 +7490,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     // A changed URL is a different stream: the old cached frame must not show
     // under the new camera id.
     if (nextId !== oldId) clearCachedFrame(oldId)
-    const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp' }>; selectedCameras?: string[] } }>(
+    const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec }>; selectedCameras?: string[] } }>(
       'configure',
       {}
     )
@@ -7079,7 +7499,14 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     if (nextId !== oldId && ipList.some((c) => c.id === nextId)) {
       throw new Error(t('cameras.addModal.alreadyRegistered'))
     }
-    const nextEntry = { id: nextId, name: payload.name.trim() || t('cameras.defaultIpName'), url: nextUrl, transport: payload.transport }
+    const nextEntry = {
+      id: nextId,
+      name: payload.name.trim() || t('cameras.defaultIpName'),
+      url: nextUrl,
+      transport: payload.transport,
+      previewWidth: resolvePreviewWidth(payload.previewWidth),
+      ...(payload.codec && payload.codec !== 'h264' ? { codec: payload.codec } : {})
+    }
     const updatedIp = ipList.some((c) => c.id === oldId)
       ? ipList.map((c) => (c.id === oldId ? nextEntry : c))
       : [...ipList, nextEntry]
@@ -7130,7 +7557,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   // caso de erro na persistência, um banner claro é exibido e o usuário pode
   // reabrir o modal e tentar de novo.
   const confirmAddCameras = useCallback(
-    async (webcamIds: string[], ipDrafts: Array<{ name: string; url: string; transport: 'tcp' | 'udp' }>) => {
+    async (webcamIds: string[], ipDrafts: IpCameraDraft[]) => {
       lastSelectionChangeAtRef.current = Date.now()
       setBusy(true)
       setIsModalOpen(false)
@@ -7179,7 +7606,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
           const existingIpIds = new Set(ipCamerasList.map((c) => c.id))
 
-          const newIpCameras: Array<{ id: string; name: string; url: string; transport: 'tcp' | 'udp' }> = []
+          const newIpCameras: Array<{ id: string; name: string; url: string; transport: 'tcp' | 'udp'; previewWidth: number; codec?: RtspCodec }> = []
           for (const draft of ipDrafts) {
             const id = `ip:${draft.url}`
             if (existingIpIds.has(id)) continue
@@ -7188,7 +7615,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               id,
               name: draft.name || t('cameras.defaultIpName'),
               url: draft.url,
-              transport: draft.transport
+              transport: draft.transport,
+              previewWidth: resolvePreviewWidth(draft.previewWidth),
+              ...(draft.codec && draft.codec !== 'h264' ? { codec: draft.codec } : {})
             })
           }
 
@@ -7409,6 +7838,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 zone={config.detectionZones?.[camera.id]}
                 showBoxes={config.showBoxes?.[camera.id] !== false}
                 onToggleShowBoxes={() => void handleToggleShowBoxes(camera.id)}
+                showZone={config.showZones?.[camera.id] !== false}
+                onToggleShowZone={() => void handleToggleShowZones(camera.id)}
                 isEditingZone={editingZoneCameraId === camera.id}
                 onToggleEditZone={() => handleToggleEditZone(camera.id)}
                 onSaveZone={(points) => void handleSaveCameraZone(camera.id, points)}
@@ -8042,6 +8473,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         zone={expandedCamera ? config.detectionZones?.[expandedCamera.id] : null}
         showBoxes={expandedCamera ? config.showBoxes?.[expandedCamera.id] !== false : true}
         onToggleShowBoxes={expandedCamera ? () => void handleToggleShowBoxes(expandedCamera.id) : undefined}
+        showZone={expandedCamera ? config.showZones?.[expandedCamera.id] !== false : true}
+        onToggleShowZone={expandedCamera ? () => void handleToggleShowZones(expandedCamera.id) : undefined}
+        onContextMenu={handleCameraContextMenu}
         hasActiveRecognition={expandedCamera ? findCameraMonitors(expandedCamera, monitors).some((m) => !m.paused) : false}
         hasRecognition={expandedCamera ? findCameraMonitors(expandedCamera, monitors).length > 0 : false}
         onToggleRecognition={expandedCamera ? () => void handleToggleRecognition(expandedCamera) : undefined}
@@ -8088,20 +8522,23 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 onClick: () => void handleEditCamera(target.camera)
               },
               {
-                id: 'copy-url',
-                label: t('cameras.copyUrl'),
-                onClick: () => void handleCopyCameraUrl(target.camera)
-              },
-              {
-                id: 'recognition',
-                label: hasActiveRecognition ? t('cameras.disableRecognition') : t('cameras.enableRecognition'),
-                disabled: cameraMonitors.length === 0,
-                onClick: () => void handleToggleRecognition(target.camera)
+                id: 'zone',
+                label:
+                  config.detectionZones?.[target.camera.id] &&
+                  config.detectionZones[target.camera.id].length >= 3
+                    ? t('cameras.zoneEditActive')
+                    : t('cameras.zoneDefine'),
+                onClick: () => handleToggleEditZone(target.camera.id)
               },
               {
                 id: 'boxes',
                 label: config.showBoxes?.[target.camera.id] === false ? t('cameras.showBoxes') : t('cameras.hideBoxes'),
                 onClick: () => void handleToggleShowBoxes(target.camera.id)
+              },
+              {
+                id: 'zones',
+                label: config.showZones?.[target.camera.id] === false ? t('cameras.showZone') : t('cameras.hideZone'),
+                onClick: () => void handleToggleShowZones(target.camera.id)
               },
               {
                 id: 'snapshot',
@@ -8110,17 +8547,15 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               },
               {
                 id: 'expand',
-                label: t('cameras.enlargeImage'),
-                onClick: () => handleExpandCamera(target.camera)
-              },
-              {
-                id: 'zone',
-                label:
-                  config.detectionZones?.[target.camera.id] &&
-                  config.detectionZones[target.camera.id].length >= 3
-                    ? t('cameras.zoneEditActive')
-                    : t('cameras.zoneDefine'),
-                onClick: () => handleToggleEditZone(target.camera.id)
+                label: expandedCamera?.id === target.camera.id ? t('cameras.restoreSize') : t('cameras.enlargeImage'),
+                onClick: () => {
+                  if (expandedCamera?.id === target.camera.id) {
+                    setExpandedCamera(null)
+                    setEditingZoneCameraId(null)
+                  } else {
+                    handleExpandCamera(target.camera)
+                  }
+                }
               },
               {
                 id: 'monitor',
@@ -8144,7 +8579,24 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 id: 'remove',
                 label: target.camera.source === 'ip' ? t('cameras.removeIpShort') : t('cameras.removeFromView'),
                 danger: true,
-                onClick: () => void handleRemoveCamera(target.camera.id)
+                onClick: () => {
+                  if (expandedCamera?.id === target.camera.id) {
+                    setExpandedCamera(null)
+                    setEditingZoneCameraId(null)
+                  }
+                  void handleRemoveCamera(target.camera.id)
+                }
+              },
+              {
+                id: 'recognition',
+                label: hasActiveRecognition ? t('cameras.disableRecognition') : t('cameras.enableRecognition'),
+                disabled: cameraMonitors.length === 0,
+                onClick: () => void handleToggleRecognition(target.camera)
+              },
+              {
+                id: 'copy-url',
+                label: t('cameras.copyUrl'),
+                onClick: () => void handleCopyCameraUrl(target.camera)
               }
             ]
           })()
