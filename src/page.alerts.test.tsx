@@ -162,4 +162,34 @@ describe('VisionPage — Histórico de Alertas', () => {
     statusHandler(subscribed)({ changedAt: Date.now() })
     await waitFor(() => expect(screen.getAllByText(/Câmera A/)).toHaveLength(1))
   })
+
+  it('pagina os alertas de 8 em 8 por página', async () => {
+    const initialAlerts = Array.from({ length: 12 }, (_, i) => ({
+      ts: 1000 + i * 100,
+      cameraName: `Câmera Alerta ${i + 1}`,
+      triggeredBy: 'motion'
+    }))
+    setupServer(initialAlerts)
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openAlertsTab()
+
+    // Na primeira página (mais recentes: 12 a 5)
+    await waitFor(() => {
+      expect(screen.getByText(/Câmera Alerta 12/)).toBeTruthy()
+      expect(screen.getByText(/Câmera Alerta 5/)).toBeTruthy()
+      expect(screen.queryByText(/Câmera Alerta 4/)).toBeNull()
+    })
+
+    // Navega para a página 2 (restantes: 4, 3, 2, 1)
+    const page2Button = screen.getByRole('button', { name: '2' })
+    fireEvent.click(page2Button)
+
+    await waitFor(() => {
+      expect(screen.getByText(/Câmera Alerta 4/)).toBeTruthy()
+      expect(screen.getByText(/Câmera Alerta 1/)).toBeTruthy()
+      expect(screen.queryByText(/Câmera Alerta 12/)).toBeNull()
+    })
+  })
 })
+

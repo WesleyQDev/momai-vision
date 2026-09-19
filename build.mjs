@@ -9,7 +9,7 @@
  */
 
 import { context } from 'esbuild'
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
@@ -18,6 +18,30 @@ const outdir = path.join(root, 'dist')
 const isWatch = process.argv.includes('--watch')
 
 const external = ['react', 'react-dom', 'react/jsx-runtime', 'momai:sdk']
+
+function readManifestWidgets() {
+  try {
+    const manifest = JSON.parse(readFileSync(path.join(root, 'manifest.json'), 'utf8'))
+    const widgets = Array.isArray(manifest?.ui?.widgets) ? manifest.ui.widgets : []
+    const result = []
+    for (const widget of widgets) {
+      const entry = widget?.entry || widget?.file
+      if (!entry || typeof entry !== 'string' || !entry.startsWith('dist/') || !entry.endsWith('.js')) continue
+      const out = entry.slice('dist/'.length, -'.js'.length)
+      const id = widget?.id
+      const candidates = id ? [`src/widgets/${id}.tsx`, `src/widgets/${id}.ts`] : []
+      for (const candidate of candidates) {
+        if (existsSync(path.join(root, candidate))) {
+          result.push({ in: candidate, out })
+          break
+        }
+      }
+    }
+    return result
+  } catch {
+    return []
+  }
+}
 
 // ---------------------------------------------------------------------------
 // esbuild contexts (one per entry point — each gets its own watch/rebuild)
@@ -72,6 +96,25 @@ for (const entry of ['src/page.tsx', 'src/panel.tsx']) {
     await context({
       entryPoints: [path.join(root, entry)],
       outfile: path.join(outdir, `${name}.js`),
+      bundle: true,
+      format: 'esm',
+      platform: 'browser',
+      target: 'es2020',
+      external,
+      loader: {
+        '.png': 'dataurl'
+      },
+      sourcemap: false,
+      logLevel: 'warning'
+    })
+  )
+}
+
+for (const widget of readManifestWidgets()) {
+  uiContexts.push(
+    await context({
+      entryPoints: [path.join(root, widget.in)],
+      outfile: path.join(outdir, `${widget.out}.js`),
       bundle: true,
       format: 'esm',
       platform: 'browser',

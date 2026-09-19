@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from 'react'
 import { getSDK } from 'momai:sdk'
 import ContextMenu from './components/ContextMenu'
 import { localizedClassLabel, localizedTriggerLabel, ptLabel } from './vision/labels'
-import { classColor } from './vision/theme-color'
+import { classColor, overlayLabelColor } from './vision/theme-color'
 import { useI18n } from './hooks/useI18n'
 import visionIconPng from '../icon.png'
 
@@ -86,7 +86,7 @@ export function AlertCanvasOverlay({
       : undefined
 
   return (
-    <div ref={containerRef} className={`relative w-full h-full bg-black overflow-hidden ${className}`}>
+    <div ref={containerRef} className={`relative w-full h-full bg-input overflow-hidden ${className}`}>
       {validSrc ? (
         <img
           ref={imgRef}
@@ -122,7 +122,7 @@ export function AlertCanvasOverlay({
                 />
                 <text
                   x={`${x1 + 0.5}%`} y={`${Math.max(1.5, y1 - 0.5)}%`}
-                  fill="#0a0a0a" fontSize="12" fontFamily="sans-serif" fontWeight="bold"
+                  fill={overlayLabelColor()} fontSize="12" fontFamily="sans-serif" fontWeight="bold"
                 >
                   {ptLabel(box.className)} {Math.round(box.confidence * 100)}%
                 </text>
@@ -257,7 +257,7 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
   if (expanded && isOverlay) {
     return (
       <div
-        className="fixed inset-0 z-50 bg-black select-none"
+        className="fixed inset-0 z-50 bg-card select-none"
         style={{ WebkitAppRegion: 'drag' } as any}
       >
         {effectiveImageUri ? (
@@ -267,11 +267,11 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
             objectFit="object-contain"
           />
         ) : (
-          <p className="text-sm text-gray-400">{t('gallery.emptyTitle')}</p>
+          <p className="text-sm text-text-muted">{t('gallery.emptyTitle')}</p>
         )}
         <button
           onClick={toggleExpand}
-          className="absolute top-3 right-3 rounded-full bg-black/60 hover:bg-black/80 text-gray-300 p-2 z-20"
+          className="absolute top-3 right-3 rounded-full bg-card/60 hover:bg-input text-text-muted p-2 z-20"
           style={{ WebkitAppRegion: 'no-drag' } as any}
           aria-label={t('panel.viewSnapshot')}
           title={t('panel.viewSnapshot')}
@@ -293,7 +293,7 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
 
   return (
     <div
-      className={`w-full ${expanded && isOverlay ? '' : 'max-w-md'} rounded-xl border border-white/10 bg-zinc-900/95 text-gray-100 shadow-lg overflow-hidden`}
+      className={`w-full ${expanded && isOverlay ? '' : 'max-w-md'} rounded-xl border border-border/40 bg-card/95 text-text shadow-lg overflow-hidden`}
       style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
       onContextMenu={(e) => {
         e.preventDefault()
@@ -302,16 +302,16 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
       }}
     >
       <div
-        className="flex items-center justify-between px-4 py-2.5 bg-zinc-800/70"
+        className="flex items-center justify-between px-4 py-2.5 bg-input/60"
         style={isOverlay ? ({ WebkitAppRegion: 'drag' } as any) : undefined}
       >
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-gray-400">
+          <span className="text-text-muted">
             <VisionIcon className="w-5 h-5" />
           </span>
           <div className="min-w-0">
             <p className="text-sm font-semibold truncate">{title}</p>
-            <p className="text-xs text-gray-400 truncate">{subtitle || formatTime(data?.ts)}</p>
+            <p className="text-xs text-text-muted truncate">{subtitle || formatTime(data?.ts)}</p>
           </div>
         </div>
         <div
@@ -321,7 +321,7 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
           {effectiveImageUri ? (
             <button
               onClick={toggleExpand}
-              className="rounded-full p-1.5 text-gray-400 hover:bg-white/10 hover:text-white transition-colors"
+              className="rounded-full p-1.5 text-text-muted hover:bg-input hover:text-text transition-colors"
               title={t('panel.viewSnapshot')}
               aria-label={t('panel.viewSnapshot')}
             >
@@ -339,7 +339,7 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
           {isOverlay ? (
             <button
               onClick={data?.onClose}
-              className="rounded-full p-1.5 text-gray-400 hover:bg-white/10 hover:text-white transition-colors"
+              className="rounded-full p-1.5 text-text-muted hover:bg-input hover:text-text transition-colors"
               aria-label={t('common.close')}
             >
               <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
@@ -352,7 +352,7 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
 
       {effectiveImageUri ? (
         <div
-          className="relative w-full bg-black overflow-hidden shrink-0 cursor-pointer"
+          className="relative w-full bg-input overflow-hidden shrink-0 cursor-pointer"
           style={
             expanded
               ? isOverlay
@@ -375,11 +375,11 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
         className="px-4 py-3"
         style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
       >
-        <p className="text-sm text-gray-300">
+        <p className="text-sm text-text">
           {data?.description || (isSnapshot ? t('triggers.snapshot') : t('alerts.title'))}
         </p>
         {data?.triggeredBy && !isSnapshot ? (
-          <p className="mt-1 text-xs text-gray-500">{formatTime(data.ts)} · {localizedTriggerLabel(data, t)}</p>
+          <p className="mt-1 text-xs text-text-muted">{formatTime(data.ts)} · {localizedTriggerLabel(data, t)}</p>
         ) : null}
         <div
           className="mt-3 flex gap-2"
@@ -395,7 +395,7 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
               }
               data?.onClose?.()
             }}
-            className="flex-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-medium py-2 transition-colors cursor-pointer"
+            className="flex-1 rounded-lg bg-input hover:bg-card text-text text-xs font-medium py-2 transition-colors cursor-pointer"
             style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
           >
             {t('panel.openDashboard')}
@@ -407,7 +407,7 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
                 setStopping(true)
                 void pauseMonitor(data.monitorId, data.onClose).catch(() => setStopping(false))
               }}
-              className="flex-1 rounded-lg border border-amber-500/40 text-amber-300 hover:bg-amber-500/10 hover:border-amber-400 text-xs font-medium py-2 transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
+              className="flex-1 rounded-lg border border-highlight/40 text-highlight hover:bg-highlight/10 hover:border-highlight text-xs font-medium py-2 transition-colors disabled:opacity-50 cursor-pointer flex items-center justify-center gap-1.5"
               style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
             >
               <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -498,21 +498,21 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
   const onlineCount = Object.values(cameras).filter((c) => c.online).length
 
   return (
-    <div className="w-full rounded-2xl border border-white/10 bg-zinc-900/95 text-gray-100 p-4">
+    <div className="w-full rounded-2xl border border-border/40 bg-card/95 text-text p-4">
       <div className="flex items-center gap-2 mb-3">
-        <span className="text-emerald-400">
+        <span className="text-accent">
           <VisionIcon />
         </span>
         <h3 className="text-sm font-semibold">{t('name')}</h3>
       </div>
       <div className="grid grid-cols-2 gap-2 mb-3">
-        <div className="rounded-xl bg-white/5 p-3">
-          <p className="text-lg font-bold text-emerald-400">{Object.keys(cameras).length}</p>
-          <p className="text-xs text-gray-400">{t('nav.cameras')} ({onlineCount} {t('cameras.statusOnline')})</p>
+        <div className="rounded-xl bg-input/60 p-3">
+          <p className="text-lg font-bold text-accent">{Object.keys(cameras).length}</p>
+          <p className="text-xs text-text-muted">{t('nav.cameras')} ({onlineCount} {t('cameras.statusOnline')})</p>
         </div>
-        <div className="rounded-xl bg-white/5 p-3">
-          <p className="text-lg font-bold text-emerald-400">{monitors.length}</p>
-          <p className="text-xs text-gray-400">{t('monitoring.active')}</p>
+        <div className="rounded-xl bg-input/60 p-3">
+          <p className="text-lg font-bold text-accent">{monitors.length}</p>
+          <p className="text-xs text-text-muted">{t('monitoring.active')}</p>
         </div>
       </div>
       {monitors.length > 0 ? (
@@ -520,7 +520,7 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
           {monitors.map((m) => (
             <li
               key={m.id}
-              className="flex items-center justify-between rounded-lg bg-white/5 px-3 py-2 cursor-context-menu"
+              className="flex items-center justify-between rounded-lg bg-input/60 px-3 py-2 cursor-context-menu"
               onContextMenu={(e) => {
                 e.preventDefault()
                 e.stopPropagation()
@@ -529,16 +529,16 @@ export default function VisionPanel(props: { data?: unknown }): JSX.Element {
             >
               <div className="min-w-0">
                 <p className="text-xs font-medium truncate">{m.cameraName || m.id}</p>
-                <p className="text-[11px] text-gray-400">
+                <p className="text-[11px] text-text-muted">
                   {m.triggers?.map((tr) => tr.type).join(', ') || '—'}
                 </p>
               </div>
-              <span className="ml-2 shrink-0 w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="ml-2 shrink-0 w-2 h-2 rounded-full bg-accent animate-pulse" />
             </li>
           ))}
         </ul>
       ) : (
-        <p className="text-xs text-gray-400">{t('monitoring.emptyTitle')}</p>
+        <p className="text-xs text-text-muted">{t('monitoring.emptyTitle')}</p>
       )}
       {monitorMenu && (
         <ContextMenu

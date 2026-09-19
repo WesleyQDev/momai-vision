@@ -29,6 +29,10 @@
     "edit": "Editar Câmera",
     "delete": "Excluir Câmera",
     "deleteConfirm": "Tem certeza que deseja remover esta câmera?",
+    "pauseVideo": "Pausar vídeo",
+    "resumeVideo": "Retomar vídeo",
+    "pausedBadge": "Pausada",
+    "pausedSubtitle": "Clique para retomar o vídeo",
     "name": "Nome da Câmera",
     "source": "Tipo de Câmera",
     "webcam": "Webcam Local (USB)",
@@ -507,5 +511,25 @@
     "daysLabel": "Dias de armazenamento (padrão: 7)",
     "maxFilesLabel": "Máximo de arquivos armazenados (padrão: 200)",
     "localNote": "Prints ficam guardados localmente no seu computador. Frames ao vivo em vídeo nunca são gravados em disco."
+  },
+  "widget": {
+    "live": {
+      "title": "Câmera ao vivo",
+      "loading": "Conectando à câmera…",
+      "empty": "Sem frame ainda.",
+      "refresh": "Atualizar",
+      "needsSetup": "Adicione novamente pela Galeria e escolha a câmera."
+    },
+    "lastDetection": {
+      "title": "Última detecção",
+      "loading": "Carregando última detecção…",
+      "empty": "Nenhuma detecção ainda."
+    }
+  },
+  "pagination": {
+    "showing": "Mostrando {from} a {to} de {total}",
+    "previous": "Anterior",
+    "next": "Próximo",
+    "pageOf": "Página {page} de {pages}"
   }
 }

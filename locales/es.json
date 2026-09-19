@@ -29,6 +29,10 @@
     "edit": "Editar Cámara",
     "delete": "Eliminar Cámara",
     "deleteConfirm": "¿Está seguro de que desea eliminar esta cámara?",
+    "pauseVideo": "Pausar video",
+    "resumeVideo": "Reanudar video",
+    "pausedBadge": "Pausada",
+    "pausedSubtitle": "Haga clic para reanudar el video",
     "name": "Nombre de la Cámara",
     "source": "Tipo de Cámara",
     "webcam": "Cámara Web Local (USB)",
@@ -507,5 +511,25 @@
     "daysLabel": "Días de almacenamiento (predeterminado: 7)",
     "maxFilesLabel": "Máximo de archivos almacenados (predeterminado: 200)",
     "localNote": "Las capturas se guardan localmente en tu equipo. Los fotogramas de video en vivo nunca se graban en el disco."
+  },
+  "widget": {
+    "live": {
+      "title": "Cámara en vivo",
+      "loading": "Conectando…",
+      "empty": "Sin imagen.",
+      "refresh": "Actualizar",
+      "needsSetup": "Añade de nuevo desde la Galería y elige una cámara."
+    },
+    "lastDetection": {
+      "title": "Última detección",
+      "loading": "Cargando…",
+      "empty": "Sin detecciones."
+    }
+  },
+  "pagination": {
+    "showing": "Mostrando {from} a {to} de {total}",
+    "previous": "Anterior",
+    "next": "Siguiente",
+    "pageOf": "Página {page} de {pages}"
   }
 }

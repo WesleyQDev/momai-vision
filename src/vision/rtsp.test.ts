@@ -8,6 +8,7 @@ import {
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
   RTSP_RESTART_DELAY_MS,
   RTSP_RETRY_MAX_DELAY_MS,
+  RTSP_SOCKET_LOCK_RETRY_DELAY_MS,
   PREVIEW_WIDTH_DEFAULT,
   PREVIEW_WIDTH_OPTIONS,
   RTSP_CODEC_DEFAULT,
@@ -17,6 +18,7 @@ import {
   isBenignRtspStderr,
   isRtspAuthFailure,
   isRtspMidStreamStalled,
+  isRtspSocketLockError,
   nextReconnectDelayMs,
   resolveInitialTransport,
   resolvePreviewWidth,
@@ -118,21 +120,64 @@ describe('rtsp connection policy', () => {
     expect(isBenignRtspStderr('')).toBe(false)
   })
 
-  it('never flips transports on early failure — retries the same manual choice', () => {
-    // UDP attempt timing out stays on UDP.
+  it('backs off on socket lock, server errors (5xx/500/400) and port timeouts to let camera recover', () => {
+    expect(isRtspSocketLockError('connection to tcp://192.168.0.2:554 failed: error number -138 occurred')).toBe(true)
+    expect(isRtspSocketLockError('connection refused')).toBe(true)
+    expect(isRtspSocketLockError('connection timed out')).toBe(true)
+    expect(isRtspSocketLockError('method setup failed: 500 (internal server error)')).toBe(true)
+    expect(isRtspSocketLockError('server returned 5xx server error reply')).toBe(true)
+    expect(isRtspSocketLockError('server returned 400 bad request')).toBe(true)
+    expect(isRtspSocketLockError('method options failed: 405 (method not allowed)')).toBe(true)
+    expect(isRtspSocketLockError('nonmatching transport in server reply')).toBe(true)
+    expect(isRtspSocketLockError('method setup failed: 404 stream not found')).toBe(false)
+
+    expect(
+      decideRtspReconnect({
+        failedTransport: 'tcp',
+        stderrLower: 'connection to tcp://192.168.0.2:554 failed: error number -138 occurred',
+        hadFirstFrame: false
+      })
+    ).toEqual({ action: 'backoff-socket-lock', delayMs: RTSP_SOCKET_LOCK_RETRY_DELAY_MS })
+
     expect(
       decideRtspReconnect({
         failedTransport: 'udp',
-        stderrLower: 'operation timed out',
+        stderrLower: 'method setup failed: 500 (internal server error)',
         hadFirstFrame: false
       })
-    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })
+    ).toEqual({ action: 'backoff-socket-lock', delayMs: RTSP_SOCKET_LOCK_RETRY_DELAY_MS })
 
-    // TCP attempt refused stays on TCP.
+    expect(
+      decideRtspReconnect({
+        failedTransport: 'udp',
+        stderrLower: 'server returned 400 bad request',
+        hadFirstFrame: false
+      })
+    ).toEqual({ action: 'backoff-socket-lock', delayMs: RTSP_SOCKET_LOCK_RETRY_DELAY_MS })
+
     expect(
       decideRtspReconnect({
         failedTransport: 'tcp',
         stderrLower: 'connection to tcp refused',
+        hadFirstFrame: false
+      })
+    ).toEqual({ action: 'backoff-socket-lock', delayMs: RTSP_SOCKET_LOCK_RETRY_DELAY_MS })
+  })
+
+  it('never flips transports on early failure — retries the same manual choice', () => {
+    // Generic early failure without socket lock stays on same transport with early delay
+    expect(
+      decideRtspReconnect({
+        failedTransport: 'udp',
+        stderrLower: 'invalid data found when processing input',
+        hadFirstFrame: false
+      })
+    ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })
+
+    expect(
+      decideRtspReconnect({
+        failedTransport: 'tcp',
+        stderrLower: 'method setup failed: 404 stream not found',
         hadFirstFrame: false
       })
     ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })
@@ -158,11 +203,11 @@ describe('rtsp connection policy', () => {
     ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_RESTART_DELAY_MS })
   })
 
-  it('retries the same transport with backoff on repeated early failures', () => {
+  it('retries the same transport on generic repeated early failures', () => {
     expect(
       decideRtspReconnect({
         failedTransport: 'udp',
-        stderrLower: 'no route to host',
+        stderrLower: 'header missing or corrupt',
         hadFirstFrame: false
       })
     ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })

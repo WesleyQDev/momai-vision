@@ -29,6 +29,10 @@
     "edit": "Modifier la caméra",
     "delete": "Supprimer la caméra",
     "deleteConfirm": "Voulez-vous vraiment supprimer cette caméra ?",
+    "pauseVideo": "Mettre en pause la vidéo",
+    "resumeVideo": "Reprendre la vidéo",
+    "pausedBadge": "En pause",
+    "pausedSubtitle": "Cliquez pour reprendre la vidéo",
     "name": "Nom de la caméra",
     "source": "Type de caméra",
     "webcam": "Webcam locale (USB)",
@@ -507,5 +511,25 @@
     "daysLabel": "Jours de stockage (défaut : 7)",
     "maxFilesLabel": "Fichiers stockés maximum (défaut : 200)",
     "localNote": "Les photos sont stockées localement sur votre ordinateur. Les images vidéo en direct ne sont jamais écrites sur le disque."
+  },
+  "widget": {
+    "live": {
+      "title": "Caméra en direct",
+      "loading": "Connexion…",
+      "empty": "Aucune image.",
+      "refresh": "Actualiser",
+      "needsSetup": "Ajoutez à nouveau depuis la Galerie et choisissez une caméra."
+    },
+    "lastDetection": {
+      "title": "Dernière détection",
+      "loading": "Chargement…",
+      "empty": "Aucune détection."
+    }
+  },
+  "pagination": {
+    "showing": "Affichage de {from} à {to} sur {total}",
+    "previous": "Précédent",
+    "next": "Suivant",
+    "pageOf": "Page {page} sur {pages}"
   }
 }

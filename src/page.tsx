@@ -23,44 +23,20 @@ import {
   RTSP_CODEC_DEFAULT,
   type RtspCodec
 } from './vision/rtsp'
-import { classColor } from './vision/theme-color'
+import { classColor, overlayLabelColor, zoneFillColor, zoneStrokeColor, zoneTraceColor, zoneVertexColor, zoneVertexStrokeColor } from './vision/theme-color'
 import { filterDetectionsInZone, orderPointsClockwise, createBoxFromCorners, simplifyPolygon, type Point } from './vision/zone'
 import { nextPumpIntervalMs } from './vision/pump-cadence'
 import visionIconPng from '../icon.png'
-import ContextMenu from './components/ContextMenu'
+import ContextMenu, { type ContextMenuOption } from './components/ContextMenu'
 import EditCameraModal, { type EditingCameraTarget } from './components/EditCameraModal'
+import { Pagination } from './components/Pagination'
+import { useWindowMaximized } from './hooks/useWindowMaximized'
 import { readCachedFrame, storeCachedFrame, shouldCaptureFrameCache, clearCachedFrame } from './vision/frame-cache'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
 
 type TranslateFn = (key: string, vars?: Record<string, string | number>) => string
-
-/**
- * Reflects whether the MomAI host window is maximized. Same contract the host
- * uses for its own settings card: when the window is resized (not maximized)
- * the card overlays the whole MomAI area; when maximized it shows as a normal
- * centered card.
- */
-function useWindowMaximized(): boolean {
-  const [isMaximized, setIsMaximized] = useState(false)
-
-  useEffect(() => {
-    const api = (window as any).api
-    api
-      ?.isWindowMaximized?.()
-      .then((maximized: boolean) => setIsMaximized(maximized))
-      .catch(() => { })
-    const unsubscribe = api?.onWindowStateChanged?.((state: { maximized: boolean }) => {
-      setIsMaximized(state.maximized)
-    })
-    return () => {
-      if (typeof unsubscribe === 'function') unsubscribe()
-    }
-  }, [])
-
-  return isMaximized
-}
 
 interface CameraInfo {
   id: string
@@ -215,6 +191,7 @@ interface VisionConfig {
   maxSnapshots?: number
   trackingMode?: 'fluid' | 'balanced' | 'economy'
   selectedCameras?: string[]
+  pausedCameras?: string[]
   sendActions?: MonitorActionUI[]
   detectionZones?: Record<string, Point[]>
   showBoxes?: Record<string, boolean>
@@ -877,6 +854,7 @@ function jpegDims(buf: Uint8Array): { w: number; h: number } | null {
  */
 interface ParserWorker {
   start(url: string): void
+  reset?(): void
   getFrame(): Promise<Uint8Array | null>
   dispose(): void
   /** true quando o script do worker carregou (ack 'ready' recebido). */
@@ -949,6 +927,13 @@ function createParserWorker(opts: {
   return {
     start: (url: string) => {
       if (!disposed) worker.postMessage({ type: 'start', url })
+    },
+    reset: () => {
+      if (!disposed) {
+        try {
+          worker.postMessage({ type: 'reset' })
+        } catch {}
+      }
     },
     getFrame: () =>
       new Promise<Uint8Array | null>((resolve) => {
@@ -1208,7 +1193,7 @@ function SvgBoxOverlay({
               />
               <text
                 x={x1 + 3} y={Math.max(tagH - 3, y1 - 3)}
-                fill="#0a0a0a" fontSize={fontSize} fontWeight="600" fontFamily="sans-serif"
+                fill={overlayLabelColor()} fontSize={fontSize} fontWeight="600" fontFamily="sans-serif"
               >
                 {localizedClassLabel(box.className, t)} {Math.round(box.confidence * 100)}%
               </text>
@@ -1232,7 +1217,7 @@ function SvgBoxOverlay({
             />
             <text
               x={`${x1 + 0.5}%`} y={`${Math.max(2.8, y1 - 1)}%`}
-              fill="#0a0a0a" fontSize="11" fontWeight="600" fontFamily="sans-serif"
+              fill={overlayLabelColor()} fontSize="11" fontWeight="600" fontFamily="sans-serif"
             >
               {localizedClassLabel(box.className, t)} {Math.round(box.confidence * 100)}%
             </text>
@@ -1404,7 +1389,7 @@ function ZoneEditorBar({
           onClick={onClear}
           className={`${
             compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
-          } bg-transparent hover:bg-red-500/20 text-red-500 hover:text-red-400 font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer`}
+          } bg-transparent hover:bg-error/20 text-error hover:text-error font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer`}
           title={t('monitoring.zoneEditor.clearShort')}
           aria-label={t('monitoring.zoneEditor.clearShort')}
         >
@@ -1442,7 +1427,7 @@ function ZoneEditorBar({
             compact ? 'h-7 px-2.5 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-3 sm:px-4 rounded-xl text-xs'
           } font-semibold transition-all shadow-md flex items-center gap-1.5 whitespace-nowrap shrink-0 border ${
             draftPoints.length >= 3
-              ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 cursor-pointer'
+              ? 'bg-accent hover:bg-accent/80 text-text border-accent cursor-pointer'
               : 'bg-transparent text-text-muted/40 border-border/30 cursor-not-allowed'
           }`}
           title={draftPoints.length >= 3 ? t('monitoring.zoneEditor.saveReady') : t('monitoring.zoneEditor.saveNeedPoints')}
@@ -1713,8 +1698,8 @@ function ZoneOverlay({
         {activePoints.length >= 3 && !isDrawingFreehand ? (
           <polygon
             points={svgPointsStr}
-            fill={isEditing ? 'rgba(239, 68, 68, 0.16)' : 'rgba(56, 189, 248, 0.12)'}
-            stroke={isEditing ? '#ef4444' : 'rgba(56, 189, 248, 0.85)'}
+            fill={zoneFillColor(isEditing)}
+            stroke={zoneStrokeColor(isEditing)}
             strokeWidth={isEditing ? '2.5' : '1.8'}
             strokeDasharray={isEditing ? '6 4' : '5 3'}
             className={isEditing ? 'cursor-move pointer-events-auto' : ''}
@@ -1734,7 +1719,7 @@ function ZoneOverlay({
           <polyline
             points={svgPointsStr}
             fill="none"
-            stroke="#ef4444"
+            stroke={zoneTraceColor()}
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -1764,8 +1749,8 @@ function ZoneOverlay({
                   cx={p.x * vbW}
                   cy={p.y * vbH}
                   r={isDraggingThis ? (isCompact ? 5.5 : 8) : (isCompact ? 3.5 : 5.5)}
-                  fill={isDraggingThis ? '#f59e0b' : '#ef4444'}
-                  stroke="#ffffff"
+                  fill={zoneVertexColor(isDraggingThis)}
+                  stroke={zoneVertexStrokeColor()}
                   strokeWidth={isDraggingThis ? 2.5 : (isCompact ? 1.5 : 2)}
                   className="cursor-move pointer-events-none transition-transform"
                 />
@@ -1821,6 +1806,11 @@ function CardHeaderActionButton({
 }) {
   const [hovered, setHovered] = useState(false)
   const isDanger = tone === 'danger'
+  const toneClasses = isActive
+    ? 'bg-input text-text border-border/80 shadow-sm'
+    : isDanger
+      ? 'text-text-muted hover:text-error hover:bg-error/15 border-transparent hover:border-error/20'
+      : 'text-text-muted hover:text-text hover:bg-input/80 border-transparent hover:border-border/30'
 
   return (
     <button
@@ -1837,26 +1827,10 @@ function CardHeaderActionButton({
       onFocus={() => setHovered(true)}
       onBlur={() => setHovered(false)}
       style={{
-        backgroundColor: isActive
-          ? 'rgba(16, 185, 129, 0.95)'
-          : hovered && isDanger
-            ? 'rgba(220, 38, 38, 0.95)'
-            : hovered
-              ? 'rgba(0, 0, 0, 0.92)'
-              : 'rgba(0, 0, 0, 0.78)',
-        borderColor: isActive
-          ? 'rgba(255, 255, 255, 0.9)'
-          : hovered
-            ? 'rgba(255, 255, 255, 0.8)'
-            : 'rgba(255, 255, 255, 0.38)',
-        color: '#ffffff',
-        boxShadow: hovered
-          ? '0 0 0 1px rgba(255, 255, 255, 0.35), 0 6px 18px rgba(0, 0, 0, 0.6)'
-          : '0 4px 14px rgba(0, 0, 0, 0.55)',
-        transform: hovered ? (label ? 'scale(1.04)' : 'scale(1.1)') : 'scale(1)',
+        transform: hovered ? (label ? 'scale(1.04)' : 'scale(1.08)') : 'scale(1)',
         transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
       }}
-      className={`${label ? 'h-9 px-3 gap-1.5 max-w-full' : 'w-8 h-8'} rounded-[10px] flex items-center justify-center border cursor-pointer select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:opacity-40 disabled:cursor-not-allowed`}
+      className={`${label ? 'h-8 px-2.5 gap-1.5 max-w-full' : 'w-7 h-7'} rounded-lg flex items-center justify-center border cursor-pointer select-none focus:outline-none focus-visible:ring-1.5 focus-visible:ring-border disabled:opacity-40 disabled:cursor-not-allowed ${toneClasses}`}
       title={title}
       aria-label={title}
     >
@@ -1864,9 +1838,8 @@ function CardHeaderActionButton({
         style={{
           transform: hovered ? hoverTransform : 'none',
           transition: 'transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1)',
-          filter: 'drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8))',
         }}
-        className="flex items-center justify-center pointer-events-none text-white"
+        className="flex items-center justify-center pointer-events-none"
       >
         {icon}
       </div>
@@ -2019,7 +1992,9 @@ export const CameraCard = memo(function CameraCard({
   hasMonitor = false,
   onContextMenu,
   reconnecting = false,
-  suppressPump = false
+  suppressPump = false,
+  isPaused = false,
+  onTogglePause
 }: {
   camera: CameraInfo
   boxes?: Detection[]
@@ -2055,6 +2030,8 @@ export const CameraCard = memo(function CameraCard({
   // bombeia frames de detecção para ela — o card por trás não precisa
   // duplicar a carga (2 fetchDirectFrame + 2 frame_pump por ciclo).
   suppressPump?: boolean
+  isPaused?: boolean
+  onTogglePause?: () => void
 }): JSX.Element {
   const { t, locale } = useI18n()
   const cardRef = useRef<HTMLDivElement | null>(null)
@@ -2248,6 +2225,7 @@ export const CameraCard = memo(function CameraCard({
   // efeito apenas dispara get_frame para iniciar o stream no backend e guarda
   // o frame para o pump de detecção.
   useEffect(() => {
+    if (isPaused) return
     let cancelled = false
     const warm = async () => {
       try {
@@ -2264,7 +2242,7 @@ export const CameraCard = memo(function CameraCard({
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [camera.id])
+  }, [camera.id, isPaused])
 
   const streamUrl = useMemo(() => {
     const deviceId = camera.id.startsWith('webcam:') ? camera.id.slice('webcam:'.length) : camera.id
@@ -2324,7 +2302,11 @@ export const CameraCard = memo(function CameraCard({
   // Agora há só 1 `getUserMedia` (hidden window) e o preview de ambas é o mesmo
   // caminho de canvas + Worker, garantindo independência real.
   useEffect(() => {
-    if (!isActive) return
+    if (!isActive || isPaused) {
+      setFps(0)
+      setKbs(0)
+      return
+    }
 
     let cancelled = false
     const ac = new AbortController()
@@ -2520,11 +2502,7 @@ export const CameraCard = memo(function CameraCard({
         drawNext(frame)
       },
       onError: () => {
-        if (cancelled) return
-        if (errorRef.current === null) {
-          errorRef.current = t('cameras.unstable')
-          setError(errorRef.current)
-        }
+        // Silent reconnect in background without intrusive overlay
       },
       onFps: () => {},
       onKbs: (measuredKbs) => {
@@ -2548,11 +2526,7 @@ export const CameraCard = memo(function CameraCard({
               drawNext(frame)
             },
             onError: () => {
-              if (cancelled) return
-              if (errorRef.current === null) {
-                errorRef.current = t('cameras.unstable')
-                setError(errorRef.current)
-              }
+              // Silent reconnect in background without intrusive overlay
             },
             onKbs: (measuredKbs) => {
               if (!cancelled) setKbs(measuredKbs)
@@ -2596,11 +2570,7 @@ export const CameraCard = memo(function CameraCard({
           drawNext(frame)
         },
         onError: () => {
-          if (cancelled) return
-          if (errorRef.current === null) {
-            errorRef.current = t('cameras.unstable')
-            setError(errorRef.current)
-          }
+          // Silent reconnect in background without intrusive overlay
         },
         onKbs: (measuredKbs) => {
           if (!cancelled) setKbs(measuredKbs)
@@ -2813,20 +2783,26 @@ export const CameraCard = memo(function CameraCard({
       if (!cancelled && !document.hidden) {
         clearTimeout(timerRef)
         timerRef = setTimeout(run, 0)
+        // Reset imediato da conexão do stream MJPEG para descongelar o canvas na hora
+        try {
+          parserWorkerRef.current?.reset?.()
+        } catch {}
       }
     }
     document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('focus', onVisibility)
 
     return () => {
       cancelled = true
       clearTimeout(timerRef)
       document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('focus', onVisibility)
     }
     // hasMonitor/suppressPump NÃO estão nas deps: mudanças no monitor (poll 5s)
     // NÃO devem reiniciar o loop do pump (causava descarte de detections + POSTs
     // órfãos). A condição é lida via ref a cada ciclo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [camera.id, isActive])
+  }, [camera.id, isActive, isPaused])
 
   const handleTakeSnapshot = async () => {
     setFlashing(true)
@@ -2885,7 +2861,7 @@ export const CameraCard = memo(function CameraCard({
   // freezes mid-stream (frames arrived before, then silence). Webcams are
   // excluded because their host reacquire is destructive to the capture device.
   useEffect(() => {
-    if (!isActive || isWebcam) return
+    if (!isActive || isWebcam || isPaused) return
     const timer = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
       if (!hasFrameRef.current || reloadingRef.current) return
@@ -2898,7 +2874,7 @@ export const CameraCard = memo(function CameraCard({
       void handleReloadCameraRef.current()
     }, 5000)
     return () => clearInterval(timer)
-  }, [isActive, isWebcam, camera.id])
+  }, [isActive, isWebcam, isPaused, camera.id])
 
   return (
     <div
@@ -2955,13 +2931,35 @@ export const CameraCard = memo(function CameraCard({
             ref={frameCanvasRef}
             className={`absolute inset-0 w-full h-full object-cover ${hasFrame || cachedFrameShown ? 'block' : 'opacity-0'}`}
           />
-          {!hasFrame && !cachedFrameShown && (
+          {!hasFrame && !cachedFrameShown && !isPaused && (
             <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-text-muted bg-input/60 p-3 text-center gap-1">
               <VisionBlinkStyleTag />
               <span className="vision-eye-blink">
                 <VisionIcon className="w-5 h-5 text-text-muted" />
               </span>
               <span className="font-medium leading-none">{cameraPlaceholderStatus(camera, reloading || reconnecting, error, isSlow, isUnavailable, t)}</span>
+            </div>
+          )}
+          {isPaused && (
+            <div
+              className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-transparent p-4 text-center cursor-pointer select-none"
+              onClick={(e) => {
+                e.stopPropagation()
+                onTogglePause?.()
+              }}
+            >
+              <div
+                className="w-12 h-12 rounded-full bg-card/85 hover:bg-card border border-border/60 text-text hover:text-emerald-400 flex items-center justify-center mb-2 shadow-2xl backdrop-blur-md transition-all hover:scale-110 active:scale-95 cursor-pointer"
+                title={t('cameras.resumeVideo')}
+              >
+                <svg className="w-5 h-5 ml-0.5" viewBox="0 0 24 24" fill="currentColor">
+                  <polygon points="5 3 19 12 5 21 5 3" />
+                </svg>
+              </div>
+              <div className="bg-card/85 backdrop-blur-md border border-border/50 px-3 py-1 rounded-full shadow-lg flex flex-col items-center">
+                <span className="text-xs font-semibold text-text">{t('cameras.pausedBadge')}</span>
+                <span className="text-[10px] text-text-muted">{t('cameras.pausedSubtitle')}</span>
+              </div>
             </div>
           )}
           {/* Bounding boxes — SVG overlay (filtrado por zona, respeita Mostrar boxes) */}
@@ -2988,7 +2986,7 @@ export const CameraCard = memo(function CameraCard({
 
           {/* Real-time transfer rate in KB/S (top-right corner, Yoosee style) */}
           {hasFrame && kbs > 0 && !isEditingZone ? (
-            <div className="absolute top-2 right-2 z-20 text-[10px] font-mono font-semibold bg-black/65 text-emerald-300 px-1.5 py-0.5 rounded shadow-sm tracking-wide">
+            <div className="absolute top-2 right-2 z-20 text-[10px] font-mono font-semibold bg-card/65 text-accent px-1.5 py-0.5 rounded shadow-sm tracking-wide">
               {kbs} KB/S
             </div>
           ) : null}
@@ -2999,9 +2997,9 @@ export const CameraCard = memo(function CameraCard({
           ) : null}
 
           {error ? (
-            <div className={`absolute z-20 p-3 pointer-events-none ${hasFrame || cachedFrameShown ? 'bottom-2 left-2 right-2 flex justify-center' : 'inset-0 flex items-center justify-center bg-black/75'}`}>
-              <div className="flex items-center gap-2 bg-black/85 backdrop-blur-md px-3 py-1.5 rounded-full border border-amber-500/40 text-xs text-amber-300 shadow-lg animate-pulse">
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping shrink-0" />
+            <div className={`absolute z-20 p-3 pointer-events-none ${hasFrame || cachedFrameShown ? 'bottom-2 left-2 right-2 flex justify-center' : 'inset-0 flex items-center justify-center bg-card/75'}`}>
+              <div className="flex items-center gap-2 bg-card/85 backdrop-blur-md px-3 py-1.5 rounded-full border border-highlight/40 text-xs text-highlight shadow-lg animate-pulse">
+                <span className="w-2 h-2 rounded-full bg-highlight animate-ping shrink-0" />
                 <span>{error}</span>
               </div>
             </div>
@@ -3012,7 +3010,7 @@ export const CameraCard = memo(function CameraCard({
             draggable={false}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
-            className={`absolute top-2.5 right-2.5 z-30 flex items-center gap-2 bg-black/85 backdrop-blur-md p-1.5 rounded-xl border border-white/30 shadow-[0_8px_24px_rgba(0,0,0,0.55)] transition-all duration-200 ${
+            className={`absolute top-0 right-0 z-30 flex items-center gap-0.5 bg-card/90 backdrop-blur-md p-1 rounded-bl-xl border-b border-l border-border/40 shadow-sm transition-all duration-200 ${
               isEditingZone || confirmingRemove
                 ? 'opacity-100 scale-100'
                 : 'opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 focus-within:opacity-100 focus-within:scale-100 max-sm:opacity-100 max-sm:scale-100'
@@ -3020,8 +3018,8 @@ export const CameraCard = memo(function CameraCard({
           >
             {onToggleEditZone ? (
               <CardHeaderActionButton
-                isActive={isEditingZone || Boolean(zone && zone.length >= 3)}
-                hoverTransform="rotate(-30deg) translateY(-2px) scale(1.2)"
+                isActive={isEditingZone}
+                hoverTransform="rotate(-30deg) translateY(-2px) scale(1.15)"
                 title={
                   isEditingZone
                     ? t('cameras.zoneFinishCancel')
@@ -3031,7 +3029,7 @@ export const CameraCard = memo(function CameraCard({
                 }
                 onClick={() => onToggleEditZone()}
                 icon={
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.623l4.353-1.32a2 2 0 0 0 .83-.497z" />
                     <path d="m15 5 4 4" />
                   </svg>
@@ -3040,20 +3038,19 @@ export const CameraCard = memo(function CameraCard({
             ) : null}
             {onToggleShowBoxes ? (
               <CardHeaderActionButton
-                isActive={showBoxes !== false}
-                hoverTransform="scale(1.35)"
+                hoverTransform="scale(1.2)"
                 title={showBoxes === false ? t('cameras.showBoxes') : t('cameras.hideBoxes')}
                 onClick={() => onToggleShowBoxes()}
                 icon={
                   showBoxes === false ? (
-                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.127 2.29" />
                       <path d="M14.084 14.158a3 3 0 0 1-4.242-4.242" />
                       <path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143" />
                       <path d="m2 2 20 20" />
                     </svg>
                   ) : (
-                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
                       <circle cx="12" cy="12" r="3" />
                     </svg>
@@ -3063,18 +3060,17 @@ export const CameraCard = memo(function CameraCard({
             ) : null}
             {onToggleShowZone ? (
               <CardHeaderActionButton
-                isActive={showZone !== false}
-                hoverTransform="scale(1.35)"
+                hoverTransform="scale(1.2)"
                 title={showZone === false ? t('cameras.showZone') : t('cameras.hideZone')}
                 onClick={() => onToggleShowZone()}
                 icon={
                   showZone === false ? (
-                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <polygon points="4 4 19 3 20 15 13 21 3 14" strokeDasharray="3 2" fill="none" />
                       <line x1="2" y1="2" x2="22" y2="22" strokeWidth="2.2" />
                     </svg>
                   ) : (
-                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <polygon points="4 4 19 3 20 15 13 21 3 14" strokeDasharray="3 2" fill="none" />
                       <circle cx="4" cy="4" r="1.5" fill="currentColor" />
                       <circle cx="19" cy="3" r="1.5" fill="currentColor" />
@@ -3086,13 +3082,16 @@ export const CameraCard = memo(function CameraCard({
                 }
               />
             ) : null}
+            {(onToggleEditZone || onToggleShowBoxes || onToggleShowZone) && (onExpand || onRemove) ? (
+              <div className="h-3 w-px bg-border/40 mx-0.5" />
+            ) : null}
             {onExpand ? (
               <CardHeaderActionButton
-                hoverTransform="scale(1.35)"
+                hoverTransform="scale(1.2)"
                 title={t('cameras.expandImage')}
                 onClick={() => handleTriggerExpand()}
                 icon={
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
                   </svg>
                 }
@@ -3101,7 +3100,7 @@ export const CameraCard = memo(function CameraCard({
             {onRemove ? (
               <CardHeaderActionButton
                 tone="danger"
-                hoverTransform="rotate(90deg) scale(1.2)"
+                hoverTransform="rotate(90deg) scale(1.15)"
                 title={
                   camera.source === 'ip'
                     ? t('cameras.removeIpFull')
@@ -3109,7 +3108,7 @@ export const CameraCard = memo(function CameraCard({
                 }
                 onClick={() => setConfirmingRemove(true)}
                 icon={
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="18" y1="6" x2="6" y2="18" />
                     <line x1="6" y1="6" x2="18" y2="18" />
                   </svg>
@@ -3121,7 +3120,7 @@ export const CameraCard = memo(function CameraCard({
           {/* Remove confirmation card: asks before closing/removing the camera */}
           {confirmingRemove && onRemove ? (
             <div
-              className="absolute inset-0 z-40 flex items-center justify-center p-3 bg-black/60"
+              className="absolute inset-0 z-40 flex items-center justify-center p-3 bg-card/60"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation()
@@ -3190,8 +3189,8 @@ export const CameraCard = memo(function CameraCard({
       ) : (
         <div className="flex items-center justify-between px-3 py-2 bg-card/95 shrink-0 border-t border-border/30">
           <span className="text-[11px] text-text-muted font-medium px-1 flex items-center gap-1.5">
-            <span className={`w-1.5 h-1.5 rounded-full ${camera.online ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-            {camera.source === 'webcam' ? t('cameras.optWebcam') : t('cameras.mjpegTag')}
+            <span className={`w-1.5 h-1.5 rounded-full ${isPaused ? 'bg-amber-500' : camera.online ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+            {isPaused ? t('cameras.pausedBadge') : camera.source === 'webcam' ? t('cameras.optWebcam') : t('cameras.mjpegTag')}
           </span>
 
           <div className="flex items-center gap-1.5 shrink-0">
@@ -4107,7 +4106,9 @@ function ExpandedCameraModal({
   onSaveZone,
   onClearZone,
   otherCameras = EMPTY_CAMERAS,
-  onSelectCamera
+  onSelectCamera,
+  isPaused = false,
+  onTogglePause
 }: {
   camera: CameraInfo | null
   detections: Record<string, Detection[]>
@@ -4134,6 +4135,8 @@ function ExpandedCameraModal({
   onClearZone?: () => void
   otherCameras?: CameraInfo[]
   onSelectCamera?: (camera: CameraInfo) => void
+  isPaused?: boolean
+  onTogglePause?: () => void
 }): JSX.Element | null {
   const { t, locale } = useI18n()
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -4394,7 +4397,7 @@ function ExpandedCameraModal({
       clearTimeout(t0)
       clearInterval(timer)
     }
-  }, [camera, onDetections])
+  }, [camera, isPaused, onDetections])
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const isWebcam = Boolean(camera?.source === 'webcam' || camera?.id.startsWith('webcam:'))
@@ -4531,11 +4534,7 @@ function ExpandedCameraModal({
         drawNext(frame)
       },
       onError: () => {
-        if (cancelled) return
-        if (errorRef.current === null) {
-          errorRef.current = t('cameras.unstable')
-          setError(errorRef.current)
-        }
+        // Silent reconnect in background without intrusive overlay
       },
       onFps: () => {},
       onKbs: (measuredKbs) => {
@@ -4558,11 +4557,7 @@ function ExpandedCameraModal({
               drawNext(frame)
             },
             onError: () => {
-              if (cancelled) return
-              if (errorRef.current === null) {
-                errorRef.current = t('cameras.unstable')
-                setError(errorRef.current)
-              }
+              // Silent reconnect in background without intrusive overlay
             },
             onKbs: (measuredKbs) => {
               if (!cancelled) setKbs(measuredKbs)
@@ -4595,11 +4590,7 @@ function ExpandedCameraModal({
           drawNext(frame)
         },
         onError: () => {
-          if (cancelled) return
-          if (errorRef.current === null) {
-            errorRef.current = t('cameras.unstable')
-            setError(errorRef.current)
-          }
+          // Silent reconnect in background without intrusive overlay
         },
         onKbs: (measuredKbs) => {
           if (!cancelled) setKbs(measuredKbs)
@@ -4613,7 +4604,7 @@ function ExpandedCameraModal({
       ac.abort()
       ro?.disconnect()
     }
-  }, [camera, streamUrl])
+  }, [camera, isPaused, streamUrl])
 
   useEffect(() => {
     if (!camera) return
@@ -4650,10 +4641,10 @@ function ExpandedCameraModal({
       <div className="h-full flex flex-col min-h-0">
         <div ref={headerRef} data-testid="expanded-header" className="relative z-40 flex flex-wrap items-center gap-x-3 gap-y-2 px-3 sm:px-6 py-3 border-b border-border/40 bg-card/85 backdrop-blur-md shrink-0">
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${cachedFrameShown ? 'bg-amber-400 animate-pulse' : camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
+            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${isPaused ? 'bg-amber-400' : cachedFrameShown ? 'bg-amber-400 animate-pulse' : camera.online ? 'bg-emerald-400' : 'bg-red-500'}`} />
             <h2 className="text-sm sm:text-base font-bold text-text truncate min-w-0">{formatCameraName(camera.name, camera.source, t)}</h2>
-            <span className="hidden sm:inline text-xs text-text-muted shrink-0">({isWebcam ? t('cameras.optWebcam') : t('cameras.ipSlashRtsp')})</span>
-            {kbs > 0 ? (
+            <span className="hidden sm:inline text-xs text-text-muted shrink-0">({isPaused ? t('cameras.pausedBadge') : isWebcam ? t('cameras.optWebcam') : t('cameras.ipSlashRtsp')})</span>
+            {kbs > 0 && !isPaused ? (
               <span className="text-[11px] font-mono font-semibold bg-black/60 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/20 shrink-0">
                 {kbs} KB/S
               </span>
@@ -4781,6 +4772,27 @@ function ExpandedCameraModal({
               </svg>
             }
           >
+            {onTogglePause ? (
+              <ToolbarMenuItem
+                label={isPaused ? t('cameras.resumeVideo') : t('cameras.pauseVideo')}
+                onClick={() => {
+                  setOpenMenu(null)
+                  onTogglePause()
+                }}
+                icon={
+                  isPaused ? (
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                  ) : (
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="6" y="4" width="4" height="16" />
+                      <rect x="14" y="4" width="4" height="16" />
+                    </svg>
+                  )
+                }
+              />
+            ) : null}
             <ToolbarMenuItem
               label={
                 printStatus === 'success'
@@ -4979,10 +4991,32 @@ function ExpandedCameraModal({
                 className={`max-w-full max-h-full w-full h-full ${fillMode === 'cover' ? 'object-cover' : 'object-contain'} ${ready || cachedFrameShown ? 'block' : 'opacity-0'}`}
               />
 
-              {!ready && !cachedFrameShown && (
+              {!ready && !cachedFrameShown && !isPaused && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center text-xs text-text-muted bg-input/60 p-4 text-center gap-2 pointer-events-none z-10">
                   <span className="w-6 h-6 rounded-full border-2 border-emerald-400/30 border-t-emerald-400 animate-spin" />
                   <span className="font-medium">{cameraPlaceholderStatus(camera, false, error, false, false, t)}</span>
+                </div>
+              )}
+              {isPaused && (
+                <div
+                  className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-transparent p-4 text-center cursor-pointer select-none"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onTogglePause?.()
+                  }}
+                >
+                  <div
+                    className="w-14 h-14 rounded-full bg-card/85 hover:bg-card border border-border/60 text-text hover:text-emerald-400 flex items-center justify-center mb-2 shadow-2xl backdrop-blur-md transition-all hover:scale-110 active:scale-95 cursor-pointer"
+                    title={t('cameras.resumeVideo')}
+                  >
+                    <svg className="w-6 h-6 ml-0.5" viewBox="0 0 24 24" fill="currentColor">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                  </div>
+                  <div className="bg-card/85 backdrop-blur-md border border-border/50 px-3.5 py-1.5 rounded-full shadow-lg flex flex-col items-center">
+                    <span className="text-sm font-semibold text-text">{t('cameras.pausedBadge')}</span>
+                    <span className="text-xs text-text-muted mt-0.5">{t('cameras.pausedSubtitle')}</span>
+                  </div>
                 </div>
               )}
 
@@ -5136,8 +5170,7 @@ function ExpandedPrintModal({
             <button
               disabled={busy}
               onClick={() => void onDelete(snap.id)}
-              className="text-xs font-medium rounded-lg bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white px-3 py-1.5 transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
-              style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
+              className="text-xs font-medium rounded-lg bg-error hover:bg-error/80 disabled:opacity-50 text-text px-3 py-1.5 transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -5344,6 +5377,33 @@ function eventPlaceholders(translate?: TranslateFn): Array<{ token: string; labe
     { token: '{ts}', label: pick('monitoring.phTime', 'Horário') },
     { token: '{event.imageDataUri}', label: pick('monitoring.phImage', 'Imagem') }
   ]
+}
+
+/**
+ * Switches an action image template between the clean snapshot and the
+ * annotated variant with detection boxes burned in. Preserves the brace
+ * style the action already uses ({event.*} or {{trigger.payload.*}}), so
+ * the toggle works for both legacy monitors and Hub automations. Missing
+ * images fall back to the clean default (no change needed for opt-out).
+ */
+export function withBoxesImageTemplate(image: unknown, enable: boolean): unknown {
+  if (enable) {
+    if (typeof image === 'string' && image.includes('imageDataUri')) {
+      if (image.includes('annotatedImageDataUri')) return image
+      return image.split('imageDataUri').join('annotatedImageDataUri')
+    }
+    return '{event.annotatedImageDataUri}'
+  }
+  if (typeof image === 'string' && image.includes('annotatedImageDataUri')) {
+    return image.split('annotatedImageDataUri').join('imageDataUri')
+  }
+  return image
+}
+
+function isOverlayAction(item: { target?: string; tool?: string; action?: string; action_id?: string }): boolean {
+  const tool = String(item.tool || '')
+  const actionId = String((item as { action?: unknown }).action || (item as { action_id?: unknown }).action_id || '')
+  return tool === 'show_overlay' || actionId.includes('show_overlay')
 }
 
 // Human-readable fallback labels (pt-BR) for tool and field names shown in
@@ -5637,8 +5697,16 @@ export function ActionEditor({
                       const nextArgs = { ...(item.args || {}) }
                       if (checked) {
                         nextArgs.includeBoxes = true
+                        if (!isOverlayAction(item) && 'image' in nextArgs) {
+                          nextArgs.image = withBoxesImageTemplate(nextArgs.image, true)
+                        } else if (!isOverlayAction(item) && !('image' in nextArgs)) {
+                          nextArgs.image = withBoxesImageTemplate(undefined, true)
+                        }
                       } else {
                         delete nextArgs.includeBoxes
+                        if (!isOverlayAction(item) && 'image' in nextArgs) {
+                          nextArgs.image = withBoxesImageTemplate(nextArgs.image, false)
+                        }
                       }
                       return { ...item, args: Object.keys(nextArgs).length ? nextArgs : undefined }
                     })
@@ -6565,6 +6633,9 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   })
   const [alerts, setAlerts] = useState<Alert[]>([])
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
+  const [alertsPage, setAlertsPage] = useState(1)
+  const [galleryPage, setGalleryPage] = useState(1)
+  const ITEMS_PER_PAGE = 8
   const [config, setConfig] = useState<VisionConfig>(() => {
     try {
       const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:config`) : null
@@ -6808,16 +6879,13 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
   }, [cameras])
 
   useEffect(() => {
-    const handleClick = () => setContextMenu(null)
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setContextMenu(null)
     }
     if (contextMenu) {
-      window.addEventListener('click', handleClick)
       window.addEventListener('keydown', handleKeyDown)
     }
     return () => {
-      window.removeEventListener('click', handleClick)
       window.removeEventListener('keydown', handleKeyDown)
     }
   }, [contextMenu])
@@ -7437,6 +7505,32 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     void poll()
   }, [config.showZones, poll])
 
+  const handleTogglePauseCamera = useCallback(async (cameraId: string) => {
+    setContextMenu(null)
+    const currentPaused = config.pausedCameras ?? []
+    const isPaused = currentPaused.includes(cameraId)
+    const nextPaused = isPaused
+      ? currentPaused.filter((id) => id !== cameraId)
+      : [...currentPaused, cameraId]
+
+    setConfig((prev) => {
+      const updated = { ...prev, pausedCameras: nextPaused }
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(updated))
+        }
+      } catch {}
+      return updated
+    })
+
+    try {
+      await command('configure', { pausedCameras: nextPaused })
+    } catch {
+      // Optimistic update stays; the next poll converges with the backend.
+    }
+    void poll()
+  }, [config.pausedCameras, poll])
+
   const handleToggleRecognition = useCallback(async (camera: CameraInfo) => {
     setContextMenu(null)
     const targets = findCameraMonitors(camera, monitors)
@@ -7863,6 +7957,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 onDragEnd={handleDragEnd}
                 hasMonitor={monitors.some((m) => m.cameraId === camera.id && !m.paused)}
                 suppressPump={expandedCamera?.id === camera.id}
+                isPaused={config.pausedCameras?.includes(camera.id) ?? false}
+                onTogglePause={() => void handleTogglePauseCamera(camera.id)}
               />
             ))}
             <AddCameraCard onClick={() => setIsModalOpen(true)} />
@@ -8164,8 +8260,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                   <span className="text-xs text-red-600 dark:text-red-400 font-semibold">{t('alerts.clearPrompt')}</span>
                   <button
                     onClick={() => void handleClearAlerts()}
-                    className="text-xs px-2.5 py-1 rounded-lg bg-red-500 hover:bg-red-600 text-white font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
-                    style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
+                    className="text-xs px-2.5 py-1 rounded-lg bg-error hover:bg-error/80 text-text font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
                   >
                     {t('alerts.confirmYes')}
                   </button>
@@ -8194,85 +8289,95 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               {t('alerts.emptyFeed')}
             </div>
           ) : (
-            alerts.map((alert: Alert) => {
-              const imgSrc =
-                alert.imageDataUri ||
-                (alert.snapshotId
-                  ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
-                  : '')
-              return (
-                <div
-                  key={alertKey(alert)}
-                  onContextMenu={(e) => handleAlertContextMenu(e, alert)}
-                  className="flex gap-3.5 items-center justify-between rounded-2xl border border-border/40 bg-card p-3.5 hover:border-border/80 transition-all shadow-md select-none"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <p className="text-sm font-semibold text-text truncate max-w-[70%]">
-                        {formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')}
-                        {alert.className ? ` · ${localizedClassLabel(alert.className, t)}` : ''}
-                        {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
-                      </p>
-                      {alert.ts ? (
-                        <span className="text-[11px] text-text-muted font-medium shrink-0 bg-input px-2 py-0.5 rounded-md border border-border/30">
-                          {formatTime(alert.ts, locale)}
-                        </span>
-                      ) : null}
-                    </div>
-                    {alert.description || alert.triggeredBy ? (
-                      <p className="text-xs text-text-muted mt-1">
-                        {alert.description ? `${alert.description} ` : ''}
-                        {alert.triggeredBy ? (
-                          <span className="text-text-muted/80">{localizedTriggerLabel(alert, t)}</span>
-                        ) : null}
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="flex items-center gap-2.5 shrink-0">
-                    {imgSrc ? (
-                      <div
-                        className="group relative w-32 h-20 rounded-xl bg-black shrink-0 overflow-hidden cursor-pointer border border-border/40 hover:border-emerald-500/60 transition-all shadow-sm"
-                        onClick={() => setExpandedAlert(alert)}
-                        onContextMenu={(e) => handleAlertContextMenu(e, alert)}
-                        title={t('alerts.expandHint')}
-                      >
-                        <AlertCanvasOverlay
-                          imageDataUri={imgSrc}
-                          boxes={alert.boxes}
-                          objectFit="object-cover"
-                        />
-                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-20">
-                          <div className="w-8 h-8 rounded-full bg-black/70 text-white flex items-center justify-center backdrop-blur-sm shadow border border-white/20 group-hover:scale-110 transition-transform">
-                            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-                            </svg>
-                          </div>
-                        </div>
-                      </div>
-                    ) : null}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        void handleDeleteAlert(alert)
-                      }}
-                      title={t('alerts.deleteOne')}
-                      className="p-1.5 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors shrink-0 cursor-pointer"
+            <>
+              {alerts
+                .slice((alertsPage - 1) * ITEMS_PER_PAGE, alertsPage * ITEMS_PER_PAGE)
+                .map((alert: Alert) => {
+                  const imgSrc =
+                    alert.imageDataUri ||
+                    (alert.snapshotId
+                      ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
+                      : '')
+                  return (
+                    <div
+                      key={alertKey(alert)}
+                      onContextMenu={(e) => handleAlertContextMenu(e, alert)}
+                      className="flex gap-3.5 items-center justify-between rounded-2xl border border-border/40 bg-card p-3.5 hover:border-border/80 transition-all shadow-md select-none"
                     >
-                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              )
-            })
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-sm font-semibold text-text truncate max-w-[70%]">
+                            {formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')}
+                            {alert.className ? ` · ${localizedClassLabel(alert.className, t)}` : ''}
+                            {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
+                          </p>
+                          {alert.ts ? (
+                            <span className="text-[11px] text-text-muted font-medium shrink-0 bg-input px-2 py-0.5 rounded-md border border-border/30">
+                              {formatTime(alert.ts, locale)}
+                            </span>
+                          ) : null}
+                        </div>
+                        {alert.description || alert.triggeredBy ? (
+                          <p className="text-xs text-text-muted mt-1">
+                            {alert.description ? `${alert.description} ` : ''}
+                            {alert.triggeredBy ? (
+                              <span className="text-text-muted/80">{localizedTriggerLabel(alert, t)}</span>
+                            ) : null}
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className="flex items-center gap-2.5 shrink-0">
+                        {imgSrc ? (
+                          <div
+                            className="group relative w-32 h-20 rounded-xl bg-black shrink-0 overflow-hidden cursor-pointer border border-border/40 hover:border-emerald-500/60 transition-all shadow-sm"
+                            onClick={() => setExpandedAlert(alert)}
+                            onContextMenu={(e) => handleAlertContextMenu(e, alert)}
+                            title={t('alerts.expandHint')}
+                          >
+                            <AlertCanvasOverlay
+                              imageDataUri={imgSrc}
+                              boxes={alert.boxes}
+                              objectFit="object-cover"
+                            />
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-20">
+                              <div className="w-8 h-8 rounded-full bg-black/70 text-white flex items-center justify-center backdrop-blur-sm shadow border border-white/20 group-hover:scale-110 transition-transform">
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                                </svg>
+                              </div>
+                            </div>
+                          </div>
+                        ) : null}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void handleDeleteAlert(alert)
+                          }}
+                          title={t('alerts.deleteOne')}
+                          className="p-1.5 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors shrink-0 cursor-pointer"
+                        >
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              <Pagination
+                page={alertsPage}
+                pageSize={ITEMS_PER_PAGE}
+                totalItems={alerts.length}
+                onPageChange={setAlertsPage}
+              />
+            </>
           )}
         </section>
       ) : null}
 
       {/* Tab: Prints Gallery */}
       {activeTab === 'gallery' ? (
-        <section>
+        <section className="space-y-3">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-semibold text-text">{t('gallery.cameraPrints')}</h3>
             <div className="flex items-center gap-3">
@@ -8285,8 +8390,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                     <span className="text-xs text-red-600 dark:text-red-400 font-semibold">{t('gallery.deleteAllPrompt')}</span>
                     <button
                       onClick={() => void handleClearAllPrints()}
-                      className="text-xs px-2.5 py-1 rounded-lg bg-red-500 hover:bg-red-600 text-white font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
-                      style={{ backgroundColor: '#dc2626', color: '#ffffff' }}
+                      className="text-xs px-2.5 py-1 rounded-lg bg-error hover:bg-error/80 text-text font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
                     >
                       {t('gallery.confirmDeleteYes')}
                     </button>
@@ -8316,51 +8420,61 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               {t('gallery.emptyHint')}
             </div>
           ) : (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 auto-rows-fr">
-              {snapshots.map((snap: Snapshot) => (
-                <figure
-                  key={snap.id}
-                  onClick={() => setExpandedPrint(snap)}
-                  onContextMenu={(e) => handleSnapshotContextMenu(e, snap)}
-                  className="group rounded-xl overflow-hidden border border-border/40 bg-card cursor-pointer hover:border-emerald-500/50 transition-all shadow-md flex flex-col h-full select-none"
-                >
-                  <div className="relative w-full aspect-video bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
-                    <img
-                      src={
-                        snap.imageDataUri ||
-                        `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${snap.id}.jpg`)}`
-                      }
-                      alt={snap.description || t('gallery.printAlt')}
-                      loading="lazy"
-                      className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                    />
-                    <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                      <span className="text-xs font-medium text-white bg-black/60 px-2 py-1 rounded-md backdrop-blur-sm">
-                        {t('gallery.enlargePrint')}
-                      </span>
-                    </div>
-                  </div>
-                  <figcaption className="px-2.5 py-2 flex-1 flex flex-col justify-between">
-                    <p className="text-[11px] text-text font-medium truncate">{snap.description || formatTime(snap.ts, locale)}</p>
-                    <div className="flex items-center justify-between mt-1 pt-1 border-t border-border/20">
-                      <span className="text-[10px] text-text-muted">{formatTime(snap.ts, locale)}</span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          void handleDeletePrint(snap.id)
-                        }}
-                        title={t('gallery.deletePrint')}
-                        className="p-1 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors cursor-pointer"
-                      >
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                        </svg>
-                      </button>
-                    </div>
-                  </figcaption>
-                </figure>
-              ))}
-            </div>
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 auto-rows-fr">
+                {snapshots
+                  .slice((galleryPage - 1) * ITEMS_PER_PAGE, galleryPage * ITEMS_PER_PAGE)
+                  .map((snap: Snapshot) => (
+                    <figure
+                      key={snap.id}
+                      onClick={() => setExpandedPrint(snap)}
+                      onContextMenu={(e) => handleSnapshotContextMenu(e, snap)}
+                      className="group rounded-xl overflow-hidden border border-border/40 bg-card cursor-pointer hover:border-emerald-500/50 transition-all shadow-md flex flex-col h-full select-none"
+                    >
+                      <div className="relative w-full aspect-video bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
+                        <img
+                          src={
+                            snap.imageDataUri ||
+                            `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${snap.id}.jpg`)}`
+                          }
+                          alt={snap.description || t('gallery.printAlt')}
+                          loading="lazy"
+                          className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                        />
+                        <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                          <span className="text-xs font-medium text-white bg-black/60 px-2 py-1 rounded-md backdrop-blur-sm">
+                            {t('gallery.enlargePrint')}
+                          </span>
+                        </div>
+                      </div>
+                      <figcaption className="px-2.5 py-2 flex-1 flex flex-col justify-between">
+                        <p className="text-[11px] text-text font-medium truncate">{snap.description || formatTime(snap.ts, locale)}</p>
+                        <div className="flex items-center justify-between mt-1 pt-1 border-t border-border/20">
+                          <span className="text-[10px] text-text-muted">{formatTime(snap.ts, locale)}</span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void handleDeletePrint(snap.id)
+                            }}
+                            title={t('gallery.deletePrint')}
+                            className="p-1 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors cursor-pointer"
+                          >
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </button>
+                        </div>
+                      </figcaption>
+                    </figure>
+                  ))}
+              </div>
+              <Pagination
+                page={galleryPage}
+                pageSize={ITEMS_PER_PAGE}
+                totalItems={snapshots.length}
+                onPageChange={setGalleryPage}
+              />
+            </>
           )}
         </section>
       ) : null}
@@ -8497,6 +8611,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         onClearZone={() => expandedCamera && void handleClearCameraZone(expandedCamera.id)}
         otherCameras={expandedCamera ? displayedCameras.filter((c) => c.id !== expandedCamera.id) : EMPTY_CAMERAS}
         onSelectCamera={handleSelectExpandedCamera}
+        isPaused={expandedCamera ? config.pausedCameras?.includes(expandedCamera.id) ?? false : false}
+        onTogglePause={expandedCamera ? () => void handleTogglePauseCamera(expandedCamera.id) : undefined}
       />
 
       <ExpandedPrintModal
@@ -8515,21 +8631,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           ? (() => {
             const cameraMonitors = findCameraMonitors(target.camera, monitors)
             const hasActiveRecognition = cameraMonitors.some((m) => !m.paused)
-            return [
-              {
-                id: 'edit',
-                label: t('cameras.edit'),
-                onClick: () => void handleEditCamera(target.camera)
-              },
-              {
-                id: 'zone',
-                label:
-                  config.detectionZones?.[target.camera.id] &&
-                  config.detectionZones[target.camera.id].length >= 3
-                    ? t('cameras.zoneEditActive')
-                    : t('cameras.zoneDefine'),
-                onClick: () => handleToggleEditZone(target.camera.id)
-              },
+            const isPausedCam = config.pausedCameras?.includes(target.camera.id) ?? false
+            const viewItems: ContextMenuOption[] = [
               {
                 id: 'boxes',
                 label: config.showBoxes?.[target.camera.id] === false ? t('cameras.showBoxes') : t('cameras.hideBoxes'),
@@ -8539,11 +8642,6 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 id: 'zones',
                 label: config.showZones?.[target.camera.id] === false ? t('cameras.showZone') : t('cameras.hideZone'),
                 onClick: () => void handleToggleShowZones(target.camera.id)
-              },
-              {
-                id: 'snapshot',
-                label: t('cameras.takeSnapshot'),
-                onClick: () => void takeSnapshot(target.camera.id)
               },
               {
                 id: 'expand',
@@ -8556,6 +8654,19 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                     handleExpandCamera(target.camera)
                   }
                 }
+              },
+              {
+                id: 'recognition',
+                label: hasActiveRecognition ? t('cameras.disableRecognition') : t('cameras.enableRecognition'),
+                disabled: cameraMonitors.length === 0,
+                onClick: () => void handleToggleRecognition(target.camera)
+              }
+            ]
+            const actionsItems: ContextMenuOption[] = [
+              {
+                id: 'snapshot',
+                label: t('cameras.takeSnapshot'),
+                onClick: () => void takeSnapshot(target.camera.id)
               },
               {
                 id: 'monitor',
@@ -8574,6 +8685,32 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                 id: 'reload',
                 label: t('cameras.reload'),
                 onClick: () => void handleReloadCamera()
+              }
+            ]
+            const cameraItems: ContextMenuOption[] = [
+              {
+                id: 'edit',
+                label: t('cameras.edit'),
+                onClick: () => void handleEditCamera(target.camera)
+              },
+              {
+                id: 'pause-video',
+                label: isPausedCam ? t('cameras.resumeVideo') : t('cameras.pauseVideo'),
+                onClick: () => void handleTogglePauseCamera(target.camera.id)
+              },
+              {
+                id: 'zone',
+                label:
+                  config.detectionZones?.[target.camera.id] &&
+                  config.detectionZones[target.camera.id].length >= 3
+                    ? t('cameras.zoneEditActive')
+                    : t('cameras.zoneDefine'),
+                onClick: () => handleToggleEditZone(target.camera.id)
+              },
+              {
+                id: 'copy-url',
+                label: t('cameras.copyUrl'),
+                onClick: () => void handleCopyCameraUrl(target.camera)
               },
               {
                 id: 'remove',
@@ -8586,17 +8723,23 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
                   }
                   void handleRemoveCamera(target.camera.id)
                 }
+              }
+            ]
+            return [
+              {
+                id: 'group-camera',
+                label: t('cameras.cameraGroup'),
+                children: cameraItems
               },
               {
-                id: 'recognition',
-                label: hasActiveRecognition ? t('cameras.disableRecognition') : t('cameras.enableRecognition'),
-                disabled: cameraMonitors.length === 0,
-                onClick: () => void handleToggleRecognition(target.camera)
+                id: 'group-view',
+                label: t('cameras.viewGroup'),
+                children: viewItems
               },
               {
-                id: 'copy-url',
-                label: t('cameras.copyUrl'),
-                onClick: () => void handleCopyCameraUrl(target.camera)
+                id: 'group-actions',
+                label: t('cameras.actionsGroup'),
+                children: actionsItems
               }
             ]
           })()

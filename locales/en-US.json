@@ -29,6 +29,10 @@
     "edit": "Edit Camera",
     "delete": "Delete Camera",
     "deleteConfirm": "Are you sure you want to remove this camera?",
+    "pauseVideo": "Pause video",
+    "resumeVideo": "Resume video",
+    "pausedBadge": "Paused",
+    "pausedSubtitle": "Click to resume video",
     "name": "Camera Name",
     "source": "Camera Type",
     "webcam": "Local Webcam (USB)",
@@ -507,5 +511,25 @@
     "daysLabel": "Storage days (default: 7)",
     "maxFilesLabel": "Maximum stored files (default: 200)",
     "localNote": "Snapshots are stored locally on your computer. Live video frames are never written to disk."
+  },
+  "widget": {
+    "live": {
+      "title": "Live camera",
+      "loading": "Connecting…",
+      "empty": "No frame yet.",
+      "refresh": "Refresh",
+      "needsSetup": "Add again from the Gallery and select a camera."
+    },
+    "lastDetection": {
+      "title": "Last detection",
+      "loading": "Loading…",
+      "empty": "No detections yet."
+    }
+  },
+  "pagination": {
+    "showing": "Showing {from} to {to} of {total}",
+    "previous": "Previous",
+    "next": "Next",
+    "pageOf": "Page {page} of {pages}"
   }
 }

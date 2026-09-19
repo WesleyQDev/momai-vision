@@ -17,7 +17,8 @@ O MomAI Vision é o motor de percepção visual local do assistente. Ele analisa
 ## Actions (Ações Disponíveis)
 
 1. **`momai-vision.show_overlay` (AÇÃO PADRÃO E PRINCIPAL DE ALERTA)**:
-   - Exibe o card flutuante personalizado (overlay) da MomAI Vision na tela com a foto capturada em tempo real e as caixas de detecção (bounding boxes) desenhadas sobre a pessoa ou objeto detectado.
+   - Exibe o card flutuante personalizado (overlay) da MomAI Vision na tela com a foto limpa capturada em tempo real, sem caixas de detecção por padrão. As caixas só aparecem com opt-in explícito (`includeBoxes: true`).
+   - Fotos enviadas ao WhatsApp usam `{{trigger.payload.imageDataUri}}` (limpa) por padrão; `{{trigger.payload.annotatedImageDataUri}}` só com opt-in.
    - **REGRA OBRIGATÓRIA PARA O ASSISTENTE (LLM)**:
      - Sempre que o usuário solicitar para monitorar câmera e "me avise", "notifique", "avise na tela", "mostre o alerta" ou "envie uma notificação", **VOCÊ DEVE INDUZIR E USAR COMO AÇÃO PADRÃO: `momai-vision.show_overlay`**!
      - **NÃO UTILIZE `system.notify`** para regras de visão por padrão! O `system.notify` gera apenas uma notificação genérica de texto do sistema operacional sem imagem. O overlay flutuante (`momai-vision.show_overlay`) é a experiência rica nativa do MomAI Vision. Apenas use `system.notify` se o usuário pedir explicitamente "notificação do windows" ou "notificação simples do sistema".

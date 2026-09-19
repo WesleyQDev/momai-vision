@@ -7,7 +7,7 @@ beforeEach(() => {
 })
 
 describe('ActionEditor — Enviar com boxes por ação (MOM-171)', () => {
-  it('liga e desliga includeBoxes sem tocar no resto dos args', async () => {
+  it('liga includeBoxes e troca a imagem limpa pela anotada', async () => {
     const onChange = vi.fn()
     const actions = [{ id: 'a1', target: 'whatsapp', tool: 'send_message', args: { contact: 'Ana' } }]
     render(<ActionEditor actions={actions} onChange={onChange} />)
@@ -18,7 +18,7 @@ describe('ActionEditor — Enviar com boxes por ação (MOM-171)', () => {
     fireEvent.click(toggle)
     expect(onChange).toHaveBeenCalledTimes(1)
     expect(onChange.mock.calls[0][0]).toEqual([
-      { id: 'a1', target: 'whatsapp', tool: 'send_message', args: { contact: 'Ana', includeBoxes: true } }
+      { id: 'a1', target: 'whatsapp', tool: 'send_message', args: { contact: 'Ana', includeBoxes: true, image: '{event.annotatedImageDataUri}' } }
     ])
   })
 

@@ -30,7 +30,7 @@ funcionando mesmo com a M## Ferramentas
 
 - **REGRA DE OURO PARA O ASSISTENTE (LLM)**:
   - Sempre que o usuário solicitar uma automação, alerta ou notificação envolvendo o MomAI Vision (ex.: avisar, notificar, mandar alerta na tela quando a câmera detectar algo), o assistente **DEVE APENAS CHAMAR A FERRAMENTA `create_automation`** (da skill `automation`).
-  - **AÇÃO PADRÃO DE ALERTA**: A ação padrão e preferencial que você deve utilizar é **`momai-vision.show_overlay`** (que abre o card flutuante personalizado do MomAI Vision com a foto capturada e caixas de detecção). **NÃO use `system.notify`** a menos que o usuário peça especificamente uma notificação simples do Windows/sistema.
+  - **AÇÃO PADRÃO DE ALERTA**: A ação padrão e preferencial que você deve utilizar é **`momai-vision.show_overlay`** (que abre o card flutuante personalizado do MomAI Vision com a foto limpa capturada, sem caixas por padrão). **NÃO use `system.notify`** a menos que o usuário peça especificamente uma notificação simples do Windows/sistema.
   - Exemplo padrão: `actions: [{ "action_id": "momai-vision.show_overlay", "params": { "cameraId": "{{trigger.payload.cameraId}}", "description": "{{trigger.payload.description}}", "imageDataUri": "{{trigger.payload.imageDataUri}}" } }]`.
   - Se o usuário pedir canais adicionais (ex.: avisar no WhatsApp), combine as ações: `momai-vision.show_overlay` E `momai-whatsapp.send_message`.
   - **NÃO chame nenhuma ferramenta individual de monitoramento visual antes.** Execute **somente** `create_automation`.

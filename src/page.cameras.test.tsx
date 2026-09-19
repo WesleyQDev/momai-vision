@@ -19,6 +19,7 @@ interface ServerState {
   cameras: CameraInfo[]
   selectedCameras: string[]
   ipCameras: Array<{ id: string; name: string; url: string }>
+  pausedCameras?: string[]
 }
 
 // In-memory fake of the extension backend: list_cameras/get_status configure
@@ -1046,4 +1047,76 @@ describe('VisionPage — último frame em cache no card', () => {
     expect(reloadBtn.querySelector('svg')?.classList.contains('animate-spin')).toBe(true)
   })
 })
+
+describe('VisionPage — pausar e retomar vídeo da câmera', () => {
+  it('exibe opção Pausar vídeo no menu de contexto e persiste ao clicar', async () => {
+    const CAM = {
+      id: 'ip:rtsp://192.168.0.2:554/onvif2',
+      name: 'Garagem',
+      source: 'ip',
+      online: true,
+      monitors: 0
+    } as const
+    const { calls } = setupServer({
+      cameras: [{ ...CAM }],
+      selectedCameras: [CAM.id],
+      ipCameras: [{ id: CAM.id, name: 'Garagem', url: 'rtsp://192.168.0.2:554/onvif2' }]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    const card = screen.getByText('Garagem').closest('.group')
+    expect(card).toBeTruthy()
+    fireEvent.contextMenu(card!)
+
+    const cameraGroup = await screen.findByRole('menuitem', { name: 'Câmera' })
+    fireEvent.mouseEnter(cameraGroup.parentElement!)
+    const pauseItem = await screen.findByText('Pausar vídeo')
+    expect(pauseItem).toBeTruthy()
+
+    fireEvent.click(pauseItem)
+
+    await waitFor(() => {
+      const configureCall = calls.find((c) => c.toolName === 'configure' && c.args.pausedCameras !== undefined)
+      expect(configureCall).toBeTruthy()
+      expect(configureCall!.args.pausedCameras).toContain(CAM.id)
+    })
+  })
+
+  it('exibe badge e overlay de Pausada quando a câmera está na lista de pausedCameras', async () => {
+    const CAM = {
+      id: 'ip:rtsp://192.168.0.2:554/onvif2',
+      name: 'Garagem',
+      source: 'ip',
+      online: true,
+      monitors: 0
+    } as const
+    localStorage.setItem('momai-vision:config', JSON.stringify({
+      selectedCameras: [CAM.id],
+      pausedCameras: [CAM.id]
+    }))
+    const { calls } = setupServer({
+      cameras: [{ ...CAM }],
+      selectedCameras: [CAM.id],
+      pausedCameras: [CAM.id],
+      ipCameras: [{ id: CAM.id, name: 'Garagem', url: 'rtsp://192.168.0.2:554/onvif2' }]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    expect(screen.getAllByText('Pausada').length).toBeGreaterThan(0)
+    expect(screen.getByText('Clique para retomar o vídeo')).toBeTruthy()
+
+    const resumeBtn = screen.getByTitle('Retomar vídeo')
+    expect(resumeBtn).toBeTruthy()
+    fireEvent.click(resumeBtn)
+
+    await waitFor(() => {
+      const configureCall = calls.find((c) => c.toolName === 'configure' && c.args.pausedCameras !== undefined)
+      expect(configureCall).toBeTruthy()
+      expect(configureCall!.args.pausedCameras).toEqual([])
+    })
+  })
+})
+
 

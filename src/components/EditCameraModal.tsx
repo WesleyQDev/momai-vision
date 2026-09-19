@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { getSDK } from 'momai:sdk'
 import { useI18n } from '../hooks/useI18n'
+import { useWindowMaximized } from '../hooks/useWindowMaximized'
 import {
   PREVIEW_WIDTH_DEFAULT,
   PREVIEW_WIDTH_OPTIONS,
@@ -43,6 +44,7 @@ function isValidCameraUrl(url: string): boolean {
 
 export default function EditCameraModal({ target, onClose, onSave, onCacheCleared }: EditCameraModalProps): JSX.Element | null {
   const { t } = useI18n()
+  const isMaximized = useWindowMaximized()
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [transport, setTransport] = useState<'tcp' | 'udp'>('udp')
@@ -141,13 +143,19 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
-      className="absolute inset-0 z-[100] animate-fadeIn overflow-y-auto pointer-events-auto grid place-items-center p-6 bg-black/60 backdrop-blur-sm"
+      className={`absolute inset-0 z-[100] animate-fadeIn overflow-y-auto pointer-events-auto ${
+        isMaximized ? 'grid place-items-center p-6 bg-black/60 backdrop-blur-sm' : 'flex flex-col bg-bg'
+      }`}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="vision-edit-camera-title"
-        className="flex flex-col bg-card shadow-2xl overflow-hidden w-full max-w-[560px] max-h-[min(88dvh,640px)] rounded-2xl border border-border/40"
+        className={`flex flex-col bg-card shadow-2xl overflow-hidden ${
+          isMaximized
+            ? 'w-full max-w-[560px] max-h-[min(88dvh,640px)] rounded-2xl border border-border/40'
+            : 'w-full h-full max-w-none max-h-none rounded-none border-0 flex-1 min-h-0'
+        }`}
       >
         <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-border/30 shrink-0">
           <button

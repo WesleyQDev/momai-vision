@@ -29,6 +29,10 @@
     "edit": "Modifica telecamera",
     "delete": "Elimina telecamera",
     "deleteConfirm": "Vuoi davvero rimuovere questa telecamera?",
+    "pauseVideo": "Metti in pausa il video",
+    "resumeVideo": "Riprendi il video",
+    "pausedBadge": "In pausa",
+    "pausedSubtitle": "Clicca per riprendere il video",
     "name": "Nome telecamera",
     "source": "Tipo di telecamera",
     "webcam": "Webcam locale (USB)",
@@ -507,5 +511,25 @@
     "daysLabel": "Giorni di conservazione (default: 7)",
     "maxFilesLabel": "File massimi conservati (default: 200)",
     "localNote": "Le foto sono archiviate localmente sul tuo computer. I fotogrammi video live non vengono mai scritti su disco."
+  },
+  "widget": {
+    "live": {
+      "title": "Camera live",
+      "loading": "Connessione…",
+      "empty": "Nessuna immagine.",
+      "refresh": "Aggiorna",
+      "needsSetup": "Aggiungi di nuovo dalla Galleria e scegli una camera."
+    },
+    "lastDetection": {
+      "title": "Ultimo rilevamento",
+      "loading": "Caricamento…",
+      "empty": "Nessun rilevamento."
+    }
+  },
+  "pagination": {
+    "showing": "Mostrando da {from} a {to} di {total}",
+    "previous": "Precedente",
+    "next": "Successivo",
+    "pageOf": "Pagina {page} di {pages}"
   }
 }

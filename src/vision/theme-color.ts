@@ -80,12 +80,28 @@ function hslToRgb({ h, s, l }: Hsl): string {
   return `rgb(${r}, ${g}, ${b})`
 }
 
-function readAccentToken(): string {
+function readThemeVar(name: string): string {
   try {
-    return getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
+    const computed = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+    if (computed) return computed
+  } catch {
+    // jsdom without computed style falls through to inline lookup below.
+  }
+  try {
+    return document.documentElement.style.getPropertyValue(name).trim()
   } catch {
     return ''
   }
+}
+
+function themeRgb(varName: string): Rgb | null {
+  const raw = readThemeVar(varName)
+  if (!raw) return null
+  return parseCssColor(raw)
+}
+
+function readAccentToken(): string {
+  return readThemeVar('--accent')
 }
 
 function buildThemePalette(): string[] | null {
@@ -117,4 +133,53 @@ export function classColor(className: string): string {
   for (const ch of className) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
   const palette = themePalette()
   return palette[hash % palette.length]
+}
+
+const OVERLAY_LABEL_FALLBACK = '#0a0a0a'
+const ZONE_FILL_EDITING_FALLBACK = 'rgba(239, 68, 68, 0.16)'
+const ZONE_FILL_SAVED_FALLBACK = 'rgba(56, 189, 248, 0.12)'
+const ZONE_STROKE_EDITING_FALLBACK = '#ef4444'
+const ZONE_STROKE_SAVED_FALLBACK = 'rgba(56, 189, 248, 0.85)'
+const ZONE_VERTEX_EDITING_FALLBACK = '#ef4444'
+const ZONE_VERTEX_DRAGGING_FALLBACK = '#f59e0b'
+const ZONE_VERTEX_STROKE_FALLBACK = '#ffffff'
+
+/** Label drawn on top of a detection tag. Reads the host text token, falls back only without a token. */
+export function overlayLabelColor(): string {
+  const text = themeRgb('--text-primary')
+  if (!text) return OVERLAY_LABEL_FALLBACK
+  return `rgb(${text.r}, ${text.g}, ${text.b})`
+}
+
+/** Zone polygon fill. Editing uses the error token, saved uses the accent token. */
+export function zoneFillColor(isEditing: boolean): string {
+  const rgb = themeRgb(isEditing ? '--error' : '--accent')
+  if (!rgb) return isEditing ? ZONE_FILL_EDITING_FALLBACK : ZONE_FILL_SAVED_FALLBACK
+  return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${isEditing ? 0.16 : 0.12})`
+}
+
+/** Zone polygon stroke. Editing uses the error token, saved uses the accent token. */
+export function zoneStrokeColor(isEditing: boolean): string {
+  const rgb = themeRgb(isEditing ? '--error' : '--accent')
+  if (!rgb) return isEditing ? ZONE_STROKE_EDITING_FALLBACK : ZONE_STROKE_SAVED_FALLBACK
+  return isEditing ? `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})` : `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.85)`
+}
+
+/** Freehand trace uses the editing stroke so the in-progress path matches the polygon. */
+export function zoneTraceColor(): string {
+  return zoneStrokeColor(true)
+}
+
+/** Editable vertex fill. Dragging uses the highlight token, idle uses the error token. */
+export function zoneVertexColor(isDragging: boolean): string {
+  const rgb = themeRgb(isDragging ? '--highlight' : '--error')
+  if (!rgb) return isDragging ? ZONE_VERTEX_DRAGGING_FALLBACK : ZONE_VERTEX_EDITING_FALLBACK
+  return `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`
+}
+
+/** Vertex outline. Reads the host text token for contrast on video, falls back only without a token. */
+export function zoneVertexStrokeColor(): string {
+  const text = themeRgb('--text-primary')
+  if (!text) return ZONE_VERTEX_STROKE_FALLBACK
+  return `rgb(${text.r}, ${text.g}, ${text.b})`
 }

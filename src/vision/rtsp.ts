@@ -78,11 +78,18 @@ export function shouldLogRetry(consecutiveFailures: number): boolean {
 export const RTSP_AUTH_RETRY_DELAY_MS = 10000
 
 /**
+ * Delay before retrying after a socket lock / port timeout error (e.g. error -138).
+ * Low-cost IP cameras (like Yoosee) drop/ignore new connections until the internal
+ * RTSP daemon cleans up hung sessions. A 15s quiet window lets the camera recover.
+ */
+export const RTSP_SOCKET_LOCK_RETRY_DELAY_MS = 15000
+
+/**
  * First-frame watchdog: a hung UDP session produces no data, no EOF and no
  * exit (silent RTP stall) — FFmpeg would sit forever. Kill it after this
  * long without a frame; the exit handler applies the reconnect policy.
  */
-export const RTSP_FIRST_FRAME_WATCHDOG_MS = 12000
+export const RTSP_FIRST_FRAME_WATCHDOG_MS = 10000
 
 /** Grace period where the stale sweeper must not kill a fresh attempt. */
 export const RTSP_FRESH_ATTEMPT_GRACE_MS = 10000
@@ -93,10 +100,10 @@ export const RTSP_FRESH_ATTEMPT_GRACE_MS = 10000
  * preview freezes on the last image. Restart when no frame arrived for this
  * long; the exit handler reuses the proven transport for a fast recovery.
  */
-export const RTSP_MID_STREAM_STALL_MS = 10000
+export const RTSP_MID_STREAM_STALL_MS = 6000
 
 /** How often the mid-stream watchdog checks for a silent session. */
-export const RTSP_MID_STREAM_CHECK_MS = 2500
+export const RTSP_MID_STREAM_CHECK_MS = 1500
 
 export function isRtspMidStreamStalled(lastFrameAt: number, now: number = Date.now()): boolean {
   if (!lastFrameAt || lastFrameAt <= 0) return false
@@ -154,6 +161,10 @@ export function buildRtspFfmpegArgs(
   previewWidth: number = PREVIEW_WIDTH_DEFAULT,
   codec: RtspCodec = RTSP_CODEC_DEFAULT
 ): string[] {
+  const isUdp = transport === 'udp'
+  const bufferSize = isUdp ? '8388608' : '2097152'
+  const maxDelay = isUdp ? '1000000' : '500000'
+
   const args = [
     '-hide_banner',
     '-loglevel',
@@ -161,9 +172,9 @@ export function buildRtspFfmpegArgs(
     '-rtsp_transport',
     transport,
     '-buffer_size',
-    '2097152',
+    bufferSize,
     '-max_delay',
-    '500000',
+    maxDelay,
     '-err_detect',
     'ignore_err',
     '-allowed_media_types',
@@ -180,8 +191,8 @@ export function buildRtspFfmpegArgs(
     'low_delay'
   ]
 
-  // For H.265 (HEVC), drop reorder queue size to zero to prevent mid-stream stalls on RTP packets.
-  if (codec === 'h265') {
+  // For H.265 (HEVC) or UDP transport, drop reorder queue size to zero to prevent mid-stream stalls on RTP packets.
+  if (codec === 'h265' || isUdp) {
     args.push('-reorder_queue_size', '0')
   }
 
@@ -218,6 +229,36 @@ export function isRtspAuthFailure(stderrLower: string): boolean {
 }
 
 /**
+ * True when stderr indicates the camera's RTSP port/socket is blocked, timing out,
+ * or overloaded (5xx Server Error, 500, 400 Bad Request, nonmatching transport).
+ * Low-cost IP cameras (like Yoosee / Xiongmai / HiSilicon) reject connections
+ * with these errors when overwhelmed with rapid reconnects or session exhaustion.
+ */
+export function isRtspSocketLockError(stderrLower: string): boolean {
+  if (!stderrLower) return false
+  return (
+    stderrLower.includes('-138') ||
+    stderrLower.includes('timed out') ||
+    stderrLower.includes('connection refused') ||
+    stderrLower.includes('refused') ||
+    stderrLower.includes('no route to host') ||
+    stderrLower.includes('host is unreachable') ||
+    stderrLower.includes('server returned 5') ||
+    stderrLower.includes('500 (internal server error)') ||
+    stderrLower.includes('500 internal server error') ||
+    stderrLower.includes('server returned 400 bad request') ||
+    stderrLower.includes('400 bad request') ||
+    stderrLower.includes('405 (method not allowed)') ||
+    stderrLower.includes('405 method not allowed') ||
+    stderrLower.includes('method options failed: 405') ||
+    stderrLower.includes('nonmatching transport')
+  )
+}
+
+/** Alias for semantic clarity. */
+export const isRtspServerBusyError = isRtspSocketLockError
+
+/**
  * True when an FFmpeg stderr chunk is benign muxer noise that must not
  * pollute the log. Duplicate timestamps from the RTSP source surface as
  * "Application provided invalid, non monotonically increasing dts to muxer"
@@ -234,6 +275,7 @@ export function isBenignRtspStderr(msg: string): boolean {
 export type RtspReconnectDecision =
   | { action: 'retry-same-transport'; delayMs: number }
   | { action: 'backoff-auth'; delayMs: number }
+  | { action: 'backoff-socket-lock'; delayMs: number }
 
 /**
  * Decide what to do when an FFmpeg RTSP session exits unexpectedly.
@@ -243,6 +285,8 @@ export type RtspReconnectDecision =
  *   owns the UDP/TCP choice, so the runtime never flips transports.
  * - Auth failures back off with a long delay instead of hammering the
  *   camera (which can lock the account).
+ * - Socket lock / timeout errors (error -138) back off with a quiet window
+ *   to let the camera's RTSP server release dead connections.
  */
 export function decideRtspReconnect(opts: {
   failedTransport: RtspTransport
@@ -254,6 +298,9 @@ export function decideRtspReconnect(opts: {
   }
   if (isRtspAuthFailure(opts.stderrLower)) {
     return { action: 'backoff-auth', delayMs: RTSP_AUTH_RETRY_DELAY_MS }
+  }
+  if (isRtspSocketLockError(opts.stderrLower)) {
+    return { action: 'backoff-socket-lock', delayMs: RTSP_SOCKET_LOCK_RETRY_DELAY_MS }
   }
   return { action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS }
 }

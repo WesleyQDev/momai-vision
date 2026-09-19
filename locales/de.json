@@ -29,6 +29,10 @@
     "edit": "Kamera bearbeiten",
     "delete": "Kamera löschen",
     "deleteConfirm": "Möchten Sie diese Kamera wirklich entfernen?",
+    "pauseVideo": "Video pausieren",
+    "resumeVideo": "Video fortsetzen",
+    "pausedBadge": "Pausiert",
+    "pausedSubtitle": "Klicken, um das Video fortzusetzen",
     "name": "Kameraname",
     "source": "Kameratyp",
     "webcam": "Lokale Webcam (USB)",
@@ -507,5 +511,25 @@
     "daysLabel": "Speichertage (Standard: 7)",
     "maxFilesLabel": "Maximal gespeicherte Dateien (Standard: 200)",
     "localNote": "Fotos werden lokal auf Ihrem Computer gespeichert. Live-Videobilder werden niemals auf die Festplatte geschrieben."
+  },
+  "widget": {
+    "live": {
+      "title": "Live-Kamera",
+      "loading": "Verbinde…",
+      "empty": "Kein Bild.",
+      "refresh": "Aktualisieren",
+      "needsSetup": "Erneut über die Galerie hinzufügen und eine Kamera wählen."
+    },
+    "lastDetection": {
+      "title": "Letzte Erkennung",
+      "loading": "Wird geladen…",
+      "empty": "Keine Erkennungen."
+    }
+  },
+  "pagination": {
+    "showing": "Zeige {from} bis {to} von {total}",
+    "previous": "Zurück",
+    "next": "Weiter",
+    "pageOf": "Seite {page} von {pages}"
   }
 }

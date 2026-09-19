@@ -65,7 +65,38 @@
     "page": "dist/page.js",
     "pageType": "dashboard",
     "panel": "dist/panel.js",
-    "panelType": "extension-panel"
+    "panelType": "extension-panel",
+    "widgets": [
+      {
+        "id": "live",
+        "name": "Visão — Câmera ao vivo",
+        "description": "Frame ao vivo da câmera selecionada",
+        "entry": "dist/widget-live.js",
+        "type": "momai-vision-live-widget",
+        "defaultSize": "compact_2x1",
+        "supportsTransparency": true,
+        "setup": {
+          "mode": "single",
+          "title": "Escolha a câmera",
+          "description": "Qual câmera o widget deve exibir",
+          "searchPlaceholder": "Buscar câmeras...",
+          "optionsTool": "list_cameras",
+          "itemsPath": "cameras",
+          "valueField": "id",
+          "labelField": "name",
+          "configField": "cameraId"
+        }
+      },
+      {
+        "id": "last-detection",
+        "name": "Visão — Última detecção",
+        "description": "Print do último monitoramento",
+        "entry": "dist/widget-last-detection.js",
+        "type": "momai-vision-last-detection-widget",
+        "defaultSize": "compact_2x1",
+        "supportsTransparency": true
+      }
+    ]
   },
   "eventTypes": {
     "vision_alert": {
@@ -279,7 +310,7 @@
     },
     {
       "name": "show_overlay",
-      "description": "Exibe o overlay/card flutuante visual da câmera com a imagem capturada e marcações de detecção (ação padrão do MomAI Vision para alertas visuais).",
+      "description": "Exibe o overlay/card flutuante visual da câmera com a foto limpa do alerta, sem caixas por padrão (ação padrão do MomAI Vision para alertas visuais).",
       "parameters": {
         "type": "object",
         "properties": {
@@ -304,7 +335,7 @@
       {
         "id": "show_overlay",
         "name": "Exibir Overlay de Alerta (Vision)",
-        "description": "Exibe a janela flutuante nativa da MomAI Vision com a foto do alerta e caixas delimitadoras sobre os objetos detectados.",
+        "description": "Exibe a janela flutuante nativa da MomAI Vision com a foto limpa do alerta, sem caixas por padrão.",
         "dangerLevel": "low",
         "inputSchema": {
           "type": "object",

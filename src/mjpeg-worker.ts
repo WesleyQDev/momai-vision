@@ -12,6 +12,7 @@ import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
 
 type WorkerIncomingMessage =
   | { type: 'start'; url?: string }
+  | { type: 'reset' }
   | { type: 'abort' }
   | { type: 'get_frame' }
 
@@ -36,6 +37,7 @@ const HEADER_END = new TextEncoder().encode('\r\n\r\n')
 const DECODER = new TextDecoder('latin1')
 
 let ac: AbortController | null = null
+let isResetRequested = false
 let currentFrame: Uint8Array | null = null // último frame do stream (para get_frame)
 let lastFrame: Uint8Array | null = null // frame aguardando emissão (latest-wins)
 let emitScheduled = false
@@ -192,11 +194,15 @@ async function run(url: string): Promise<void> {
       }
     } catch (err) {
       if (!isRunning) break
-      failCount++
-      scope.postMessage({
-        type: 'error',
-        message: `Reconectando câmera... (${err instanceof Error ? err.message : String(err)})`
-      })
+      const wasReset = isResetRequested
+      isResetRequested = false
+      if (!wasReset) {
+        failCount++
+        scope.postMessage({
+          type: 'error',
+          message: `Reconectando câmera... (${err instanceof Error ? err.message : String(err)})`
+        })
+      }
     } finally {
       sessionActive = false
       clearInterval(watchdogTimer)
@@ -204,9 +210,12 @@ async function run(url: string): Promise<void> {
 
     if (!isRunning) break
 
-    // Backoff de reconexão suave: 600ms, 1200ms, max 2500ms
-    const delay = Math.min(2500, 600 * Math.pow(1.4, Math.min(failCount, 4)))
-    await new Promise((resolve) => setTimeout(resolve, delay))
+    // Backoff de reconexão suave (instantâneo se foi pedido de reset intencional)
+    const delay = isResetRequested ? 0 : Math.min(2500, 600 * Math.pow(1.4, Math.min(failCount, 4)))
+    isResetRequested = false
+    if (delay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
   }
 }
 
@@ -216,6 +225,11 @@ scope.onmessage = (e: MessageEvent<WorkerIncomingMessage>) => {
     isRunning = false
     if (ac) ac.abort()
     void run(String(msg.url || ''))
+  } else if (msg.type === 'reset') {
+    isResetRequested = true
+    if (ac) {
+      try { ac.abort() } catch {}
+    }
   } else if (msg.type === 'abort') {
     isRunning = false
     if (ac) ac.abort()

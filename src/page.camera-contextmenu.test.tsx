@@ -87,6 +87,12 @@ async function openCameraContextMenu(name: string) {
   fireEvent.contextMenu(label)
 }
 
+async function openSubmenuItem(groupLabel: string, itemLabel: string) {
+  const group = await screen.findByRole('menuitem', { name: groupLabel })
+  fireEvent.mouseEnter(group.parentElement!)
+  return screen.findByRole('menuitem', { name: itemLabel })
+}
+
 describe('VisionPage — clique direito no card da câmera (MOM-195)', () => {
   it('abre menu com Editar sem abrir o preview', async () => {
     setupServer({
@@ -100,7 +106,9 @@ describe('VisionPage — clique direito no card da câmera (MOM-195)', () => {
 
     await openCameraContextMenu('Portão')
 
-    expect(await screen.findByRole('menuitem', { name: 'Editar Câmera' })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: 'Câmera' })).toBeTruthy()
+    expect(await openSubmenuItem('Câmera', 'Editar Câmera')).toBeTruthy()
+    fireEvent.mouseEnter((await screen.findByRole('menuitem', { name: 'Ver' })).parentElement!)
     expect(screen.queryByText('Ampliar imagem')).toBeTruthy()
     // Preview (modal expandido) não deve abrir com o botão direito
     expect(document.body.textContent).not.toContain('Dois cliques para fechar')
@@ -117,7 +125,7 @@ describe('VisionPage — clique direito no card da câmera (MOM-195)', () => {
     await screen.findByText('MomAI Vision')
 
     await openCameraContextMenu('Portão')
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Editar Câmera' }))
+    fireEvent.click(await openSubmenuItem('Câmera', 'Editar Câmera'))
 
     const nameInput = (await screen.findByPlaceholderText('Nome da câmera (ex.: Garagem, Entrada)')) as HTMLInputElement
     expect(nameInput.value).toBe('Portão')
@@ -143,7 +151,7 @@ describe('VisionPage — clique direito no card da câmera (MOM-195)', () => {
     await screen.findByText('MomAI Vision')
 
     await openCameraContextMenu('Portão')
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Copiar URL' }))
+    fireEvent.click(await openSubmenuItem('Câmera', 'Copiar URL'))
 
     await waitFor(() => {
       expect(vi.mocked(window.navigator.clipboard.writeText)).toHaveBeenCalledWith(IP_URL)
@@ -212,7 +220,7 @@ describe('VisionPage — clique direito no card da câmera (MOM-195)', () => {
     await screen.findByText('MomAI Vision')
 
     await openCameraContextMenu('Portão')
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Desativar reconhecimento' }))
+    fireEvent.click(await openSubmenuItem('Ver', 'Desativar reconhecimento'))
 
     await waitFor(() => {
       expect(calls.some((c) => c.toolName === 'pause_monitoring')).toBe(true)
@@ -260,7 +268,7 @@ describe('VisionPage — Limpar Cache e Conexões volta para a grade', () => {
     await screen.findByText('MomAI Vision')
 
     await openCameraContextMenu('Portão')
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Editar Câmera' }))
+    fireEvent.click(await openSubmenuItem('Câmera', 'Editar Câmera'))
     fireEvent.click(await screen.findByRole('button', { name: /Limpar Cache e Conexões/i }))
 
     const reloadBtn = await screen.findByRole('button', { name: 'Recarregar câmera' })

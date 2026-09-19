@@ -49,4 +49,10 @@ describe('EditCameraModal — preview width and codec', () => {
       )
     )
   })
+
+  it('renders full-screen layout when window is not maximized', () => {
+    render(<EditCameraModal target={IP_TARGET} onClose={() => {}} onSave={vi.fn()} />)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog.className).toContain('w-full h-full max-w-none max-h-none rounded-none border-0')
+  })
 })

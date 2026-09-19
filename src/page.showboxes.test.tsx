@@ -71,6 +71,13 @@ beforeEach(() => {
   vi.mocked(sdk.api.post).mockResolvedValue({ ok: true, data: {} })
 })
 
+async function openSubmenuItem(groupLabel: string, itemLabel: string) {
+  const group = await screen.findByRole('menuitem', { name: groupLabel })
+  fireEvent.mouseEnter(group.parentElement!)
+  const item = await screen.findByRole('menuitem', { name: itemLabel })
+  return item
+}
+
 describe('VisionPage — Mostrar boxes por câmera (MOM-173)', () => {
   it('menu oferece Esconder boxes e persiste sem pausar nada nem abrir preview', async () => {
     const { calls } = setupServer({
@@ -82,7 +89,7 @@ describe('VisionPage — Mostrar boxes por câmera (MOM-173)', () => {
     await screen.findByText('MomAI Vision')
 
     fireEvent.contextMenu(await screen.findByTitle('Portão'))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Esconder boxes' }))
+    fireEvent.click(await openSubmenuItem('Ver', 'Esconder boxes'))
 
     await waitFor(() => {
       const write = calls.find((c) => c.toolName === 'configure' && c.args.showBoxes !== undefined)
@@ -103,12 +110,13 @@ describe('VisionPage — Mostrar boxes por câmera (MOM-173)', () => {
     await screen.findByText('MomAI Vision')
 
     fireEvent.contextMenu(await screen.findByTitle('Portão'))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Esconder boxes' }))
+    fireEvent.click(await openSubmenuItem('Ver', 'Esconder boxes'))
     await waitFor(() => {
       expect(calls.some((c) => c.toolName === 'configure' && c.args.showBoxes !== undefined)).toBe(true)
     })
 
     fireEvent.contextMenu(await screen.findByTitle('Portão'))
+    fireEvent.mouseEnter((await screen.findByRole('menuitem', { name: 'Ver' })).parentElement!)
     expect(await screen.findByRole('menuitem', { name: 'Mostrar boxes' })).toBeTruthy()
   })
 
@@ -164,7 +172,7 @@ describe('VisionPage — Mostrar boxes por câmera (MOM-173)', () => {
     await screen.findByText('MomAI Vision')
 
     fireEvent.contextMenu(await screen.findByTitle('Portão'))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Esconder área selecionada' }))
+    fireEvent.click(await openSubmenuItem('Ver', 'Esconder área selecionada'))
 
     await waitFor(() => {
       const write = calls.find((c) => c.toolName === 'configure' && c.args.showZones !== undefined)
@@ -209,9 +217,15 @@ describe('VisionPage — Mostrar boxes por câmera (MOM-173)', () => {
     const expandedVideo = await screen.findByTestId('expanded-video')
 
     fireEvent.contextMenu(expandedVideo)
+    expect(await screen.findByRole('menuitem', { name: 'Ver' })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: 'Ações' })).toBeTruthy()
+    expect(await screen.findByRole('menuitem', { name: 'Câmera' })).toBeTruthy()
+    fireEvent.mouseEnter((await screen.findByRole('menuitem', { name: 'Câmera' })).parentElement!)
     expect(await screen.findByRole('menuitem', { name: 'Editar Câmera' })).toBeTruthy()
     expect(await screen.findByRole('menuitem', { name: 'Copiar URL' })).toBeTruthy()
+    fireEvent.mouseEnter((await screen.findByRole('menuitem', { name: 'Ações' })).parentElement!)
     expect(await screen.findByRole('menuitem', { name: 'Tirar print' })).toBeTruthy()
+    fireEvent.mouseEnter((await screen.findByRole('menuitem', { name: 'Ver' })).parentElement!)
     expect(await screen.findByRole('menuitem', { name: 'Esconder boxes' })).toBeTruthy()
     expect(await screen.findByRole('menuitem', { name: 'Esconder área selecionada' })).toBeTruthy()
   })

@@ -5,7 +5,7 @@ describe('manual transport lock (no auto UDP/TCP flip)', () => {
   it('never flips transports on early failure — retries the same manual choice', () => {
     const decision = decideRtspReconnect({
       failedTransport: 'udp',
-      stderrLower: 'operation timed out',
+      stderrLower: 'invalid stream header data',
       hadFirstFrame: false
     })
     expect(decision).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })
