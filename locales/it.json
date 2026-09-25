@@ -518,6 +518,8 @@
       "loading": "Connessione…",
       "empty": "Nessuna immagine.",
       "refresh": "Aggiorna",
+      "liveBadge": "IN DIRETTA",
+      "retry": "Riprova",
       "needsSetup": "Aggiungi di nuovo dalla Galleria e scegli una camera."
     },
     "lastDetection": {

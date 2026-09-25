@@ -2569,61 +2569,39 @@ async function remapRepluggedWebcamIds(): Promise<void> {
   void saveMonitors()
 }
 
-// Keep host watches alive for webcams that are selected in the dashboard or
-// being monitored, so cameras stay on even after the Vision page closes.
+// Keep host watches alive for webcams that are being actively monitored,
+// so background detection stays on even after the Vision page closes.
 async function syncWebcamWatches(): Promise<void> {
-  // Se a lista de webcams está vazia (ex.: 403 transitório no boot, antes de o
-  // skill ser carregado), re-tenta a listagem — senão os watches nunca
-  // iniciam e a webcam fica sem preview até reiniciar o app. Limitado: o
-  // bridge pode demorar e este sync roda a cada 5s no intervalo.
-  if (webcamCache.length === 0) {
-    await withTimeout(refreshWebcams(), 3000, 'watch sync refresh').catch(() => {})
-  }
-  // If the user replugged a USB webcam (deviceId changed, label stable), remap
-  // the persisted selection so the card reconnects to the new device.
-  await remapRepluggedWebcamIds().catch(() => {})
-  // Re-lê após o remap (o updateConfig invalida o cache; a seleção remapeada
-  // tem que valer já neste ciclo, senão o watch antigo é derrubado).
-  const config = await loadConfig()
-  // `wanted` is derived from the PERSISTED selection/monitors (stable), not the
-  // transient webcamCache. If we built it from webcamCache, a camera that
-  // momentarily drops out of the enumerateDevices list would leave `wanted`,
-  // its watch would be stopped here and restarted on the next sync — a
-  // stop/start churn that makes the webcam LED physically toggle on Windows.
   const wanted = new Set<string>()
-  for (const id of config.selectedCameras || []) {
-    if (id.startsWith('webcam:')) wanted.add(id)
-  }
   for (const m of monitors.values()) {
     // Paused monitors do not keep the webcam alive by themselves.
     if (!m.config.paused && m.config.cameraId.startsWith('webcam:')) wanted.add(m.config.cameraId)
   }
-  // Only stop watches when we have a valid device list — otherwise a
-  // transient refresh failure would kill cameras that are still present.
-  if (webcamCache.length > 0) {
+  for (const auto of autoMonitorsCache) {
+    if (!auto.config.paused && auto.config.cameraId.startsWith('webcam:')) wanted.add(auto.config.cameraId)
+  }
+
+  // Se não há nenhum monitor ativo e nenhum watch aberto, não faz nada (evita ligar câmera no boot)
+  if (wanted.size === 0 && webcamWatches.size === 0) {
+    return
+  }
+
+  if (wanted.size > 0 && webcamCache.length === 0) {
+    await withTimeout(refreshWebcams(), 3000, 'watch sync refresh').catch(() => {})
+  }
+  await remapRepluggedWebcamIds().catch(() => {})
+
+  if (webcamCache.length > 0 || wanted.size === 0) {
     for (const id of [...webcamWatches]) {
       if (!wanted.has(id)) {
-        // Stop by id, not by findCamera: an orphaned watch whose deviceId
-        // changed on replug is no longer resolvable, but its frozen host
-        // stream still holds the device — releasing it unblocks the new id.
         await stopWebcamWatchById(id)
       }
     }
   }
   for (const id of wanted) {
-    // Re-acquire only if the stream stopped delivering frames (replug/device
-    // change). A healthy camera is left untouched — no start/start churn, so it
-    // does not blink. A camera being manually reloaded right now is also left
-    // alone: the reload is already rebuilding its stream.
     const cam = findCamera(id)
     if (!cam || cam.source !== 'webcam' || reloadingCameras.has(id)) continue
     if (!webcamWatches.has(id)) {
-      // COLD START: o watch nunca iniciou (ex.: câmera USB 2.0 que demora a
-      // "acordar" — o primeiro start-watch pode falhar com o dispositivo ainda
-      // subindo). Tenta iniciar AGORA, sem o backoff do reconnect: o retry a
-      // cada ciclo do sync (5s) recupera a câmera sozinho, sem o usuário
-      // precisar fechar/reabrir a página. O start-watch é idempotente no host
-      // (não gera churn MF se já estiver ativo).
       await ensureWebcamWatch(id)
     }
     await reconnectWebcamIfStale(cam)
@@ -4044,7 +4022,17 @@ async function describeSendActionsSuffix(actions: MonitorAction[] | undefined): 
 
 async function restoreMonitors(): Promise<void> {
   const saved = (await bridge!.storage.get('monitors')) as MonitorConfig[] | null
-  if (!Array.isArray(saved)) return
+  if (!Array.isArray(saved) || saved.length === 0) return
+
+  const activeSaved = saved.filter((m) => m && m.id && m.cameraId && !m.paused)
+  if (activeSaved.length === 0) {
+    for (const config of saved) {
+      if (!config.id || !config.cameraId) continue
+      monitors.set(config.id, { config, state: createMonitorState() })
+    }
+    return
+  }
+
   // Limitado: o restore roda no boot do worker (via ensureInitialized) e não
   // pode segurar os primeiros comandos enquanto o bridge da câmera está lento.
   await withTimeout(refreshWebcams(), 3000, 'restore refresh').catch(() => {})

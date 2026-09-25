@@ -18,9 +18,17 @@ async function postCommand(toolName: string, args: Record<string, unknown> = {})
 
 export async function captureWidgetFrame(cameraId: string): Promise<{ image: string; cameraName: string }> {
   const data = await postCommand('capture_snapshot', { cameraId })
+  if (data && (data as any).ok === false) {
+    throw new Error(String((data as any).error || 'Capture failed.'))
+  }
+  // The backend returns the frame inside structuredResponse.data; top-level
+  // fields are kept as a forward-compatible fallback.
+  const nested = (data as any)?.structuredResponse?.data ?? {}
   return {
-    image: String(data?.imageDataUri ?? data?.annotatedImageDataUri ?? ''),
-    cameraName: String(data?.cameraName ?? '')
+    image: String(
+      data?.imageDataUri ?? data?.annotatedImageDataUri ?? nested.imageDataUri ?? nested.annotatedImageDataUri ?? ''
+    ),
+    cameraName: String(data?.cameraName ?? nested.cameraName ?? '')
   }
 }
 

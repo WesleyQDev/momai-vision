@@ -518,6 +518,8 @@
       "loading": "Connecting…",
       "empty": "No frame yet.",
       "refresh": "Refresh",
+      "liveBadge": "LIVE",
+      "retry": "Try again",
       "needsSetup": "Add again from the Gallery and select a camera."
     },
     "lastDetection": {
