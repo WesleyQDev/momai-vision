@@ -56,7 +56,7 @@ describe('VisionPage camera context menu order', () => {
     render(<VisionPage />)
     await screen.findByText('MomAI Vision')
 
-    const card = screen.getByText('Portão').closest('.group')
+    const card = (await screen.findByText('Portão')).closest('.group')
     expect(card).toBeTruthy()
     fireEvent.contextMenu(card!)
 

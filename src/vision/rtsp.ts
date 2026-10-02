@@ -228,6 +228,23 @@ export function isRtspAuthFailure(stderrLower: string): boolean {
   return stderrLower.includes('401') || stderrLower.includes('unauthorized')
 }
 
+/** Card-level cause of an IP connection failure (display only). */
+export type RtspIssue = 'auth' | 'not-found' | 'network' | 'ffmpeg-missing' | 'unknown'
+
+/**
+ * Classify stored lastError text for the camera card hint. Reuses the
+ * reconnect classifiers so the card never disagrees with the retry policy.
+ */
+export function describeRtspIssue(raw: string | null | undefined): RtspIssue {
+  const lower = (raw || '').toLowerCase()
+  if (!lower) return 'unknown'
+  if (lower === 'ffmpeg-missing') return 'ffmpeg-missing'
+  if (lower === 'auth' || isRtspAuthFailure(lower)) return 'auth'
+  if (lower.includes('404') || lower.includes('not found')) return 'not-found'
+  if (isRtspSocketLockError(lower)) return 'network'
+  return 'unknown'
+}
+
 /**
  * True when stderr indicates the camera's RTSP port/socket is blocked, timing out,
  * or overloaded (5xx Server Error, 500, 400 Bad Request, nonmatching transport).
@@ -269,6 +286,7 @@ export function isBenignRtspStderr(msg: string): boolean {
   if (!msg) return false
   const lower = msg.toLowerCase()
   if (lower.includes('non monotonically increasing dts')) return true
+  if (lower.includes('last message repeated')) return true
   return lower.includes('application provided invalid') && lower.includes('muxer')
 }
 

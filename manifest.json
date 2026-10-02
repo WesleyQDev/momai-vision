@@ -1,11 +1,19 @@
 {
   "id": "momai-vision",
   "name": "MomAI Vision",
-  "version": "1.9.1",
+  "version": "1.10.0",
   "is_official": true,
   "description": "Veja suas câmeras, receba alertas de movimento e pergunte o que está acontecendo.",
   "category": "utility",
-  "tags": ["camera", "cctv", "vision", "detection", "security", "rtsp", "onvif"],
+  "tags": [
+    "camera",
+    "cctv",
+    "vision",
+    "detection",
+    "security",
+    "rtsp",
+    "onvif"
+  ],
   "readme": {
     "pt-BR": "README.md",
     "en-US": "README.en-US.md",
@@ -19,37 +27,85 @@
       "name": "MomAI Vision",
       "description": "Veja suas câmeras, receba alertas de movimento e pergunte o que está acontecendo.",
       "category": "utility",
-      "tags": ["câmera", "cftv", "visão", "detecção", "segurança", "rtsp", "onvif"]
+      "tags": [
+        "câmera",
+        "cftv",
+        "visão",
+        "detecção",
+        "segurança",
+        "rtsp",
+        "onvif"
+      ]
     },
     "en-US": {
       "name": "MomAI Vision",
       "description": "View your cameras, receive motion alerts, and ask what is happening.",
       "category": "utility",
-      "tags": ["camera", "cctv", "vision", "detection", "security", "rtsp", "onvif"]
+      "tags": [
+        "camera",
+        "cctv",
+        "vision",
+        "detection",
+        "security",
+        "rtsp",
+        "onvif"
+      ]
     },
     "es": {
       "name": "MomAI Vision",
       "description": "Vea sus cámaras, reciba alertas de movimiento y pregunte qué está sucediendo.",
       "category": "utility",
-      "tags": ["cámara", "cctv", "visión", "detección", "seguridad", "rtsp", "onvif"]
+      "tags": [
+        "cámara",
+        "cctv",
+        "visión",
+        "detección",
+        "seguridad",
+        "rtsp",
+        "onvif"
+      ]
     },
     "de": {
       "name": "MomAI Vision",
       "description": "Sehen Sie Ihre Kameras, erhalten Sie Bewegungsalarme und fragen Sie, was gerade passiert.",
       "category": "utility",
-      "tags": ["kamera", "cctv", "vision", "erkennung", "sicherheit", "rtsp", "onvif"]
+      "tags": [
+        "kamera",
+        "cctv",
+        "vision",
+        "erkennung",
+        "sicherheit",
+        "rtsp",
+        "onvif"
+      ]
     },
     "fr": {
       "name": "MomAI Vision",
       "description": "Visualisez vos caméras, recevez des alertes de mouvement et demandez ce qui se passe.",
       "category": "utility",
-      "tags": ["caméra", "cctv", "vision", "détection", "sécurité", "rtsp", "onvif"]
+      "tags": [
+        "caméra",
+        "cctv",
+        "vision",
+        "détection",
+        "sécurité",
+        "rtsp",
+        "onvif"
+      ]
     },
     "it": {
       "name": "MomAI Vision",
       "description": "Visualizza le tue telecamere, ricevi avvisi di movimento e chiedi cosa sta succedendo.",
       "category": "utility",
-      "tags": ["telecamera", "cctv", "visione", "rilevamento", "sicurezza", "rtsp", "onvif"]
+      "tags": [
+        "telecamera",
+        "cctv",
+        "visione",
+        "rilevamento",
+        "sicurezza",
+        "rtsp",
+        "onvif"
+      ]
     }
   },
   "author": "WesleyQDev",
@@ -57,11 +113,14 @@
   "sidebar_icon_essential": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M15.75 10.5l4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25z\"/></svg>",
   "icon_bg": "#10b981",
   "app_icon": "app.png",
-  "momai_compat": ">=1.13.0",
+  "momai_compat": ">=1.15.0",
   "sdkVersion": 1,
   "background": true,
   "backgroundScript": "dist/runtime.js",
-  "permissions": ["camera", "network"],
+  "permissions": [
+    "camera",
+    "network"
+  ],
   "ui": {
     "page": "dist/page.js",
     "pageType": "dashboard",
@@ -86,7 +145,15 @@
           "valueField": "id",
           "labelField": "name",
           "configField": "cameraId"
-        }
+        },
+        "galleryPreview": [
+          {
+            "type": "image",
+            "src": "assets/widget-gallery/camera-scene.svg",
+            "alt": "Quadro de exemplo de uma câmera interna",
+            "caption": "Câmera da sala · quadro de exemplo"
+          }
+        ]
       },
       {
         "id": "last-detection",
@@ -95,7 +162,20 @@
         "entry": "dist/widget-last-detection.js",
         "type": "momai-vision-last-detection-widget",
         "defaultSize": "compact_2x1",
-        "supportsTransparency": true
+        "supportsTransparency": true,
+        "galleryPreview": [
+          {
+            "type": "image",
+            "src": "assets/widget-gallery/camera-detection.svg",
+            "alt": "Quadro de exemplo com uma pessoa detectada",
+            "caption": "Câmera da sala · Pessoa detectada"
+          },
+          {
+            "type": "text",
+            "text": "Entrada · 08:41",
+            "variant": "caption"
+          }
+        ]
       }
     ]
   },
@@ -108,25 +188,63 @@
           "label": "Câmera Monitorada",
           "type": "string",
           "description": "Câmera que gerou o alerta",
-          "x-options-source": { "tool": "list_cameras" }
+          "x-options-source": {
+            "tool": "list_cameras"
+          }
         },
         "className": {
           "label": "Objeto / Detecção Alvo",
           "type": "string",
           "description": "Dispara quando este objeto for detectado",
           "enum": [
-            { "label": "👤 Pessoa (person)", "value": "person" },
-            { "label": "🚗 Carro (car)", "value": "car" },
-            { "label": "🏍️ Moto (motorcycle)", "value": "motorcycle" },
-            { "label": "🚲 Bicicleta (bicycle)", "value": "bicycle" },
-            { "label": "🚌 Ônibus (bus)", "value": "bus" },
-            { "label": "🚚 Caminhão (truck)", "value": "truck" },
-            { "label": "🐱 Gato (cat)", "value": "cat" },
-            { "label": "🐶 Cachorro (dog)", "value": "dog" },
-            { "label": "🎒 Mochila (backpack)", "value": "backpack" },
-            { "label": "📦 Pacote / Caixa", "value": "package" },
-            { "label": "📱 Celular (cell phone)", "value": "cell phone" },
-            { "label": "💻 Notebook (laptop)", "value": "laptop" }
+            {
+              "label": "👤 Pessoa (person)",
+              "value": "person"
+            },
+            {
+              "label": "🚗 Carro (car)",
+              "value": "car"
+            },
+            {
+              "label": "🏍️ Moto (motorcycle)",
+              "value": "motorcycle"
+            },
+            {
+              "label": "🚲 Bicicleta (bicycle)",
+              "value": "bicycle"
+            },
+            {
+              "label": "🚌 Ônibus (bus)",
+              "value": "bus"
+            },
+            {
+              "label": "🚚 Caminhão (truck)",
+              "value": "truck"
+            },
+            {
+              "label": "🐱 Gato (cat)",
+              "value": "cat"
+            },
+            {
+              "label": "🐶 Cachorro (dog)",
+              "value": "dog"
+            },
+            {
+              "label": "🎒 Mochila (backpack)",
+              "value": "backpack"
+            },
+            {
+              "label": "📦 Pacote / Caixa",
+              "value": "package"
+            },
+            {
+              "label": "📱 Celular (cell phone)",
+              "value": "cell phone"
+            },
+            {
+              "label": "💻 Notebook (laptop)",
+              "value": "laptop"
+            }
           ]
         },
         "triggeredBy": {
@@ -134,27 +252,71 @@
           "type": "string",
           "description": "Modo de detecção que disparou o evento",
           "enum": [
-            { "label": "Qualquer Movimento / Objeto", "value": "" },
-            { "label": "Movimento", "value": "motion" },
-            { "label": "Objeto Detectado", "value": "object" },
-            { "label": "Entrada / Presença", "value": "presence" },
-            { "label": "Saída / Ausência", "value": "absence" }
+            {
+              "label": "Qualquer Movimento / Objeto",
+              "value": ""
+            },
+            {
+              "label": "Movimento",
+              "value": "motion"
+            },
+            {
+              "label": "Objeto Detectado",
+              "value": "object"
+            },
+            {
+              "label": "Entrada / Presença",
+              "value": "presence"
+            },
+            {
+              "label": "Saída / Ausência",
+              "value": "absence"
+            }
           ]
         },
-        "description": { "label": "Descrição", "type": "string" },
-        "ts": { "label": "Horário", "type": "number" },
-        "imageDataUri": { "label": "Imagem", "type": "image" },
-        "annotatedImageDataUri": { "label": "Imagem com boxes", "type": "image", "description": "Snapshot com as caixas de detecção desenhadas (só quando há detecções)" }
+        "description": {
+          "label": "Descrição",
+          "type": "string"
+        },
+        "ts": {
+          "label": "Horário",
+          "type": "number"
+        },
+        "imageDataUri": {
+          "label": "Imagem",
+          "type": "image"
+        },
+        "annotatedImageDataUri": {
+          "label": "Imagem com boxes",
+          "type": "image",
+          "description": "Snapshot com as caixas de detecção desenhadas (só quando há detecções)"
+        }
       }
     },
-    "vision_status": { "label": "Status do Motor de Visão Alterado" },
-    "vision_detections": { "label": "Novas Detecções de Visão" },
-    "open_overlay": { "label": "Overlay de Câmera Aberto" },
-    "close_overlay": { "label": "Overlay de Câmera Fechado" }
+    "vision_status": {
+      "label": "Status do Motor de Visão Alterado"
+    },
+    "vision_detections": {
+      "label": "Novas Detecções de Visão"
+    },
+    "open_overlay": {
+      "label": "Overlay de Câmera Aberto"
+    },
+    "close_overlay": {
+      "label": "Overlay de Câmera Fechado"
+    }
   },
   "routes": [
-    { "method": "POST", "path": "/frame", "tool": "frame_pump" },
-    { "method": "POST", "path": "/configure", "tool": "configure" }
+    {
+      "method": "POST",
+      "path": "/frame",
+      "tool": "frame_pump"
+    },
+    {
+      "method": "POST",
+      "path": "/configure",
+      "tool": "configure"
+    }
   ],
   "tools": [
     {
@@ -162,26 +324,26 @@
       "description": "Lista as câmeras disponíveis (webcam e IP/MJPEG) com status online e monitors ativos."
     },
     {
-    "name": "capture_snapshot",
-    "description": "Captura um print da câmera especificada, salva na galeria e mostra a imagem no chat. Quando o usuário nomear uma câmera, SEMPRE passe o cameraId exato retornado por list_cameras (ou o nome dela, ex.: 'caza'). Se o usuário não especificar, pode omitir o argumento para usar a câmera padrão.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "cameraId": {
-          "type": "string",
-          "description": "ID exato (ex.: 'ip:http://192.168.0.5:8080/video') ou nome (ex.: 'caza', 'J6', 'USB2.0') da câmera a capturar."
-        },
-        "camera": {
-          "type": "string",
-          "description": "Alias de cameraId"
-        },
-        "name": {
-          "type": "string",
-          "description": "Alias de cameraId"
+      "name": "capture_snapshot",
+      "description": "Captura um print da câmera especificada, salva na galeria e mostra a imagem no chat. Quando o usuário nomear uma câmera, SEMPRE passe o cameraId exato retornado por list_cameras (ou o nome dela, ex.: 'caza'). Se o usuário não especificar, pode omitir o argumento para usar a câmera padrão.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cameraId": {
+            "type": "string",
+            "description": "ID exato (ex.: 'ip:http://192.168.0.5:8080/video') ou nome (ex.: 'caza', 'J6', 'USB2.0') da câmera a capturar."
+          },
+          "camera": {
+            "type": "string",
+            "description": "Alias de cameraId"
+          },
+          "name": {
+            "type": "string",
+            "description": "Alias de cameraId"
+          }
         }
       }
-    }
-  },
+    },
     {
       "name": "describe_snapshot",
       "description": "Re-descreve um print existente da galeria com o modelo de visão local.",
@@ -193,165 +355,172 @@
             "description": "ID do snapshot da galeria."
           }
         },
-        "required": ["snapshotId"]
+        "required": [
+          "snapshotId"
+        ]
       }
     },
-
     {
-    "name": "update_monitoring",
-    "description": "Edita as configurações de um monitoramento ativo existente (como alterar triggers, schedule, cooldownSec, câmera ou rótulo). Use get_status ou list_cameras para obter o monitorId.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "monitorId": {
-          "type": "string",
-          "description": "ID exato do monitoramento ativo a alterar (ex.: 'mon-1722880000000')."
-        },
-        "cameraId": {
-          "type": "string",
-          "description": "ID exato ou nome da nova câmera (opcional)."
-        },
-        "triggers": {
-          "type": "array",
-          "description": "Nova lista de gatilhos de monitoramento.",
-          "items": {
+      "name": "update_monitoring",
+      "description": "Edita as configurações de um monitoramento ativo existente (como alterar triggers, schedule, cooldownSec, câmera ou rótulo). Use get_status ou list_cameras para obter o monitorId.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "monitorId": {
+            "type": "string",
+            "description": "ID exato do monitoramento ativo a alterar (ex.: 'mon-1722880000000')."
+          },
+          "cameraId": {
+            "type": "string",
+            "description": "ID exato ou nome da nova câmera (opcional)."
+          },
+          "triggers": {
+            "type": "array",
+            "description": "Nova lista de gatilhos de monitoramento.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "motion",
+                    "object",
+                    "presence",
+                    "absence",
+                    "scene",
+                    "periodic"
+                  ],
+                  "description": "Tipo do gatilho."
+                },
+                "className": {
+                  "type": "string",
+                  "description": "Classe do objeto COCO em inglês (ex: 'person', 'cat', 'dog', 'car')."
+                },
+                "event": {
+                  "type": "string",
+                  "enum": [
+                    "entered",
+                    "left",
+                    "still_present"
+                  ],
+                  "description": "Evento de presença/ausência."
+                },
+                "sensitivity": {
+                  "type": "string",
+                  "enum": [
+                    "low",
+                    "med",
+                    "high"
+                  ],
+                  "description": "Sensibilidade de movimento."
+                },
+                "minArea": {
+                  "type": "number",
+                  "description": "Area minima do movimento (px)"
+                },
+                "minConfidence": {
+                  "type": "number",
+                  "description": "Confianca minima da deteccao (0 a 1)"
+                },
+                "present": {
+                  "type": "boolean",
+                  "description": "Exige presenca (true) ou ausencia (false) do objeto"
+                },
+                "windowSec": {
+                  "type": "number",
+                  "description": "Janela em segundos para o estado de presenca"
+                },
+                "question": {
+                  "type": "string",
+                  "description": "Pergunta SIM/NAO quando type e scene"
+                },
+                "everySec": {
+                  "type": "number",
+                  "description": "Intervalo em segundos para scene/periodic"
+                },
+                "onAnswer": {
+                  "type": "string",
+                  "description": "Resposta que dispara: yes, no ou change"
+                },
+                "confirmN": {
+                  "type": "number",
+                  "description": "Numero de confirmacoes consecutivas para disparar"
+                },
+                "task": {
+                  "type": "string",
+                  "description": "Tarefa do resumo periodico"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            }
+          },
+          "schedule": {
             "type": "object",
+            "description": "Novo horário de agendamento (opcional).",
             "properties": {
-              "type": {
+              "days": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                },
+                "description": "Dias da semana (0-6)."
+              },
+              "start": {
                 "type": "string",
-                "enum": [
-                  "motion",
-                  "object",
-                  "presence",
-                  "absence",
-                  "scene",
-                  "periodic"
-                ],
-                "description": "Tipo do gatilho."
+                "description": "Horário de início (ex: '22:00')."
               },
-              "className": {
+              "end": {
                 "type": "string",
-                "description": "Classe do objeto COCO em inglês (ex: 'person', 'cat', 'dog', 'car')."
-              },
-              "event": {
-                "type": "string",
-                "enum": [
-                  "entered",
-                  "left",
-                  "still_present"
-                ],
-                "description": "Evento de presença/ausência."
-              },
-              "sensitivity": {
-                "type": "string",
-                "enum": [
-                  "low",
-                  "med",
-                  "high"
-                ],
-                "description": "Sensibilidade de movimento."
-              },
-              "minArea": {
-                "type": "number",
-                "description": "Area minima do movimento (px)"
-              },
-              "minConfidence": {
-                "type": "number",
-                "description": "Confianca minima da deteccao (0 a 1)"
-              },
-              "present": {
-                "type": "boolean",
-                "description": "Exige presenca (true) ou ausencia (false) do objeto"
-              },
-              "windowSec": {
-                "type": "number",
-                "description": "Janela em segundos para o estado de presenca"
-              },
-              "question": {
-                "type": "string",
-                "description": "Pergunta SIM/NAO quando type e scene"
-              },
-              "everySec": {
-                "type": "number",
-                "description": "Intervalo em segundos para scene/periodic"
-              },
-              "onAnswer": {
-                "type": "string",
-                "description": "Resposta que dispara: yes, no ou change"
-              },
-              "confirmN": {
-                "type": "number",
-                "description": "Numero de confirmacoes consecutivas para disparar"
-              },
-              "task": {
-                "type": "string",
-                "description": "Tarefa do resumo periodico"
+                "description": "Horário de término (ex: '06:00')."
               }
-            },
-            "required": [
-              "type"
-            ]
-          }
-        },
-        "schedule": {
-          "type": "object",
-          "description": "Novo horário de agendamento (opcional).",
-          "properties": {
-            "days": {
-              "type": "array",
-              "items": {
-                "type": "number"
+            }
+          },
+          "cooldownSec": {
+            "type": "number",
+            "description": "Novo cooldown em segundos (10 a 3600) (opcional)."
+          },
+          "notify": {
+            "type": "object",
+            "description": "Novas configurações de notificação.",
+            "properties": {
+              "native": {
+                "type": "boolean"
               },
-              "description": "Dias da semana (0-6)."
-            },
-            "start": {
-              "type": "string",
-              "description": "Horário de início (ex: '22:00')."
-            },
-            "end": {
-              "type": "string",
-              "description": "Horário de término (ex: '06:00')."
+              "chat": {
+                "type": "boolean"
+              }
             }
+          },
+          "label": {
+            "type": "string",
+            "description": "Novo rótulo/nome do monitoramento (opcional)."
+          },
+          "actions": {
+            "type": "array",
+            "description": "Acoes a anexar ao monitor"
           }
         },
-        "cooldownSec": {
-          "type": "number",
-          "description": "Novo cooldown em segundos (10 a 3600) (opcional)."
-        },
-        "notify": {
-          "type": "object",
-          "description": "Novas configurações de notificação.",
-          "properties": {
-            "native": {
-              "type": "boolean"
-            },
-            "chat": {
-              "type": "boolean"
-            }
-          }
-        },
-        "label": {
-          "type": "string",
-          "description": "Novo rótulo/nome do monitoramento (opcional)."
-        },
-        "actions": {
-          "type": "array",
-          "description": "Acoes a anexar ao monitor"
-        }
-      },
-      "required": [
-        "monitorId"
-      ]
-    }
-  },
+        "required": [
+          "monitorId"
+        ]
+      }
+    },
     {
       "name": "pause_monitoring",
       "description": "Pausa um monitoramento sem excluir (monitorId ou all:true). O monitoramento para de executar e o card some, mas os dados e configurações permanecem salvos e podem ser retomados depois (resume_monitoring) ou excluídos (stop_monitoring).",
       "parameters": {
         "type": "object",
         "properties": {
-          "monitorId": { "type": "string", "description": "ID exato do monitoramento a pausar (ex.: 'mon-1722880000000')." },
-          "all": { "type": "boolean", "description": "Pausa todos os monitoramentos." }
+          "monitorId": {
+            "type": "string",
+            "description": "ID exato do monitoramento a pausar (ex.: 'mon-1722880000000')."
+          },
+          "all": {
+            "type": "boolean",
+            "description": "Pausa todos os monitoramentos."
+          }
         }
       }
     },
@@ -361,8 +530,14 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "monitorId": { "type": "string", "description": "ID exato do monitoramento a retomar (ex.: 'mon-1722880000000')." },
-          "all": { "type": "boolean", "description": "Retoma todos os monitoramentos pausados." }
+          "monitorId": {
+            "type": "string",
+            "description": "ID exato do monitoramento a retomar (ex.: 'mon-1722880000000')."
+          },
+          "all": {
+            "type": "boolean",
+            "description": "Retoma todos os monitoramentos pausados."
+          }
         }
       }
     },
@@ -372,8 +547,12 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "monitorId": { "type": "string" },
-          "all": { "type": "boolean" }
+          "monitorId": {
+            "type": "string"
+          },
+          "all": {
+            "type": "boolean"
+          }
         }
       }
     },
@@ -387,51 +566,53 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "limit": { "type": "number" }
+          "limit": {
+            "type": "number"
+          }
         }
       }
     },
     {
-    "name": "show_overlay",
-    "description": "Exibe o overlay/card flutuante visual da câmera com a foto limpa do alerta, sem caixas por padrão (ação padrão do MomAI Vision para alertas visuais).",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "cameraId": {
-          "type": "string",
-          "description": "ID ou nome da câmera. Pode usar {{trigger.payload.cameraId}} ou {{trigger.payload.cameraName}}."
-        },
-        "description": {
-          "type": "string",
-          "description": "Descrição do alerta. Pode usar {{trigger.payload.description}}."
-        },
-        "imageDataUri": {
-          "type": "string",
-          "description": "Imagem em base64 do alerta. Pode usar {{trigger.payload.imageDataUri}}."
-        },
-        "cameraName": {
-          "type": "string",
-          "description": "Nome da camera exibido no overlay"
-        },
-        "boxes": {
-          "type": "array",
-          "description": "Caixas de deteccao a desenhar"
-        },
-        "includeBoxes": {
-          "type": "boolean",
-          "description": "Inclui as caixas de deteccao no overlay"
-        },
-        "showBoxes": {
-          "type": "boolean",
-          "description": "Exibe as caixas de deteccao no overlay"
-        },
-        "tts": {
-          "type": "string",
-          "description": "Texto para fala do alerta"
+      "name": "show_overlay",
+      "description": "Exibe o overlay/card flutuante visual da câmera com a foto limpa do alerta, sem caixas por padrão (ação padrão do MomAI Vision para alertas visuais).",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cameraId": {
+            "type": "string",
+            "description": "ID ou nome da câmera. Pode usar {{trigger.payload.cameraId}} ou {{trigger.payload.cameraName}}."
+          },
+          "description": {
+            "type": "string",
+            "description": "Descrição do alerta. Pode usar {{trigger.payload.description}}."
+          },
+          "imageDataUri": {
+            "type": "string",
+            "description": "Imagem em base64 do alerta. Pode usar {{trigger.payload.imageDataUri}}."
+          },
+          "cameraName": {
+            "type": "string",
+            "description": "Nome da camera exibido no overlay"
+          },
+          "boxes": {
+            "type": "array",
+            "description": "Caixas de deteccao a desenhar"
+          },
+          "includeBoxes": {
+            "type": "boolean",
+            "description": "Inclui as caixas de deteccao no overlay"
+          },
+          "showBoxes": {
+            "type": "boolean",
+            "description": "Exibe as caixas de deteccao no overlay"
+          },
+          "tts": {
+            "type": "string",
+            "description": "Texto para fala do alerta"
+          }
         }
       }
     }
-  }
   ],
   "capabilities": {
     "actions": [
@@ -471,10 +652,28 @@
   "storage": [
     {
       "description": "Prints (imagens JPEG) e regras de monitoramento, guardados localmente.",
-      "locations": ["snapshots/*.jpg", "monitors.json", "config.json", "cameras.json", "extension.db (snapshots, alertas)"],
+      "locations": [
+        "snapshots/*.jpg",
+        "monitors.json",
+        "config.json",
+        "cameras.json",
+        "extension.db (snapshots, alertas)"
+      ],
       "collections": [
-        { "name": "snapshots", "indexes": ["cameraId"], "retentionDays": 30 },
-        { "name": "alerts", "indexes": ["cameraId"], "retentionDays": 90 }
+        {
+          "name": "snapshots",
+          "indexes": [
+            "cameraId"
+          ],
+          "retentionDays": 30
+        },
+        {
+          "name": "alerts",
+          "indexes": [
+            "cameraId"
+          ],
+          "retentionDays": 90
+        }
       ]
     }
   ],

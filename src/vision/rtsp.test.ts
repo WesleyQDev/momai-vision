@@ -15,6 +15,7 @@ import {
   RTSP_CODEC_OPTIONS,
   buildRtspFfmpegArgs,
   decideRtspReconnect,
+  describeRtspIssue,
   isBenignRtspStderr,
   isRtspAuthFailure,
   isRtspMidStreamStalled,
@@ -43,6 +44,15 @@ describe('rtsp connection policy', () => {
     expect(args).toContain(url)
     // Still transcodes to an MJPEG pipe for the preview pipeline.
     expect(args.slice(-4)).toEqual(['mjpeg', '-q:v', '5', 'pipe:1'])
+  })
+
+  it('passes an RTSP URL with encoded credentials to ffmpeg unchanged', () => {
+    const url = 'rtsp://admin:Aa91650039%23@192.168.0.4:554/onvif1'
+    for (const transport of ['tcp', 'udp'] as const) {
+      const args = buildRtspFfmpegArgs(url, transport)
+      expect(args[args.indexOf('-i') + 1]).toBe(url)
+      expect(args[args.indexOf('-rtsp_transport') + 1]).toBe(transport)
+    }
   })
 
   it('waits long enough for a slow first RTP packet instead of failing at 3s', () => {
@@ -116,6 +126,7 @@ describe('rtsp connection policy', () => {
       )
     ).toBe(true)
     expect(isBenignRtspStderr('non monotonically increasing dts to muxer in stream 0')).toBe(true)
+    expect(isBenignRtspStderr('    Last message repeated 1 times')).toBe(true)
     expect(isBenignRtspStderr('server returned 401 unauthorized')).toBe(false)
     expect(isBenignRtspStderr('')).toBe(false)
   })
@@ -181,6 +192,17 @@ describe('rtsp connection policy', () => {
         hadFirstFrame: false
       })
     ).toEqual({ action: 'retry-same-transport', delayMs: RTSP_EARLY_RETRY_DELAY_MS })
+  })
+
+  it('classifies the connection issue for the card hint', () => {
+    expect(describeRtspIssue('auth')).toBe('auth')
+    expect(describeRtspIssue('server returned 401 unauthorized')).toBe('auth')
+    expect(describeRtspIssue('ffmpeg-missing')).toBe('ffmpeg-missing')
+    expect(describeRtspIssue('method setup failed: 404 stream not found')).toBe('not-found')
+    expect(describeRtspIssue('connection timed out')).toBe('network')
+    expect(describeRtspIssue('connection refused')).toBe('network')
+    expect(describeRtspIssue('')).toBe('unknown')
+    expect(describeRtspIssue('invalid data found when processing input')).toBe('unknown')
   })
 
   it('backs off on auth failures instead of hammering the camera', () => {

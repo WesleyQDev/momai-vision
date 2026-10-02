@@ -17,7 +17,7 @@ interface LiveState {
 }
 
 const DRAW_THROTTLE_MS = 100
-const STREAM_WATCHDOG_MS = 12000
+const STREAM_WATCHDOG_MS = 4000
 const POLL_MS = 1000
 const MAX_POLL_FAILURES = 5
 
@@ -97,16 +97,31 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
 
       // Warmup validates the camera (selected, not paused) and paints the
       // first frame immediately while the stream connects.
-      try {
-        const first = await fetchWidgetFrame(cameraId)
+      const maxWarmupTries = 4
+      for (let i = 1; i <= maxWarmupTries; i++) {
         if (cancelled) return
-        await decodeDataUrlToCanvas(canvasRef.current, first.image)
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Capture failed.')
-          setStatus('error')
+        try {
+          const first = await fetchWidgetFrame(cameraId)
+          if (cancelled) return
+          await decodeDataUrlToCanvas(canvasRef.current, first.image)
+          break
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('não está selecionada') || msg.includes('paused')) {
+            if (!cancelled) {
+              setError(msg)
+              setStatus('error')
+            }
+            return
+          }
+          if (i === maxWarmupTries) {
+            // If warmup attempts were exhausted but camera is not paused/unselected,
+            // don't halt in error — fall through to stream/polling so it connects
+            // as soon as hardware/FFmpeg delivers.
+            break
+          }
+          await new Promise((resolve) => setTimeout(resolve, 600))
         }
-        return
       }
       if (cancelled) return
 
@@ -227,6 +242,8 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
           const { image } = await fetchWidgetFrame(cameraId)
           if (cancelled) return
           failures = 0
+          setError('')
+          setStatus('polling')
           await decodeDataUrlToCanvas(canvasRef.current, image)
         } catch (err) {
           failures += 1

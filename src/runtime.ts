@@ -317,6 +317,46 @@ function listCameras(): CameraEntry[] {
   return [...webcamCache, ...ipCameras]
 }
 
+/**
+ * Returns only the cameras that have actually been added/selected by the user.
+ * Discovered computer webcams that were never added are excluded from the main
+ * views and status.
+ */
+async function getConfiguredCameras(): Promise<CameraEntry[]> {
+  const config = await loadConfig()
+  const selectedSet = new Set(config.selectedCameras || [])
+
+  const result: CameraEntry[] = []
+  const addedIds = new Set<string>()
+
+  // 1. Webcams selected by the user
+  for (const id of selectedSet) {
+    if (!id.startsWith('webcam:')) continue
+    if (addedIds.has(id)) continue
+    addedIds.add(id)
+    const cached = webcamCache.find((c) => c.id === id)
+    if (cached) {
+      result.push(cached)
+    } else {
+      result.push({
+        id,
+        name: 'Webcam',
+        source: 'webcam',
+        deviceId: id.slice('webcam:'.length)
+      })
+    }
+  }
+
+  // 2. IP cameras configured in config.ipCameras
+  for (const ipCam of ipCameras) {
+    if (addedIds.has(ipCam.id)) continue
+    addedIds.add(ipCam.id)
+    result.push(ipCam)
+  }
+
+  return result
+}
+
 function findCamera(id: string): CameraEntry | undefined {
   if (!id) return undefined
   const cameras = listCameras()
@@ -970,7 +1010,14 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
         stderrBuf += msg
         if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000)
         if (isBenignRtspStderr(msg)) return
-        if (msg.includes('POC') || msg.includes('RPS') || msg.includes('NALU') || msg.includes('PPS id')) return
+        const lower = msg.toLowerCase()
+        if (
+          lower.includes('poc') ||
+          lower.includes('rps') ||
+          lower.includes('nalu') ||
+          lower.includes('pps id') ||
+          lower.includes('last message repeated')
+        ) return
         bridge?.log(`[vision] RTSP FFmpeg stderr (${camera.name}): ${msg.slice(0, 200)}`)
       })
 
@@ -2569,8 +2616,26 @@ async function remapRepluggedWebcamIds(): Promise<void> {
   void saveMonitors()
 }
 
+export function shouldKeepWebcamWatch(
+  cameraId: string,
+  wanted: Set<string> | Iterable<string>,
+  selectedCameras?: string[] | Set<string> | null,
+  pausedCameras?: string[] | Set<string> | null
+): boolean {
+  const wantedSet = wanted instanceof Set ? wanted : new Set(wanted)
+  if (wantedSet.has(cameraId)) return true
+  const selected = selectedCameras instanceof Set ? selectedCameras : new Set(selectedCameras || [])
+  if (!selected.has(cameraId)) return false
+  const paused = pausedCameras instanceof Set ? pausedCameras : new Set(pausedCameras || [])
+  return !paused.has(cameraId)
+}
+
 // Keep host watches alive for webcams that are being actively monitored,
 // so background detection stays on even after the Vision page closes.
+// A selected but unmonitored webcam is a live preview: its watch starts on
+// demand (warm_webcam/get_frame) and must survive the periodic sync,
+// otherwise the card freezes seconds after activation. Preview watches are
+// never auto-started here, so boot stays dark until the user opens the page.
 async function syncWebcamWatches(): Promise<void> {
   const wanted = new Set<string>()
   for (const m of monitors.values()) {
@@ -2579,6 +2644,16 @@ async function syncWebcamWatches(): Promise<void> {
   }
   for (const auto of autoMonitorsCache) {
     if (!auto.config.paused && auto.config.cameraId.startsWith('webcam:')) wanted.add(auto.config.cameraId)
+  }
+
+  let selectedCameras: string[] = []
+  let pausedCameras: string[] = []
+  try {
+    const cfg = await loadConfig()
+    selectedCameras = cfg.selectedCameras || []
+    pausedCameras = cfg.pausedCameras || []
+  } catch {
+    // Config unreadable: fall back to monitor-only behavior.
   }
 
   // Se não há nenhum monitor ativo e nenhum watch aberto, não faz nada (evita ligar câmera no boot)
@@ -2593,9 +2668,8 @@ async function syncWebcamWatches(): Promise<void> {
 
   if (webcamCache.length > 0 || wanted.size === 0) {
     for (const id of [...webcamWatches]) {
-      if (!wanted.has(id)) {
-        await stopWebcamWatchById(id)
-      }
+      if (shouldKeepWebcamWatch(id, wanted, selectedCameras, pausedCameras)) continue
+      await stopWebcamWatchById(id)
     }
   }
   for (const id of wanted) {
@@ -2608,7 +2682,7 @@ async function syncWebcamWatches(): Promise<void> {
   }
 }
 
-async function toolListCameras(): Promise<unknown> {
+async function toolListCameras(args?: { all?: boolean; includeDiscovered?: boolean }): Promise<unknown> {
   // Enumeração SEM bloquear o comando. Com cache existente (o dropdown já
   // enumerou), refresca em background e devolve o cache atual; sem cache
   // (boot), espera no máximo 3s. list_cameras roda no poll de 5s e dentro do
@@ -2632,21 +2706,35 @@ async function toolListCameras(): Promise<unknown> {
   // reconnect re-tentam até a câmera subir; o status "Conectado" aparece no
   // próximo poll assim que o frame fluir.
   void syncWebcamWatches().catch(() => {})
-  const cameras = listCameras()
+
+  const configured = await getConfiguredCameras()
+  const camerasToReturn = args?.all || args?.includeDiscovered
+    ? [...webcamCache, ...ipCameras]
+    : configured
+
   const statusStart = Date.now()
   const status = await getStatusData()
   const statusMs = Date.now() - statusStart
-  if (statusMs > 1000) bridge?.log(`[vision] list_cameras: getStatusData took ${statusMs}ms (${cameras.length} cams)`)
+  if (statusMs > 1000) bridge?.log(`[vision] list_cameras: getStatusData took ${statusMs}ms (${camerasToReturn.length} cams)`)
   const config = await loadConfig()
   const selectedSet = new Set(config.selectedCameras || [])
   return {
     ok: true,
-    cameras: cameras.map((c) => ({
+    cameras: camerasToReturn.map((c) => ({
       id: c.id,
       name: c.name,
       source: c.source,
       online: status[c.id]?.online ?? false,
       monitors: status[c.id]?.monitors ?? 0,
+      connecting: status[c.id]?.connecting ?? false,
+      lastError: status[c.id]?.lastError || '',
+      selected: selectedSet.has(c.id)
+    })),
+    availableWebcams: webcamCache.map((c) => ({
+      id: c.id,
+      name: c.name,
+      source: c.source,
+      deviceId: c.deviceId,
       selected: selectedSet.has(c.id)
     })),
     selectedCameras: config.selectedCameras || []
@@ -2778,7 +2866,8 @@ async function toolStartMonitoring(
   const selectedList = config.selectedCameras || []
 
   await refreshWebcams()
-  const allCameras = listCameras()
+  const configuredCameras = await getConfiguredCameras()
+  const allCameras = configuredCameras.length > 0 ? configuredCameras : listCameras()
   const rawText = (args.content || args.query || args.input || args.prompt || '').trim()
   const rawArgs = args as unknown as Record<string, unknown>
 
@@ -2827,8 +2916,8 @@ async function toolStartMonitoring(
   const camera = findCamera(targetId)
   if (!camera) {
     bridge?.log(`[vision] start_monitoring failed: unknown camera "${targetId}"`)
-    const available = allCameras.map((c) => `"${c.name}" (id: ${c.id})`).join(', ')
-    return { ok: false, error: `Câmera não encontrada: "${targetId}". Câmeras disponíveis: ${available}` }
+    const available = configuredCameras.map((c) => `"${c.name}" (id: ${c.id})`).join(', ')
+    return { ok: false, error: `Câmera não encontrada: "${targetId}". Câmeras disponíveis: ${available || 'nenhuma'}` }
   }
 
   if (!selectedList.includes(camera.id)) {
@@ -3312,8 +3401,9 @@ async function getStatusData(): Promise<
     list.push(m)
     byCamera.set(m.config.cameraId, list)
   }
+  const configured = await getConfiguredCameras()
   await Promise.all(
-    listCameras().map(async (camera) => {
+    configured.map(async (camera) => {
       const active = byCamera.get(camera.id) || []
       const online =
         camera.source === 'webcam'
@@ -3517,7 +3607,15 @@ async function toolGetFrame(args: { cameraId?: string }): Promise<unknown> {
       await reconnectWebcamIfStale(camera)
     }
   }
-  const frame = await getCameraFrame(camera)
+  let frame = await getCameraFrame(camera)
+  if (!frame) {
+    const startWait = Date.now()
+    while (Date.now() - startWait < 2500) {
+      await new Promise((r) => setTimeout(r, 150))
+      frame = await getCameraFrame(camera)
+      if (frame) break
+    }
+  }
   if (frame?.jpegBase64) {
     return { ok: true, jpegBase64: frame.jpegBase64 }
   }

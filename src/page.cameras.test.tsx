@@ -45,6 +45,7 @@ function setupServer(initial: Partial<ServerState> = {}) {
           ok: true,
           data: {
             cameras: state.cameras.map((c) => ({ ...c, selected: state.selectedCameras.includes(c.id) })),
+            availableWebcams: state.cameras.filter((c) => c.source === 'webcam'),
             selectedCameras: [...state.selectedCameras]
           }
         }

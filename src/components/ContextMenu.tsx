@@ -205,32 +205,66 @@ interface SubmenuPanelProps {
   minWidth: number
 }
 
-// Anchored to its parent row and opened to the right; flips sides when a
-// viewport edge would clip the panel.
+// Anchored to its parent row with screen-clamped offsets to guarantee
+// it is immediately visible and never cut off by viewport boundaries.
 function SubmenuPanel({ items, onClose, minWidth }: SubmenuPanelProps): React.ReactElement {
   const panelRef = useRef<HTMLDivElement>(null)
-  const [flipX, setFlipX] = useState(false)
-  const [flipY, setFlipY] = useState(false)
+  const [style, setStyle] = useState<React.CSSProperties>({
+    position: 'absolute',
+    left: '100%',
+    top: 0,
+    marginLeft: '4px'
+  })
 
   useLayoutEffect(() => {
     const panel = panelRef.current
-    if (!panel) return
-    const rect = panel.getBoundingClientRect()
+    // The panel is rendered inside its row, so the row is the parent element.
+    const rowEl = panel?.parentElement
+    if (!panel || !rowEl) return
+    const rowRect = rowEl.getBoundingClientRect()
+    const panelRect = panel.getBoundingClientRect()
     const padding = 8
-    setFlipX(rect.right > window.innerWidth - padding)
-    setFlipY(rect.bottom > window.innerHeight - padding)
-  }, [])
+
+    // Preferred screen X: to the right of parent row
+    let targetScreenX = rowRect.right + 4
+    if (targetScreenX + panelRect.width > window.innerWidth - padding) {
+      // Try to the left of parent row
+      targetScreenX = rowRect.left - panelRect.width - 4
+    }
+    // Clamp to viewport
+    targetScreenX = Math.max(padding, Math.min(window.innerWidth - panelRect.width - padding, targetScreenX))
+
+    // Preferred screen Y: aligned with top of parent row
+    let targetScreenY = rowRect.top
+    if (targetScreenY + panelRect.height > window.innerHeight - padding) {
+      targetScreenY = Math.max(padding, window.innerHeight - panelRect.height - padding)
+    }
+
+    // Convert absolute screen coordinates into offsets relative to parent row
+    const offsetX = targetScreenX - rowRect.left
+    const offsetY = targetScreenY - rowRect.top
+
+    setStyle({
+      position: 'absolute',
+      left: `${offsetX}px`,
+      top: `${offsetY}px`,
+      minWidth: `${minWidth}px`,
+      WebkitAppRegion: 'no-drag'
+    } as React.CSSProperties)
+  }, [minWidth])
 
   return (
     <div
       ref={panelRef}
       role="menu"
       aria-orientation="vertical"
-      className={`absolute z-20 ${flipX ? 'right-full mr-1' : 'left-full ml-1'} ${
-        flipY ? 'bottom-0' : 'top-0'
-      } bg-card/95 backdrop-blur-md border border-border/80 rounded-lg shadow-xl p-1 select-none animate-in fade-in zoom-in-95 duration-100`}
-      style={{ minWidth: `${minWidth}px`, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      className="z-50 bg-card/95 backdrop-blur-md border border-border/80 rounded-lg shadow-xl p-1 select-none animate-in fade-in zoom-in-95 duration-100"
+      style={style}
       onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+      }}
     >
       <MenuItems items={items} onClose={onClose} minWidth={minWidth} />
     </div>

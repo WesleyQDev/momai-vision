@@ -10,6 +10,10 @@ describe('validateCameraUrl (síncrono — esquema + literal)', () => {
     expect(validateCameraUrl('http://172.16.5.5:8080/video').ok).toBe(true)
   })
 
+  it('permite RTSP com senha contendo caractere codificado (%23)', () => {
+    expect(validateCameraUrl('rtsp://admin:Aa91650039%23@192.168.0.4:554/onvif1').ok).toBe(true)
+  })
+
   it('rejeita esquemas não suportados (file:, ftp:, data:, gopher:)', () => {
     expect(validateCameraUrl('file:///etc/passwd').ok).toBe(false)
     expect(validateCameraUrl('ftp://192.168.0.5/video').ok).toBe(false)
@@ -77,6 +81,15 @@ describe('assertCameraUrlSafe (com resolução de hostname)', () => {
       throw new Error('ENOTFOUND')
     }
     expect((await assertCameraUrlSafe('http://nao-existe.local/video', failing)).ok).toBe(true)
+  })
+
+  it('permite RTSP com senha codificada sem DNS', async () => {
+    const lookupSpy: LookupFn = async () => {
+      throw new Error('DNS must not be called for IP literals')
+    }
+    expect(
+      (await assertCameraUrlSafe('rtsp://admin:Aa91650039%23@192.168.0.4:554/onvif1', lookupSpy)).ok
+    ).toBe(true)
   })
 
   it('não faz DNS para literais de IP', async () => {

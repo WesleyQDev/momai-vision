@@ -20,13 +20,13 @@ import runtimeModule, { stopEngine, init } from './runtime'
 import { createIpcVisionStorage } from './worker-storage'
 
 const workerDir = path.dirname(fileURLToPath(import.meta.url))
-const [skillId, skillPath] = process.argv.slice(2)
+const [skillId = process.env.MOMAI_EXTENSION_ID || 'momai-vision', skillPath = process.env.MOMAI_EXTENSION_DIR || workerDir] = process.argv.slice(2)
 const dataDir =
   process.env.MOMAI_DATA_DIR ||
   process.env.MOMAI_NODE_CORE_DATA_DIR ||
   path.resolve(workerDir, '..', '..', 'data')
 
-const displayStorageDir = path.join(dataDir, 'extensions', skillId)
+const displayStorageDir = path.join(dataDir, 'extensions', skillId || 'momai-vision')
 
 let storageResponseListener: ((msg: any) => void) | null = null
 const ipcBridge = createIpcVisionStorage({
@@ -188,3 +188,7 @@ setInterval(() => {
 process.on('exit', () => {
   try { stopEngine() } catch {}
 })
+
+export default runtimeModule
+export { runtimeModule, stopEngine, init }
+

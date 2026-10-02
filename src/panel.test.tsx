@@ -26,6 +26,20 @@ describe('VisionPanel', () => {
     expect(screen.getByText('Ativo')).toBeTruthy()
   })
 
+  it('shows 0 cameras when no cameras were added by the user', async () => {
+    const sdk = getSDK()
+    vi.mocked(sdk.api.post).mockResolvedValueOnce({
+      ok: true,
+      data: {
+        monitors: [],
+        cameras: {}
+      }
+    })
+    render(<VisionPanel />)
+    await screen.findByText('Câmeras (0 Online)')
+    expect(screen.getAllByText('0')).toHaveLength(2)
+  })
+
   it('lists active monitors with trigger types', async () => {
     render(<VisionPanel />)
     await screen.findByText('Garagem')

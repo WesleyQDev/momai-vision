@@ -659,6 +659,40 @@ describe('runtime.js as a persistent worker (host contract)', () => {
   )
 
   it(
+    'returns only user-added cameras in list_cameras and get_status, not leaking unadded discovered webcams',
+    async () => {
+      // With no selected cameras, list_cameras returns an empty cameras array,
+      // but provides availableWebcams for the AddCameraModal.
+      await execute({ toolName: 'configure', args: { selectedCameras: [] } })
+
+      const emptyList = (await execute({ toolName: 'list_cameras', args: {} })) as {
+        cameras: Array<{ id: string }>
+        availableWebcams?: Array<{ id: string }>
+      }
+      expect(emptyList.cameras).toEqual([])
+      expect(emptyList.availableWebcams?.some((c) => c.id === 'webcam:test-cam')).toBe(true)
+
+      const emptyStatus = (await execute({ toolName: 'get_status', args: {} })) as {
+        cameras: Record<string, unknown>
+      }
+      expect(Object.keys(emptyStatus.cameras)).toEqual([])
+
+      // When added, the camera appears in both list_cameras and get_status.
+      await execute({ toolName: 'configure', args: { selectedCameras: ['webcam:test-cam'] } })
+      const addedList = (await execute({ toolName: 'list_cameras', args: {} })) as {
+        cameras: Array<{ id: string }>
+      }
+      expect(addedList.cameras.map((c) => c.id)).toEqual(['webcam:test-cam'])
+
+      const addedStatus = (await execute({ toolName: 'get_status', args: {} })) as {
+        cameras: Record<string, unknown>
+      }
+      expect(Object.keys(addedStatus.cameras)).toEqual(['webcam:test-cam'])
+    },
+    60000
+  )
+
+  it(
     'pauses an automation monitor: toggles the hub automation via PATCH and returns ok',
     async () => {
       // O branch auto- de pause_monitoring desativa a automação no hub (PATCH

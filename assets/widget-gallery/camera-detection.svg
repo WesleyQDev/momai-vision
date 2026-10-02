@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 270" fill="none">
+  <defs>
+    <linearGradient id="room" x1="240" y1="0" x2="240" y2="270" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d1cec6"/>
+      <stop offset="1" stop-color="#88847c"/>
+    </linearGradient>
+  </defs>
+  <rect width="480" height="270" fill="url(#room)"/>
+  <path d="M0 182h480v88H0z" fill="#77736c"/>
+  <path d="M0 182h480" stroke="#5f5c56" stroke-width="3"/>
+  <rect x="33" y="30" width="125" height="98" rx="3" fill="#adb6b4"/>
+  <path d="M95 30v98M33 79h125" stroke="#d4d8d2" stroke-width="4"/>
+  <rect x="361" y="31" width="84" height="151" rx="3" fill="#6d6b65"/>
+  <rect x="370" y="40" width="66" height="142" fill="#9d9990"/>
+  <rect x="87" y="151" width="173" height="54" rx="10" fill="#8d8981"/>
+  <rect x="98" y="143" width="151" height="42" rx="9" fill="#aaa69d"/>
+  <path d="M104 200v23m145-23v23" stroke="#514f49" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="306" cy="145" r="19" fill="#77746d"/>
+  <path d="M300 163c-4 20-8 43-5 68m11-67c11 17 14 37 14 61m-25-36-18 23m35-28 17 20" stroke="#55534e" stroke-width="11" stroke-linecap="round"/>
+  <path d="M282 141c0-14 11-25 25-25s25 11 25 25v66h-50z" stroke="#f4f2ec" stroke-width="3" stroke-dasharray="8 5"/>
+  <rect x="275" y="103" width="61" height="20" rx="4" fill="#f4f2ec"/>
+  <circle cx="286" cy="113" r="3" fill="#77746d"/>
+  <path d="M0 0h480v270H0z" fill="#34332f" fill-opacity=".12"/>
+</svg>

@@ -15,6 +15,7 @@ import { AlertCanvasOverlay } from './panel'
 import { useI18n } from './hooks/useI18n'
 import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
 import {
+  describeRtspIssue,
   isRtspMidStreamStalled,
   resolvePreviewWidth,
   resolveRtspCodec,
@@ -32,6 +33,13 @@ import EditCameraModal, { type EditingCameraTarget } from './components/EditCame
 import { Pagination } from './components/Pagination'
 import { useWindowMaximized } from './hooks/useWindowMaximized'
 import { readCachedFrame, storeCachedFrame, shouldCaptureFrameCache, clearCachedFrame } from './vision/frame-cache'
+import {
+  BACKGROUND_WARMUP_INTERVAL_MS,
+  pollIntervalMs,
+  shouldRunBackgroundWarmup,
+  toCacheDataUrl,
+  warmupStaggerMs
+} from './vision/background-warmup'
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
@@ -44,6 +52,8 @@ interface CameraInfo {
   source: 'webcam' | 'ip'
   online: boolean
   monitors: number
+  connecting?: boolean
+  lastError?: string
 }
 
 interface AutomationWorkflowSnapshot {
@@ -269,17 +279,35 @@ function cameraPlaceholderStatus(
   return text('cameras.connecting', 'Conectando...')
 }
 
-function cameraPlaceholderSubtitle(
+export function cameraPlaceholderSubtitle(
   camera: CameraInfo,
   reloading: boolean,
   error: string | null,
   isSlow: boolean,
-  isUnavailable: boolean
+  isUnavailable: boolean,
+  translate?: TranslateFn
 ): string | null {
-  if (isUnavailable) return null
-  if (error) return null
-  if (isSlow || reloading || !camera.online) return null
-  return null
+  if (camera.source !== 'ip') return null
+  if (!isUnavailable && !error) return null
+  const raw = camera.lastError || ''
+  if (!raw) return null
+  const text = (key: string, fallback: string): string => {
+    if (!translate) return fallback
+    const translated = translate(key)
+    return translated && translated !== key ? translated : fallback
+  }
+  switch (describeRtspIssue(raw)) {
+    case 'auth':
+      return text('cameras.issueAuth', 'Verifique usuário e senha')
+    case 'not-found':
+      return text('cameras.issueNotFound', 'Caminho do stream não encontrado (404)')
+    case 'network':
+      return text('cameras.issueNetwork', 'Sem resposta — rede ou transporte (TCP/UDP)')
+    case 'ffmpeg-missing':
+      return text('cameras.issueFfmpeg', 'FFmpeg não encontrado no host')
+    default:
+      return null
+  }
 }
 
 function formatTime(ts?: number, locale?: string): string {
@@ -2211,38 +2239,42 @@ export const CameraCard = memo(function CameraCard({
     }
   }, [hasFrame, error, camera.id, reloading, refreshKey])
 
-  // Warmup: dispara um get_frame único na montagem do card (mesmo com a view
-  // oculta na pré-montagem em background). Isso inicia o stream da câmera
-  // (startMjpeg/start-watch) cedo, então quando o usuário abre o page o
-  // primeiro frame já está pronto — sem a demora de "iniciando" e sem todas
-  // as câmeras aparecerem juntas no mesmo instante.
-  //
-  // IMPORTANTE: NUNCA sobrescrever o src do <img> com um data URI aqui. O
-  // preview é o stream MJPEG (src={streamUrl}); mutar imgRef.current.src
-  // imperativamente ABORTA o carregamento do stream e, como o src do React
-  // (memo) não muda, o <img> nunca volta ao MJPEG — o preview congela e o
-  // contador de FPS (que conta os onLoad do stream) fica preso em 1. Este
-  // efeito apenas dispara get_frame para iniciar o stream no backend e guarda
-  // o frame para o pump de detecção.
+  // Warmup: single get_frame on mount plus a slow snapshot loop while the
+  // page stays pre-mounted hidden. Keeps the backend stream warm and the
+  // last-frame cache fresh, so opening the tab shows a recent image at once.
+  // Foreground uses the continuous MJPEG reader; background never starts it.
   useEffect(() => {
     if (isPaused) return
     let cancelled = false
-    const warm = async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const warm = async (store: boolean) => {
       try {
-        // Dispara get_frame único para INICIAR o stream no backend (startMjpeg
-        // / start-watch) cedo. O frame em si é descartado — o preview usa o
-        // stream MJPEG e o pump usa o último blob que o leitor recebeu.
-        await command('get_frame', { cameraId: camera.id })
+        const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
+        if (!cancelled && store) {
+          const dataUrl = toCacheDataUrl(res?.jpegBase64)
+          if (dataUrl) storeCachedFrame(camera.id, dataUrl)
+        }
       } catch {
-        // O loop visível cuida do retry.
+        // Visible loop retries.
       }
     }
-    void warm()
+    void warm(false)
+    const hidden = typeof document !== 'undefined' && document.hidden
+    if (shouldRunBackgroundWarmup({ isActive: isActive ?? true, isPaused, hidden })) {
+      const tick = () => {
+        if (cancelled) return
+        const isHidden = typeof document !== 'undefined' && document.hidden
+        if (!isHidden) void warm(true)
+        if (!cancelled) timer = setTimeout(tick, BACKGROUND_WARMUP_INTERVAL_MS)
+      }
+      timer = setTimeout(tick, warmupStaggerMs(camera.id, BACKGROUND_WARMUP_INTERVAL_MS))
+    }
     return () => {
       cancelled = true
+      if (timer) clearTimeout(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [camera.id, isPaused])
+  }, [camera.id, isPaused, isActive])
 
   const streamUrl = useMemo(() => {
     const deviceId = camera.id.startsWith('webcam:') ? camera.id.slice('webcam:'.length) : camera.id
@@ -2938,6 +2970,9 @@ export const CameraCard = memo(function CameraCard({
                 <VisionIcon className="w-5 h-5 text-text-muted" />
               </span>
               <span className="font-medium leading-none">{cameraPlaceholderStatus(camera, reloading || reconnecting, error, isSlow, isUnavailable, t)}</span>
+              {cameraPlaceholderSubtitle(camera, reloading || reconnecting, error, isSlow, isUnavailable, t) && (
+                <span className="text-[10px] leading-tight opacity-80">{cameraPlaceholderSubtitle(camera, reloading || reconnecting, error, isSlow, isUnavailable, t)}</span>
+              )}
             </div>
           )}
           {isPaused && (
@@ -6623,6 +6658,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       return []
     }
   })
+  const [availableWebcams, setAvailableWebcams] = useState<CameraInfo[]>([])
   const [monitors, setMonitors] = useState<MonitorInfo[]>(() => {
     try {
       const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:monitors`) : null
@@ -6923,7 +6959,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     pollInFlightRef.current = true
     try {
       const [camRes, statusRes, alertsRes, activeTriggersRes] = await Promise.all([
-        command<{ cameras: CameraInfo[]; selectedCameras?: string[] | null }>('list_cameras'),
+        command<{ cameras: CameraInfo[]; availableWebcams?: CameraInfo[]; selectedCameras?: string[] | null }>('list_cameras', { includeDiscovered: true }),
         command<{ monitors: MonitorInfo[]; detectionZones?: Record<string, Point[]>; showBoxes?: Record<string, boolean>; showZones?: Record<string, boolean> }>('get_status'),
         command<{ alerts: Alert[] }>('list_alerts').catch(() => null),
         fetchActiveAutomationTriggers()
@@ -6970,7 +7006,10 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           return next
         })
       }
-      const fetchedCams = applyCameraNameAliases(camRes.cameras || [])
+      if (Array.isArray(camRes?.availableWebcams)) {
+        setAvailableWebcams(applyCameraNameAliases(camRes.availableWebcams))
+      }
+      const fetchedCams = applyCameraNameAliases(camRes?.cameras || [])
       setCameras(fetchedCams)
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(`${EXT_ID}:cameras`, JSON.stringify(fetchedCams))
@@ -7220,11 +7259,10 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       setIsMonitorModalOpen(false)
       setExpandedAlert(null)
       setExpandedPrint(null)
-      return
     }
     void poll()
-    void refreshGallery()
-    const timer = setInterval(() => void poll(), 5000)
+    if (isActive) void refreshGallery()
+    const timer = setInterval(() => void poll(), pollIntervalMs(isActive))
     return () => clearInterval(timer)
   }, [poll, refreshGallery, isActive])
 
@@ -7794,6 +7832,17 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
     }
     return ordered
   }, [cameras, activeSelectedIds])
+
+  const allCamerasForModal = useMemo(() => {
+    const map = new Map<string, CameraInfo>()
+    for (const c of cameras) {
+      map.set(c.id, c)
+    }
+    for (const w of availableWebcams) {
+      if (!map.has(w.id)) map.set(w.id, w)
+    }
+    return Array.from(map.values())
+  }, [cameras, availableWebcams])
 
   const handleDragStart = useCallback((e: React.DragEvent, index: number) => {
     setDraggedIndex(index)
@@ -8545,7 +8594,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           setIsMonitorModalOpen(false)
           setEditingMonitor(null)
         }}
-        cameras={cameras}
+        cameras={displayedCameras}
         initialMonitor={editingMonitor}
         onSave={(updated) => {
           if (updated?.id) {
@@ -8561,7 +8610,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
         isOpen={isModalOpen && isActive}
         isActive={isActive}
         onClose={() => setIsModalOpen(false)}
-        allCameras={cameras}
+        allCameras={allCamerasForModal}
         selectedCameraIds={activeSelectedIds}
         onConfirm={confirmAddCameras}
       />
