@@ -27,9 +27,9 @@ export const RTSP_PREFERRED_TRANSPORT_DEFAULT: RtspTransport = 'tcp'
  */
 export const RTSP_CONNECT_TIMEOUT_US = '8000000'
 
-/** Stream probe caps — small enough for a fast first frame on LAN. */
-export const RTSP_PROBESIZE = '64k'
-export const RTSP_ANALYZE_DURATION_US = '500000'
+/** Stream probe caps — minimal so FFmpeg emits the very first IDR frame immediately. */
+export const RTSP_PROBESIZE = '32k'
+export const RTSP_ANALYZE_DURATION_US = '100000'
 
 /** Delay before restarting a dropped mid-stream session (same transport). */
 export const RTSP_RESTART_DELAY_MS = 800

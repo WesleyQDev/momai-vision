@@ -17,8 +17,8 @@
 /** Minimum interval between pushes while a preview is subscribed (~15fps). */
 export const ACTIVE_PUSH_MIN_INTERVAL_MS = 66
 
-/** Heartbeat interval when nobody is subscribed. */
-export const IDLE_PUSH_INTERVAL_MS = 1000
+/** Heartbeat interval when nobody is subscribed (~4fps keeps host cache <250ms fresh and wakes active push in <=250ms). */
+export const IDLE_PUSH_INTERVAL_MS = 250
 
 /** 0 means "no throttle" — used while the subscriber count is unknown. */
 export function framePushIntervalMs(subscribers: number | null): number {

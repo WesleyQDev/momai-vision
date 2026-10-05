@@ -11,6 +11,7 @@ import {
   resolveRtspCodec,
   type RtspCodec
 } from '../vision/rtsp'
+import { buildAuthenticatedUrl, parseCameraAuth, redactCameraUrl } from '../vision/rtsp-auth'
 import visionIconPng from '../../icon.png'
 
 const sdk = getSDK()
@@ -47,6 +48,9 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
   const isMaximized = useWindowMaximized()
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [transport, setTransport] = useState<'tcp' | 'udp'>('udp')
   const [previewWidth, setPreviewWidth] = useState<number>(PREVIEW_WIDTH_DEFAULT)
   const [codec, setCodec] = useState<RtspCodec>(RTSP_CODEC_DEFAULT)
@@ -54,16 +58,49 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
   const [submitting, setSubmitting] = useState(false)
   const [clearingCache, setClearingCache] = useState(false)
   const [clearCacheSuccess, setClearCacheSuccess] = useState(false)
+  const [discoveredCameras, setDiscoveredCameras] = useState<Array<{ id: string; name: string; ip: string; suggestedUrl: string }>>([])
+  const [isDiscovering, setIsDiscovering] = useState(false)
+  const [selectedDiscoveredUrl, setSelectedDiscoveredUrl] = useState('')
+
+  const fetchDiscovered = async () => {
+    setIsDiscovering(true)
+    try {
+      const res = await sdk.api.post<{ ok: boolean; cameras?: Array<{ id: string; name: string; ip: string; suggestedUrl: string }> }>(
+        '/extensions/momai-vision/command',
+        { toolName: 'discover_cameras', args: { timeoutMs: 2500 } }
+      )
+      if (res?.data?.cameras && Array.isArray(res.data.cameras)) {
+        setDiscoveredCameras(res.data.cameras)
+      }
+    } catch {
+    } finally {
+      setIsDiscovering(false)
+    }
+  }
 
   useEffect(() => {
     if (!target) return
     setName(target.name || '')
-    setUrl(target.url || '')
+    if (target.source === 'ip' && target.url) {
+      const parsed = parseCameraAuth(target.url)
+      setUrl(parsed.cleanUrl)
+      setUsername(parsed.username || 'admin')
+      setPassword(parsed.password)
+    } else {
+      setUrl(target.url || '')
+      setUsername('')
+      setPassword('')
+    }
+    setShowPassword(false)
     setTransport(target.transport === 'tcp' ? 'tcp' : 'udp')
     setPreviewWidth(resolvePreviewWidth(target.previewWidth))
     setCodec(resolveRtspCodec(target.codec))
     setModalError(null)
     setSubmitting(false)
+    setSelectedDiscoveredUrl('')
+    if (target.source === 'ip') {
+      void fetchDiscovered()
+    }
   }, [target])
 
   useEffect(() => {
@@ -80,7 +117,8 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
   const isIp = target.source === 'ip'
   const trimmedName = name.trim()
   const trimmedUrl = url.trim()
-  const urlChanged = isIp && trimmedUrl !== target.url
+  const finalUrl = isIp ? buildAuthenticatedUrl(trimmedUrl, username, password) : target.url
+  const urlChanged = isIp && finalUrl !== target.url
   const canSave = isIp
     ? trimmedName !== '' &&
       (urlChanged ||
@@ -99,7 +137,7 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
     try {
       await onSave(target.id, {
         name: trimmedName,
-        url: trimmedUrl || target.url,
+        url: finalUrl,
         transport: isIp ? transport : 'tcp',
         previewWidth,
         codec
@@ -122,7 +160,7 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
         toolName: 'clear_camera_cache',
         args: {
           cameraId: target.id,
-          url: trimmedUrl || target.url
+          url: finalUrl
         }
       })
       setClearCacheSuccess(true)
@@ -180,6 +218,81 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
         </div>
 
         <div className="flex-1 overflow-y-auto custom-scrollbar min-h-0 px-6 pt-5 pb-3 space-y-4">
+          {isIp ? (
+            <div className="rounded-xl border border-border/40 bg-input/20 p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-medium text-text-muted">
+                  {t('cameras.addModal.networkCamerasAvailable')}
+                </label>
+                <button
+                  type="button"
+                  disabled={isDiscovering}
+                  onClick={() => void fetchDiscovered()}
+                  className="inline-flex items-center gap-1 text-[10px] text-text-muted hover:text-emerald-400 transition-colors cursor-pointer disabled:opacity-50"
+                  title={t('cameras.addModal.refreshDiscovery')}
+                >
+                  <svg className={`w-3 h-3 ${isDiscovering ? 'animate-spin text-emerald-400' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                    <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                    <path d="M21 21v-5h-5" />
+                  </svg>
+                  <span>{isDiscovering ? t('cameras.addModal.searchingNetwork') : t('cameras.addModal.refreshDiscovery')}</span>
+                </button>
+              </div>
+
+              {isDiscovering && discoveredCameras.length === 0 ? (
+                <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-3 py-2.5 text-center bg-input/20 flex items-center justify-center gap-2">
+                  <svg className="w-3.5 h-3.5 animate-spin text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                  </svg>
+                  <span>{t('cameras.addModal.searchingNetwork')}</span>
+                </div>
+              ) : discoveredCameras.length > 0 ? (
+                <select
+                  value={selectedDiscoveredUrl}
+                  onChange={(e) => {
+                    const chosen = e.target.value
+                    if (!chosen) return
+                    setSelectedDiscoveredUrl(chosen)
+                    const parsed = parseCameraAuth(chosen)
+                    setUrl(parsed.cleanUrl)
+                    if (parsed.username) setUsername(parsed.username)
+                    if (parsed.password) setPassword(parsed.password)
+                    const found = discoveredCameras.find((d) => d.suggestedUrl === chosen)
+                    if (found && (!name.trim() || name.trim() === t('cameras.defaultIpName'))) {
+                      setName(found.name)
+                    }
+                  }}
+                  className="w-full bg-input border border-border/40 rounded-lg px-2.5 py-1.5 text-xs text-text focus:outline-none focus:border-border transition-colors"
+                >
+                  <option value="">{t('cameras.addModal.selectDiscoveredCamera')}</option>
+                  {discoveredCameras.map((cam) => (
+                    <option key={cam.suggestedUrl} value={cam.suggestedUrl}>
+                      {cam.name} ({cam.ip}) — ONVIF
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="text-[11px] text-text-muted border border-dashed border-border/30 rounded-xl p-3 bg-input/10 space-y-2">
+                  <div className="flex items-center gap-1.5 font-medium text-text text-[11px]">
+                    <svg className="w-3.5 h-3.5 text-amber-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="12" y1="8" x2="12" y2="12" />
+                      <line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                    <span>{t('cameras.addModal.noNetworkCamerasTitle')}</span>
+                  </div>
+                  <ul className="space-y-1 text-[10.5px] leading-relaxed text-text-muted list-disc list-inside pl-0.5">
+                    <li>{t('cameras.addModal.noNetworkCamerasHintNvr')}</li>
+                    <li>{t('cameras.addModal.noNetworkCamerasHintWifi')}</li>
+                    <li>{t('cameras.addModal.noNetworkCamerasHintManual')}</li>
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : null}
+
           <div>
             <label htmlFor="vision-edit-name" className="block text-[11px] font-medium text-text-muted mb-1.5">
               {t('cameras.addModal.nameLabel')}
@@ -201,7 +314,20 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
               id="vision-edit-url"
               value={url}
               disabled={!isIp}
-              onChange={(e) => setUrl(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value
+                if (val.includes('@')) {
+                  const parsed = parseCameraAuth(val)
+                  setUrl(parsed.cleanUrl)
+                  if (parsed.username) setUsername(parsed.username)
+                  if (parsed.password) setPassword(parsed.password)
+                } else {
+                  setUrl(val)
+                }
+                if (selectedDiscoveredUrl && val !== selectedDiscoveredUrl) {
+                  setSelectedDiscoveredUrl('')
+                }
+              }}
               placeholder={t('cameras.addModal.urlPlaceholder')}
               className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-60"
             />
@@ -209,6 +335,56 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
               <p className="text-[11px] text-text-muted mt-2">{t('cameras.optWebcam')}</p>
             ) : null}
           </div>
+
+          {isIp ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label htmlFor="vision-edit-username" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                  {t('cameras.addModal.usernameLabel')}
+                </label>
+                <input
+                  id="vision-edit-username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder={t('cameras.addModal.usernamePlaceholder')}
+                  className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                />
+              </div>
+              <div>
+                <label htmlFor="vision-edit-password" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                  {t('cameras.addModal.passwordLabel')}
+                </label>
+                <div className="relative">
+                  <input
+                    id="vision-edit-password"
+                    type={showPassword ? 'text' : 'password'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={t('cameras.addModal.passwordPlaceholder')}
+                    className="w-full bg-input border border-border/40 rounded-lg pl-3 pr-8 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((prev) => !prev)}
+                    aria-label={t(showPassword ? 'cameras.addModal.hidePassword' : 'cameras.addModal.showPassword')}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text p-1 text-xs"
+                  >
+                    {showPassword ? (
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                        <line x1="1" y1="1" x2="23" y2="23" />
+                      </svg>
+                    ) : (
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                        <circle cx="12" cy="12" r="3" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           {isIp ? (
             <div>
@@ -308,7 +484,7 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
 
           {urlChanged ? (
             <p className="text-[11px] leading-relaxed text-text-muted bg-card border border-border/40 rounded-lg px-3 py-2">
-              {target.id}
+              {redactCameraUrl(target.id)}
             </p>
           ) : null}
         </div>

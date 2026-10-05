@@ -46,6 +46,7 @@ let frameCount = 0
 let bytesReceived = 0
 let fpsTs = 0
 let isDecoding = false
+let hasEmittedFirstFrame = false
 
 function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   const out = new Uint8Array(a.length + b.length)
@@ -58,12 +59,15 @@ async function emitLatest(): Promise<void> {
   emitScheduled = false
   if (!lastFrame) return
   const now = Date.now()
-  const wait = lastEmit + MAX_EMIT_INTERVAL - now
-  if (wait > 0) {
-    emitScheduled = true
-    setTimeout(() => void emitLatest(), wait)
-    return
+  if (hasEmittedFirstFrame) {
+    const wait = lastEmit + MAX_EMIT_INTERVAL - now
+    if (wait > 0) {
+      emitScheduled = true
+      setTimeout(() => void emitLatest(), wait)
+      return
+    }
   }
+  hasEmittedFirstFrame = true
   lastEmit = now
   const frame = lastFrame
   lastFrame = null
@@ -111,7 +115,7 @@ function parse(buf: Uint8Array): Uint8Array {
     currentFrame = frame
     if (!emitScheduled && !isDecoding) {
       const now = Date.now()
-      if (now - lastEmit >= MAX_EMIT_INTERVAL) {
+      if (!hasEmittedFirstFrame || now - lastEmit >= MAX_EMIT_INTERVAL) {
         void emitLatest()
       } else {
         emitScheduled = true
@@ -130,6 +134,7 @@ let activeUrl = ''
 async function run(url: string): Promise<void> {
   activeUrl = url
   isRunning = true
+  hasEmittedFirstFrame = false
   let failCount = 0
 
   while (isRunning) {

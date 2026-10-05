@@ -16,7 +16,7 @@ describe('frame push gate (subscriber-aware cadence)', () => {
   it('drops to a heartbeat when nobody is subscribed', () => {
     const opts = { subscribers: 0 }
     expect(shouldPushFrame({ ...opts, lastPushAt: 0, now: 1_000 })).toBe(true)
-    expect(shouldPushFrame({ ...opts, lastPushAt: 1_000, now: 1_200 })).toBe(false)
+    expect(shouldPushFrame({ ...opts, lastPushAt: 1_000, now: 1_100 })).toBe(false)
     expect(
       shouldPushFrame({ ...opts, lastPushAt: 1_000, now: 1_000 + IDLE_PUSH_INTERVAL_MS })
     ).toBe(true)

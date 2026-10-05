@@ -18,6 +18,13 @@ import { shouldPushFrame } from './vision/frame-push-gate'
 import { buildOrphanFfmpegKillScript, encodePowerShellCommand } from './vision/orphan-ffmpeg'
 import { assertCameraUrlSafe, validateCameraUrl } from './vision/camera-url'
 import {
+  discoverOnvifCameras,
+  lookupArpMac,
+  replaceUrlHost,
+  extractUrlHost,
+  type DiscoveredIpCamera
+} from './vision/discovery'
+import {
   RTSP_FIRST_FRAME_WATCHDOG_MS,
   RTSP_FRESH_ATTEMPT_GRACE_MS,
   RTSP_MID_STREAM_CHECK_MS,
@@ -50,6 +57,7 @@ import {
   type SceneAnswer
 } from './vision/triggers'
 import { markRtspClearCooldown, rtspCooldownRemaining } from './vision/rtsp-cooldown'
+import { redactCameraUrl } from './vision/rtsp-auth'
 import {
   FROZEN_HARD_COOLDOWN_MS,
   extractRtspHost,
@@ -163,6 +171,10 @@ interface CameraEntry {
   previewWidth?: number
   /** Video codec protocol for RTSP cameras ('h264' default or 'h265'). */
   codec?: RtspCodec
+  /** ONVIF endpoint reference URN or unique hardware ID */
+  urn?: string
+  /** Network MAC address if discovered */
+  macAddress?: string
 }
 
 const ipCameras: CameraEntry[] = []
@@ -179,6 +191,8 @@ interface StoredConfig {
     transport?: RtspTransport
     previewWidth?: number
     codec?: RtspCodec
+    urn?: string
+    macAddress?: string
   }>
   selectedCameras?: string[]
   pausedCameras?: string[]
@@ -249,7 +263,9 @@ async function syncIpCameras(): Promise<void> {
         url: cam.url,
         transport,
         previewWidth: resolvePreviewWidth(cam.previewWidth),
-        codec: resolveRtspCodec(cam.codec)
+        codec: resolveRtspCodec(cam.codec),
+        urn: cam.urn,
+        macAddress: cam.macAddress
       })
     }
   }
@@ -540,6 +556,8 @@ async function startMjpeg(camera: CameraEntry): Promise<void> {
 
       for (const targetUrl of urlsToTry) {
         if (controller.signal.aborted) break
+        const validation = validateCameraUrl(targetUrl)
+        if (!validation.ok) continue
         try {
           let reqUrl = targetUrl
           const reqHeaders: Record<string, string> = {}
@@ -702,11 +720,14 @@ async function killOrphanFfmpegForCamera(camera: CameraEntry): Promise<void> {
   const host = extractRtspHost(camera.url || camera.id)
   if (!host) return
   try {
-    const { execSync } = await import('node:child_process')
+    const { exec } = await import('node:child_process')
     const script = buildOrphanFfmpegKillScript(host)
-    execSync(`powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellCommand(script)}`, {
-      stdio: 'ignore',
-      timeout: 10000
+    await new Promise<void>((resolve) => {
+      exec(
+        `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellCommand(script)}`,
+        { timeout: 5000, windowsHide: true },
+        () => resolve()
+      )
     })
   } catch {
     // Best-effort cleanup: a missing PowerShell or a locked process just
@@ -764,7 +785,7 @@ async function sweepMjpegStreams(): Promise<void> {
   //    câmera pausada, sem leitura recente de frame): derruba após o TTL ou imediatamente se pausada.
   for (const [id, entry] of [...mjpegStreams]) {
     if (paused.has(id)) {
-      bridge?.log(`[vision] stream de ${id} pausada — encerrando`)
+      bridge?.log(`[vision] stream de ${redactCameraUrl(id)} pausada — encerrando`)
       stopMjpeg(id)
       continue
     }
@@ -772,14 +793,14 @@ async function sweepMjpegStreams(): Promise<void> {
     if (selected.has(id)) continue
     const lastActive = Math.max(entry.latestTs, entry.lastConsumerTs || 0)
     if (now - lastActive > STREAM_TTL_MS) {
-      bridge?.log(`[vision] stream de ${id} ocioso — encerrando`)
+      bridge?.log(`[vision] stream de ${redactCameraUrl(id)} ocioso — encerrando`)
       stopMjpeg(id)
     }
   }
 
   for (const id of rtspSessions.keys()) {
     if (paused.has(id)) {
-      bridge?.log(`[vision] RTSP session de ${id} pausada — encerrando`)
+      bridge?.log(`[vision] RTSP session de ${redactCameraUrl(id)} pausada — encerrando`)
       stopRtsp(id)
     }
   }
@@ -980,6 +1001,9 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
           connectState.failures = 0
           bridge?.log(`[vision] RTSP: first frame received for ${camera.name}!`)
           startMidStreamWatchdog()
+          if (!camera.urn || !camera.macAddress) {
+            void associateCameraIdentity(camera).catch(() => {})
+          }
         }
         if (jpegBuf.length === 0) jpegBuf = chunk
         else jpegBuf = Buffer.concat([jpegBuf, chunk])
@@ -1261,11 +1285,27 @@ interface EngineResult {
 let engine: EngineProcess | null = null
 let lastEngineSpawnTs = 0
 
-async function ensureEngine(): Promise<EngineProcess> {
+// Guarda de concorrência: warmup e o primeiro detect podem chamar ensureEngine
+// no mesmo tick. Sem isto os dois passam pelo check de `engine` nulo e spawnam
+// dois children de ~38MB (um fica órfão). Compartilha a promise em voo.
+let engineStarting: Promise<EngineProcess> | null = null
+
+function ensureEngine(): Promise<EngineProcess> {
+  if (engine && engine.child.connected) return Promise.resolve(engine)
+  if (engineStarting) return engineStarting
+  engineStarting = spawnEngine().finally(() => {
+    engineStarting = null
+  })
+  return engineStarting
+}
+
+async function spawnEngine(): Promise<EngineProcess> {
   if (engine && engine.child.connected) return engine
   const { spawn } = await import('node:child_process')
   const enginePath = await requireEnginePath()
   lastEngineSpawnTs = Date.now()
+  const spawnT0 = Date.now()
+  logLifecycle('[vision] CV engine starting (on-demand YOLO init)...')
   const child = spawn(process.execPath, [enginePath], {
     stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     env: { ...process.env }
@@ -1308,12 +1348,21 @@ async function ensureEngine(): Promise<EngineProcess> {
       entry.resolve({ boxes: r.boxes || [], error: r.error })
     }
   })
-  child.on('exit', () => {
+  child.on('exit', (code) => {
     for (const [, entry] of pending) {
       entry.reject(new Error('CV engine exited'))
     }
     pending.clear()
     engine = null
+    warmupDone = null
+    // Only pre-warm when something still needs detection or live boxes.
+    // Without this guard an idle shutdown would be undone immediately by
+    // respawning a child nobody asked for.
+    if (!anyYoloDemand()) {
+      logLifecycle(`[vision] CV engine stopped (YOLO shutdown complete, exit code=${code ?? 'unknown'})`)
+      return
+    }
+    logLifecycleError(`[vision] CV engine exited unexpectedly (code=${code ?? 'unknown'}), re-warming on demand...`)
     // Re-aquece um child novo para pré-carregar o modelo (rate-limited para
     // não entrar em loop de respawn se o engine morrer durante o load). O
     // ensureEngine só spawna sob demanda; este warmup antecipa o load para o
@@ -1327,6 +1376,7 @@ async function ensureEngine(): Promise<EngineProcess> {
     for (const [, entry] of pending) entry.reject(err)
     pending.clear()
     engine = null
+    warmupDone = null
   })
   child.stderr?.on('data', (data: Buffer) => {
     const s = data.toString().trim()
@@ -1339,11 +1389,12 @@ async function ensureEngine(): Promise<EngineProcess> {
     await engineProcess.ready
   } catch (err) {
     // O child não ficou pronto — derruba para não deixar um processo órfão.
+    logLifecycleError(`[vision] CV engine failed to start (${Date.now() - spawnT0}ms): ${err instanceof Error ? err.message : String(err)}`)
     try { child.kill() } catch {}
     engine = null
     throw err
   }
-  bridge?.log(`[vision] CV engine ready (${enginePath})`)
+  logLifecycle(`[vision] CV engine ready in ${Date.now() - spawnT0}ms (${enginePath})`)
   return engineProcess
 }
 
@@ -1541,10 +1592,17 @@ async function requireEnginePath(): Promise<string> {
   return ENGINE_DIR_FALLBACK
 }
 
-function stopEngine(): void {
+function stopEngine(reason: string = 'idle'): void {
+  if (engine) {
+    logLifecycle(`[vision] CV engine stopping (YOLO shutdown, reason=${reason})...`)
+  }
+  cancelEngineIdleShutdown()
   try {
     engine?.child.send({ type: 'shutdown' })
   } catch {}
+  // Allow the next demand to spawn and warm a fresh child instead of
+  // reusing a stale resolved warmup promise tied to the stopped child.
+  warmupDone = null
 }
 
 export { stopEngine }
@@ -1821,6 +1879,159 @@ function needsVision(config: MonitorConfig): boolean {
   return config.triggers.some((t) => t.type === 'scene' || t.type === 'periodic')
 }
 
+// ---------------------------------------------------------------------------
+// On-demand YOLO lifecycle: detection is expensive (WASM + 38MB model,
+// ~300-600ms per inference, 1 global slot), so the engine child only stays
+// alive while some camera really needs it. Boxes are display-only and never
+// imply detection by themselves.
+// Demand(YOLO, camera) = active object/presence/absence monitor
+//   OR (showBoxes enabled AND a live pump consumer was seen recently).
+// Automation stays generic: both local monitors and synced automations are
+// plain ActiveMonitor entries consumed through getActiveMonitorsForCamera.
+// ---------------------------------------------------------------------------
+
+/** Idle without demand before the engine child is shut down (anti-flapping). */
+export const ENGINE_IDLE_SHUTDOWN_MS = 60000
+
+/** How long a boxes pump counts as a live consumer after its last activity. */
+export const BOXES_LIVE_TTL_MS = 15000
+
+/** Pure demand core, unit-testable without module state. */
+export function computeYoloDemand(
+  hasDetectionMonitor: boolean,
+  boxesVisible: boolean,
+  lastPumpAt: number | undefined,
+  now: number = Date.now()
+): boolean {
+  if (hasDetectionMonitor) return true
+  if (!boxesVisible) return false
+  if (!lastPumpAt) return false
+  return now - lastPumpAt < BOXES_LIVE_TTL_MS
+}
+
+/** Last frame_pump activity per camera (live boxes consumer heartbeat). */
+const lastPumpSeenAt = new Map<string, number>()
+
+let engineIdleTimer: ReturnType<typeof setTimeout> | undefined
+
+export function isBoxesVisible(cameraId: string): boolean {
+  // Matches the page default: boxes draw unless explicitly disabled
+  // (config.showBoxes?.[camera.id] !== false in page.tsx). On every worker
+  // boot resetBoxesOnBoot() writes explicit false for all known cameras, so
+  // opening MomAI never resumes with boxes (and YOLO) left on by accident.
+  return _configCache?.showBoxes?.[cameraId] !== false
+}
+
+/**
+ * Pure helper: explicit opt-out for every known camera. Page storage only
+ * records explicit hides (`false` = hidden, missing = visible default), so
+ * writing `false` for each camera is what turns the whole UI off.
+ */
+export function resetShowBoxesToHidden(
+  current: Record<string, boolean> | undefined,
+  cameraIds: string[]
+): Record<string, boolean> {
+  const next: Record<string, boolean> = { ...(current || {}) }
+  for (const id of cameraIds) {
+    if (!id) continue
+    next[id] = false
+  }
+  return next
+}
+
+/**
+ * Boot guard: boxes always start hidden, even when the user forgot them on.
+ * Monitoring is untouched — object/presence/absence monitors still warm YOLO
+ * through hasActiveDetectionMonitor; only the display (and its pump demand)
+ * resets to opt-in. Runs once per worker lifetime inside restoreMonitors.
+ */
+async function resetBoxesOnBoot(): Promise<void> {
+  const cfg = await loadConfig().catch(() => ({} as StoredConfig))
+  const known = new Set<string>()
+  for (const cam of listCameras()) known.add(cam.id)
+  for (const id of cfg.selectedCameras || []) known.add(id)
+  for (const id of Object.keys(cfg.showBoxes || {})) known.add(id)
+  if (known.size === 0) return
+  const current = cfg.showBoxes || {}
+  const needsReset = [...known].some((id) => current[id] !== false)
+  if (!needsReset) return
+  const next = resetShowBoxesToHidden(current, [...known])
+  await updateConfig((target) => {
+    target.showBoxes = next
+  })
+  _configCache = { ...cfg, showBoxes: next }
+  _configCacheAt = Date.now()
+  logLifecycle(`[vision] boxes hidden on startup for ${known.size} camera(s) (opt-in per session, monitoring untouched)`)
+}
+
+export function hasActiveDetectionMonitor(cameraId: string): boolean {
+  return getActiveMonitorsForCamera(cameraId).some((m) => needsDetection(m.config))
+}
+
+export function hasLiveBoxesDemand(cameraId: string, now: number = Date.now()): boolean {
+  return computeYoloDemand(false, isBoxesVisible(cameraId), lastPumpSeenAt.get(cameraId), now)
+}
+
+export function needsYoloForCamera(cameraId: string, now: number = Date.now()): boolean {
+  return computeYoloDemand(
+    hasActiveDetectionMonitor(cameraId),
+    isBoxesVisible(cameraId),
+    lastPumpSeenAt.get(cameraId),
+    now
+  )
+}
+
+export function anyYoloDemand(now: number = Date.now()): boolean {
+  const cameraIds = new Set<string>()
+  for (const m of monitors.values()) {
+    if (!m.config.paused) cameraIds.add(m.config.cameraId)
+  }
+  for (const m of autoMonitorsCache) {
+    if (!m.config.paused) cameraIds.add(m.config.cameraId)
+  }
+  for (const id of Object.keys(_configCache?.showBoxes || {})) cameraIds.add(id)
+  for (const id of lastPumpSeenAt.keys()) cameraIds.add(id)
+  for (const id of cameraIds) {
+    if (needsYoloForCamera(id, now)) return true
+  }
+  return false
+}
+
+export function recordPumpActivity(cameraId: string, now: number = Date.now()): void {
+  lastPumpSeenAt.set(cameraId, now)
+}
+
+function cancelEngineIdleShutdown(): void {
+  if (engineIdleTimer) {
+    clearTimeout(engineIdleTimer)
+    engineIdleTimer = undefined
+    logLifecycle('[vision] CV engine idle shutdown aborted (new YOLO demand)')
+  }
+}
+
+/** Shut the engine down after a grace period when nothing needs it anymore. */
+export function scheduleEngineIdleShutdown(): void {
+  if (anyYoloDemand()) {
+    cancelEngineIdleShutdown()
+    return
+  }
+  if (!engine) {
+    cancelEngineIdleShutdown()
+    return
+  }
+  if (engineIdleTimer) return
+  logLifecycle(`[vision] CV engine idle: no YOLO demand, shutdown in ${Math.round(ENGINE_IDLE_SHUTDOWN_MS / 1000)}s...`)
+  engineIdleTimer = setTimeout(() => {
+    engineIdleTimer = undefined
+    if (anyYoloDemand()) return
+    logLifecycle('[vision] CV engine idle timeout reached, stopping...')
+    stopEngine('idle-timeout')
+  }, ENGINE_IDLE_SHUTDOWN_MS)
+  // Do not keep the worker alive just for the idle timer.
+  const t = engineIdleTimer as unknown as { unref?: () => void }
+  if (typeof t.unref === 'function') t.unref()
+}
+
 function decodeJpeg(jpegBase64: string): { rgb: Uint8Array; width: number; height: number } {
   const jpeg = Buffer.from(jpegBase64, 'base64')
   const raw = decode(new Uint8Array(jpeg.buffer, jpeg.byteOffset, jpeg.byteLength), {
@@ -2026,6 +2237,7 @@ function stopCameraTickerIfIdle(cameraId: string): void {
     cameraTickers.delete(cameraId)
   }
   motionGates.delete(cameraId)
+  scheduleEngineIdleShutdown()
   if (isCameraSelected(cameraId)) {
     return
   }
@@ -2044,7 +2256,10 @@ function stopCameraTickerIfIdle(cameraId: string): void {
 async function tickCamera(cameraId: string): Promise<void> {
   void syncAutomationMonitors().catch(() => {})
   const active = getActiveMonitorsForCamera(cameraId)
-  if (active.length === 0) return
+  if (active.length === 0) {
+    scheduleEngineIdleShutdown()
+    return
+  }
   const camera = findCamera(cameraId)
   if (!camera) return
 
@@ -2078,6 +2293,7 @@ async function tickCamera(cameraId: string): Promise<void> {
 
   let detections: Detection[] = []
   if (anyDetect) {
+    cancelEngineIdleShutdown()
     try {
       const result = await engineDetectSerial(cameraId, frame.jpegBase64)
       const rawBoxes = result.boxes || []
@@ -2312,7 +2528,7 @@ async function fireAlert(config: MonitorConfig, alert: import('./vision/triggers
   bridge?.sendEvent('vision_alert', data.data)
   bridge?.sendStructuredResponse(data)
 
-  bridge?.log(`[vision] alert fired: ${alert.triggeredBy} on ${config.cameraId}`)
+  bridge?.log(`[vision] alert fired: ${alert.triggeredBy} on ${redactCameraUrl(config.cameraId)}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -2433,6 +2649,97 @@ function isIpStreamFresh(camera: CameraEntry): boolean {
 const ipLastReconnectTs = new Map<string, number>()
 const ipLastOnlineCheck = new Map<string, number>()
 
+async function associateCameraIdentity(camera: CameraEntry): Promise<void> {
+  if (!camera.url) return
+  const host = extractUrlHost(camera.url)
+  if (!host) return
+  try {
+    const mac = await lookupArpMac(host)
+    const discovered = await discoverOnvifCameras(1500)
+    const matched = discovered.find((d) => d.ip === host)
+    const urn = matched?.urn || camera.urn
+    const finalMac = mac || camera.macAddress
+    if (urn || finalMac) {
+      camera.urn = urn
+      camera.macAddress = finalMac
+      await updateConfig((cfg) => {
+        if (Array.isArray(cfg.ipCameras)) {
+          cfg.ipCameras = cfg.ipCameras.map((c) => {
+            if (c.id === camera.id || c.url === camera.url) {
+              return { ...c, urn, macAddress: finalMac }
+            }
+            return c
+          })
+        }
+      })
+    }
+  } catch {}
+}
+
+async function tryAutoRecoverCameraIp(camera: CameraEntry): Promise<boolean> {
+  if (!camera.url) return false
+  const currentHost = extractUrlHost(camera.url)
+  if (!currentHost) return false
+
+  try {
+    const discovered = await discoverOnvifCameras(2000)
+    let matched: DiscoveredIpCamera | undefined
+
+    // 1. Match by URN
+    if (camera.urn) {
+      matched = discovered.find((d) => d.urn && d.urn === camera.urn)
+    }
+
+    // 2. Match by MAC
+    if (!matched && camera.macAddress) {
+      for (const d of discovered) {
+        const mac = await lookupArpMac(d.ip)
+        if (mac && mac.toLowerCase() === camera.macAddress.toLowerCase()) {
+          matched = d
+          break
+        }
+      }
+    }
+
+    // 3. Fallback: se há apenas 1 câmera ONVIF descoberta e o IP antigo está inacessível
+    if (!matched && discovered.length === 1 && discovered[0].ip !== currentHost) {
+      matched = discovered[0]
+    }
+
+    if (matched && matched.ip !== currentHost) {
+      const nextUrl = replaceUrlHost(camera.url, matched.ip)
+      bridge?.log(`[vision] Câmera "${camera.name}" mudou de IP: ${currentHost} -> ${matched.ip}. Atualizando URL automaticamente...`)
+
+      const newUrn = matched.urn || camera.urn
+      const newMac = (await lookupArpMac(matched.ip)) || camera.macAddress
+
+      await updateConfig((cfg) => {
+        if (Array.isArray(cfg.ipCameras)) {
+          cfg.ipCameras = cfg.ipCameras.map((c) => {
+            if (c.id === camera.id || c.url === camera.url) {
+              return {
+                ...c,
+                url: nextUrl,
+                urn: newUrn,
+                macAddress: newMac
+              }
+            }
+            return c
+          })
+        }
+      })
+
+      camera.url = nextUrl
+      if (newUrn) camera.urn = newUrn
+      if (newMac) camera.macAddress = newMac
+      return true
+    }
+  } catch (err) {
+    bridge?.log(`[vision] Falha na busca automática de IP para ${camera.name}: ${err}`)
+  }
+  return false
+}
+
 async function reconnectIpIfStale(camera: CameraEntry): Promise<void> {
   if (!camera || camera.source !== 'ip') return
   if (rtspConnectingCams.has(camera.id)) return
@@ -2447,6 +2754,19 @@ async function reconnectIpIfStale(camera: CameraEntry): Promise<void> {
   const rtsp = rtspSessions.get(camera.id)
   const connectState = ipConnectState.get(camera.id)
   const now = Date.now()
+
+  // Se a câmera estiver com falhas consecutivas, tenta auto-recuperar o novo IP via rede
+  if (connectState && connectState.failures >= 2) {
+    const recovered = await tryAutoRecoverCameraIp(camera)
+    if (recovered) {
+      connectState.failures = 0
+      connectState.lastError = ''
+      stopMjpeg(camera.id)
+      await new Promise((r) => setTimeout(r, 1000))
+      void startMjpeg(camera).catch((e) => bridge?.log(`[vision] restart IP ${camera.name} apos IP recovery falhou: ${e}`))
+      return
+    }
+  }
 
   // A fresh FFmpeg attempt needs room to finish its handshake/probe: never
   // kill a connection that started seconds ago, or the sweeper flaps a
@@ -3010,7 +3330,7 @@ async function toolStartMonitoring(
   if (camera.source === 'ip') await startMjpeg(camera)
   ensureCameraTicker(camera.id)
 
-  bridge?.log(`[vision] monitoring started: ${id} on ${camera.id}`)
+  bridge?.log(`[vision] monitoring started: ${id} on ${redactCameraUrl(camera.id)}`)
   return { ok: true, monitorId: id, plan }
 }
 
@@ -3760,29 +4080,23 @@ async function toolClearCameraCache(args: {
     }
   }
 
-  // Force-kill orphan FFmpeg processes on Windows to free RTSP sockets
+  // Force-kill orphan FFmpeg processes on Windows to free RTSP sockets safely
   try {
-    const { execSync } = await import('node:child_process')
     if (process.platform === 'win32') {
+      const { exec } = await import('node:child_process')
       let targetHost = ''
       const hostSource = args.url || (targetCamId?.startsWith('ip:') ? targetCamId.slice(3) : '')
       if (hostSource) {
-        const m = hostSource.match(/@([^:/]+)/) || hostSource.match(/:\/\/([^:/]+)/)
-        if (m) targetHost = m[1]
+        targetHost = extractRtspHost(hostSource)
       }
-      if (targetHost) {
-        try {
-          const psCmd = `Get-CimInstance Win32_Process -Filter "name = 'ffmpeg.exe'" | Where-Object { $_.CommandLine -like "*${targetHost}*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
-          execSync(`powershell -NoProfile -NonInteractive -Command "${psCmd}"`, {
-            stdio: 'ignore',
-            timeout: 5000
-          })
-        } catch {}
-      } else {
-        try {
-          execSync('taskkill /F /IM ffmpeg.exe', { stdio: 'ignore', timeout: 5000 })
-        } catch {}
-      }
+      const script = buildOrphanFfmpegKillScript(targetHost)
+      await new Promise<void>((resolve) => {
+        exec(
+          `powershell -NoProfile -NonInteractive -EncodedCommand ${encodePowerShellCommand(script)}`,
+          { timeout: 5000, windowsHide: true },
+          () => resolve()
+        )
+      })
     }
   } catch {}
 
@@ -3819,6 +4133,21 @@ async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): 
   if (_configCache?.pausedCameras?.includes(cameraId)) {
     return { ok: false, error: 'camera paused', paused: true }
   }
+  // Without boxes enabled this pump is a plain video request: answer from the
+  // stream without waking the YOLO engine. Boxes imply demand only together
+  // with a live consumer, tracked through the pump heartbeat below.
+  const boxesRequested = isBoxesVisible(cameraId)
+  if (!boxesRequested && !hasActiveDetectionMonitor(cameraId)) {
+    scheduleEngineIdleShutdown()
+    return { ok: true, detections: [], idle: true }
+  }
+  recordPumpActivity(cameraId)
+  if (!needsYoloForCamera(cameraId)) {
+    scheduleEngineIdleShutdown()
+    return { ok: true, detections: lastPumpBoxes.get(cameraId) || [], idle: true }
+  }
+  cancelEngineIdleShutdown()
+  void startWarmupIfNeeded()
   // Cameras streamed by this worker already hold the newest frame in memory:
   // the page can request detection without shipping the JPEG back through
   // renderer → node-core → worker (~150KB base64 per second per visible card).
@@ -3971,6 +4300,26 @@ async function toolConfigure(args: {
     if (args.showBoxes !== undefined) cfg.showBoxes = args.showBoxes
     if (args.showZones !== undefined) cfg.showZones = args.showZones
   })
+  _configCache = config
+  _configCacheAt = Date.now()
+
+  // Feedback direto do clique "mostrar/esconder boxes" + consequência no YOLO.
+  // Sem isto o usuário não via nada até o próximo ciclo do pump/engine.
+  if (args.showBoxes !== undefined) {
+    const before = oldConfig.showBoxes || {}
+    const after = args.showBoxes || {}
+    const changed = new Set([...Object.keys(before), ...Object.keys(after)])
+    for (const cameraId of changed) {
+      const wasVisible = before[cameraId] !== false
+      const nowVisible = after[cameraId] !== false
+      if (wasVisible === nowVisible) continue
+      logLifecycle(
+        nowVisible
+          ? `[vision] boxes shown for ${redactCameraUrl(cameraId)} (YOLO demand enabled)`
+          : `[vision] boxes hidden for ${redactCameraUrl(cameraId)} (YOLO demand removed)`
+      )
+    }
+  }
 
   // Se câmeras foram desselecionadas/removidas, pausa automaticamente os monitoramentos associados
   if (args.selectedCameras !== undefined) {
@@ -4119,6 +4468,25 @@ async function describeSendActionsSuffix(actions: MonitorAction[] | undefined): 
 // ---------------------------------------------------------------------------
 
 async function restoreMonitors(): Promise<void> {
+  await syncIpCameras().catch(() => {})
+  const cfg = await loadConfig().catch(() => ({} as StoredConfig))
+  // Opening MomAI never resumes with boxes left on: force explicit opt-out
+  // before anything can pump for detections. Monitoring still restores below.
+  await resetBoxesOnBoot().catch((err: unknown) => {
+    bridge?.log(`[vision] boxes reset on startup failed: ${err instanceof Error ? err.message : String(err)}`)
+  })
+  const pausedSet = new Set(cfg.pausedCameras || [])
+  const selectedIds = (cfg.selectedCameras || []).filter((id) => !pausedSet.has(id))
+
+  // Pre-warm selected IP cameras immediately at boot (t=0) so the 4s H.265 GOP
+  // wait completes in the background before the user opens the Vision tab.
+  for (const cameraId of selectedIds) {
+    const cam = findCamera(cameraId)
+    if (cam && cam.source === 'ip') {
+      void startMjpeg(cam).catch(() => {})
+    }
+  }
+
   const saved = (await bridge!.storage.get('monitors')) as MonitorConfig[] | null
   if (!Array.isArray(saved) || saved.length === 0) return
 
@@ -4275,8 +4643,19 @@ async function toolShowOverlay(args: {
   return { ok: true, overlayId }
 }
 
+async function toolDiscoverCameras(args?: { timeoutMs?: number }): Promise<unknown> {
+  try {
+    const timeout = typeof args?.timeoutMs === 'number' && args.timeoutMs > 0 ? Math.min(args.timeoutMs, 5000) : 2500
+    const cameras = await discoverOnvifCameras(timeout)
+    return { ok: true, cameras }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err), cameras: [] }
+  }
+}
+
 const tools: Record<string, (args: any) => Promise<unknown>> = {
   list_cameras: toolListCameras,
+  discover_cameras: toolDiscoverCameras,
   capture_snapshot: toolCaptureSnapshot,
   describe_snapshot: toolDescribeSnapshot,
   delete_snapshot: toolDeleteSnapshot,
@@ -4336,19 +4715,57 @@ function ensureInitialized(): Promise<void> {
   return initPromise
 }
 
-// Warmup do engine YOLO (WASM 13MB + ONNX 10MB). O carregamento síncrono no
-// child bloqueia o event loop por ~10-60s na primeira vez. A promise é criada
-// no boot, antes do worker anunciar `ready`, para não existir uma janela em
-// que o primeiro frame_pump chegue e ainda não tenha warmup para acompanhar.
+// Warmup do engine YOLO sob demanda. O carregamento no child bloqueia o
+// event loop por ~10-60s na primeira vez, por isso o warmup nunca roda no
+// boot: só quando alguma câmera tem monitor com detecção ou boxes ao vivo.
 let warmupDone: Promise<void> | null = null
 
 function startWarmup(): Promise<void> {
   if (!warmupDone) {
-    warmupDone = warmupEngine().catch((err: unknown) => {
-      bridge?.log(`[vision] engine warmup failed: ${err instanceof Error ? err.message : String(err)}`)
-    })
+    logLifecycle('[vision] CV engine warmup started (loading YOLO model)...')
+    warmupDone = warmupEngine().then(
+      () => {
+        logLifecycle('[vision] CV engine warmup complete (YOLO ready)')
+      },
+      (err: unknown) => {
+        logLifecycleError(`[vision] engine warmup failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    )
   }
   return warmupDone
+}
+
+/** Warm the engine only when there is real demand; otherwise stay idle. */
+function startWarmupIfNeeded(): Promise<void> {
+  if (!anyYoloDemand()) {
+    scheduleEngineIdleShutdown()
+    return Promise.resolve()
+  }
+  cancelEngineIdleShutdown()
+  return startWarmup()
+}
+
+/**
+ * Lifecycle logging: `bridge.log` is forwarded by the host at INFO level
+ * (extension-host `case 'log'`), so regular milestones no longer need a
+ * stderr mirror — stderr is mapped to ERROR by the host.
+ */
+function logLifecycle(message: string): void {
+  bridge?.log(message)
+}
+
+/**
+ * For genuine failures only: keeps the normal log channel and mirrors to
+ * stderr, which the host surfaces at ERROR level in main.log and the app
+ * log viewer. Never use it for routine milestones.
+ */
+function logLifecycleError(message: string): void {
+  bridge?.log(message)
+  if (typeof process.send === 'function') {
+    try {
+      console.error(message)
+    } catch {}
+  }
 }
 
 /**
@@ -4357,18 +4774,35 @@ function startWarmup(): Promise<void> {
  */
 export async function init(momai: MomaiBridge): Promise<void> {
   bridge = momai
-  // Restore de monitores pode levar até INIT_BUDGET_MS. Ele não deve atrasar o
-  // carregamento do modelo: o card já pode enviar seu primeiro frame enquanto
-  // esse restore roda em background.
-  void ensureInitialized()
-  void startWarmup()
+  // Restore runs in background and never warms the YOLO engine by itself.
+  // The engine spawns lazily on the first detection or live-boxes demand.
+  void ensureInitialized().then(() => {
+    void startWarmupIfNeeded()
+  })
 }
+
+// Ferramentas de UI/stream que NUNCA dependem do modelo YOLO estar carregado.
+// Não aguardar `startWarmup()` aqui elimina o gargalo de 10-60s ao abrir a aba
+// MomAI Vision logo após o boot.
+const NO_YOLO_WARMUP_TOOLS = new Set([
+  'frame_pump',
+  'get_frame',
+  'list_cameras',
+  'get_status',
+  'list_snapshots',
+  'list_alerts',
+  'configure',
+  'warm_webcam',
+  'reload_camera',
+  'clear_camera_cache',
+  'discover_cameras'
+])
 
 export default {
   async execute(payload: { toolName?: string; args?: Record<string, unknown>; momai?: MomaiBridge }): Promise<unknown> {
     bridge = payload.momai || bridge
-    const toolName = payload.toolName
-    const fn = tools[toolName || '']
+    const toolName = payload.toolName || ''
+    const fn = tools[toolName]
     if (!fn) {
       return { ok: false, error: `unknown tool: ${toolName}` }
     }
@@ -4378,12 +4812,23 @@ export default {
         // Bloqueá-lo no restore/warmup faz o timeout de 8 s da página vencer
         // antes de toolFramePump conseguir iniciar a inferência.
         void ensureInitialized()
-        void startWarmup()
+        void startWarmupIfNeeded()
+      } else if (NO_YOLO_WARMUP_TOOLS.has(toolName)) {
+        await ensureInitialized()
+        void startWarmupIfNeeded()
       } else {
         await ensureInitialized()
-        await startWarmup()
+        await startWarmupIfNeeded()
       }
-      return await fn((payload.args || {}) as any)
+      const result = await fn((payload.args || {}) as any)
+      // Tools may have created or removed demand (start/pause/stop/configure):
+      // warm lazily when needed, or schedule the idle shutdown otherwise.
+      if (toolName !== 'frame_pump') {
+        void startWarmupIfNeeded()
+      } else {
+        scheduleEngineIdleShutdown()
+      }
+      return result
     } catch (err) {
       bridge?.log(`[vision] tool ${toolName} error: ${err instanceof Error ? err.message : String(err)}`)
       return { ok: false, error: err instanceof Error ? err.message : String(err) }
@@ -4393,14 +4838,14 @@ export default {
 
 // Worker teardown: stop engine + RTSP/MJPEG streams when the process exits.
 process.on('exit', () => {
-  stopEngine()
+  stopEngine('worker-exit')
   for (const camId of rtspSessions.keys()) {
     stopRtsp(camId)
   }
 })
 
 process.on('disconnect', () => {
-  stopEngine()
+  stopEngine('worker-disconnect')
   for (const camId of rtspSessions.keys()) {
     stopRtsp(camId)
   }

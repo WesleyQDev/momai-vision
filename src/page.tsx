@@ -14,6 +14,7 @@ import { ptLabel, PT_CLASS, triggerLabel, localizedClassLabel, localizedTriggerL
 import { AlertCanvasOverlay } from './panel'
 import { useI18n } from './hooks/useI18n'
 import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
+import { buildAuthenticatedUrl, parseCameraAuth } from './vision/rtsp-auth'
 import {
   describeRtspIssue,
   isRtspMidStreamStalled,
@@ -882,6 +883,7 @@ function jpegDims(buf: Uint8Array): { w: number; h: number } | null {
  */
 interface ParserWorker {
   start(url: string): void
+  stop(): void
   reset?(): void
   getFrame(): Promise<Uint8Array | null>
   dispose(): void
@@ -955,6 +957,13 @@ function createParserWorker(opts: {
   return {
     start: (url: string) => {
       if (!disposed) worker.postMessage({ type: 'start', url })
+    },
+    stop: () => {
+      if (!disposed) {
+        try {
+          worker.postMessage({ type: 'abort' })
+        } catch {}
+      }
     },
     reset: () => {
       if (!disposed) {
@@ -2250,15 +2259,40 @@ export const CameraCard = memo(function CameraCard({
     const warm = async (store: boolean) => {
       try {
         const res = await command<{ jpegBase64?: string }>('get_frame', { cameraId: camera.id })
-        if (!cancelled && store) {
+        if (!cancelled) {
           const dataUrl = toCacheDataUrl(res?.jpegBase64)
-          if (dataUrl) storeCachedFrame(camera.id, dataUrl)
+          if (dataUrl) {
+            if (store) storeCachedFrame(camera.id, dataUrl)
+            // If no live stream frame has arrived yet, paint the warmup frame
+            // immediately on the canvas so the card is never blank.
+            if (!hasFrameRef.current) {
+              const canvas = frameCanvasRef.current
+              const ctx = canvas?.getContext('2d')
+              if (canvas && ctx) {
+                const img = new Image()
+                img.onload = () => {
+                  if (cancelled || hasFrameRef.current) return
+                  try {
+                    canvas.width = img.naturalWidth
+                    canvas.height = img.naturalHeight
+                    ctx.drawImage(img, 0, 0)
+                    frameDimsRef.current = { w: img.naturalWidth, h: img.naturalHeight }
+                    if (!cachedFrameShownRef.current) {
+                      cachedFrameShownRef.current = true
+                      setCachedFrameShown(true)
+                    }
+                  } catch {}
+                }
+                img.src = dataUrl
+              }
+            }
+          }
         }
       } catch {
         // Visible loop retries.
       }
     }
-    void warm(false)
+    void warm(true)
     const hidden = typeof document !== 'undefined' && document.hidden
     if (shouldRunBackgroundWarmup({ isActive: isActive ?? true, isPaused, hidden })) {
       const tick = () => {
@@ -2316,6 +2350,19 @@ export const CameraCard = memo(function CameraCard({
     img.src = cached
   }, [isActive, camera.id])
 
+  // Terminate the persistent MJPEG worker only when the card truly unmounts.
+  const parserCallbacksRef = useRef<{
+    onBitmap?: (bitmap: ImageBitmap, origW: number, origH: number) => void
+    onFrame?: (frame: Uint8Array) => void
+    onKbs?: (kbs: number) => void
+  }>({})
+  useEffect(() => {
+    return () => {
+      parserWorkerRef.current?.dispose()
+      parserWorkerRef.current = null
+    }
+  }, [])
+
   // Preview ao vivo + FPS real. Usa o leitor MJPEG em JS (fetch + ReadableStream)
   // em vez do <img multipart/x-mixed-replace>, que no Chromium congela no mesmo
   // frame de forma aleatória e não deixa contar FPS.
@@ -2335,6 +2382,7 @@ export const CameraCard = memo(function CameraCard({
   // caminho de canvas + Worker, garantindo independência real.
   useEffect(() => {
     if (!isActive || isPaused) {
+      parserWorkerRef.current?.stop()
       setFps(0)
       setKbs(0)
       return
@@ -2423,7 +2471,7 @@ export const CameraCard = memo(function CameraCard({
       }
     }
 
-        const drawToCanvas = (
+    const drawToCanvas = (
       bitmap: ImageBitmap | HTMLImageElement,
       origW = 0,
       origH = 0
@@ -2434,6 +2482,13 @@ export const CameraCard = memo(function CameraCard({
       pendingBitmap = bitmap
       pendingW = origW
       pendingH = origH
+
+      // First live frame (or transition from cached frame): blit synchronously
+      // without waiting for the next requestAnimationFrame tick (~16ms saved).
+      if (!hasFrameRef.current || cachedFrameShownRef.current) {
+        renderVsyncFrame()
+        return
+      }
 
       if (rafId === null) {
         rafId = typeof requestAnimationFrame === 'function'
@@ -2518,7 +2573,8 @@ export const CameraCard = memo(function CameraCard({
     }
 
     // Fonte dos frames: Web Worker com decodificação ImageBitmap em thread separada.
-    const parser = createParserWorker({
+    // Reutiliza o Worker existente entre trocas de aba para eliminar o boot de ~50-150ms.
+    parserCallbacksRef.current = {
       onBitmap: (bitmap, origW, origH) => {
         if (cancelled) {
           bitmap.close()
@@ -2533,16 +2589,31 @@ export const CameraCard = memo(function CameraCard({
         lastPreviewFrameAtRef.current = Date.now()
         drawNext(frame)
       },
-      onError: () => {
-        // Silent reconnect in background without intrusive overlay
-      },
-      onFps: () => {},
       onKbs: (measuredKbs) => {
         if (!cancelled) setKbs(measuredKbs)
       }
-    })
-    if (parser) {
+    }
+
+    let parser = parserWorkerRef.current
+    if (!parser) {
+      parser = createParserWorker({
+        onBitmap: (bitmap, origW, origH) => {
+          if ( parserCallbacksRef.current.onBitmap ) {
+            parserCallbacksRef.current.onBitmap(bitmap, origW, origH)
+          } else {
+            bitmap.close()
+          }
+        },
+        onFrame: (frame) => parserCallbacksRef.current.onFrame?.(frame),
+        onError: () => {
+          // Silent reconnect in background without intrusive overlay
+        },
+        onFps: () => {},
+        onKbs: (measuredKbs) => parserCallbacksRef.current.onKbs?.(measuredKbs)
+      })
       parserWorkerRef.current = parser
+    }
+    if (parser) {
       parser.start(streamUrl)
       let inlineStarted = false
       const startInline = () => {
@@ -2576,6 +2647,7 @@ export const CameraCard = memo(function CameraCard({
       return () => {
         clearTimeout(fallbackTimer)
         cancelled = true
+        parserCallbacksRef.current = {}
         if (rafId !== null) {
           if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(rafId)
           else clearTimeout(rafId)
@@ -2586,8 +2658,7 @@ export const CameraCard = memo(function CameraCard({
           pendingBitmap = null
         }
         ac.abort()
-        parser.dispose()
-        parserWorkerRef.current = null
+        parser.stop()
       }
     }
 
@@ -3355,29 +3426,76 @@ function AddCameraModal({
   const [pendingIpDrafts, setPendingIpDrafts] = useState<IpCameraDraft[]>([])
   const [ipUrl, setIpUrl] = useState('')
   const [ipName, setIpName] = useState('')
+  const [ipUsername, setIpUsername] = useState('admin')
+  const [ipPassword, setIpPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [ipTransport, setIpTransport] = useState<'tcp' | 'udp'>('udp')
   const [ipPreviewWidth, setIpPreviewWidth] = useState<number>(PREVIEW_WIDTH_DEFAULT)
   const [ipCodec, setIpCodec] = useState<RtspCodec>(RTSP_CODEC_DEFAULT)
   const [transportHelp, setTransportHelp] = useState<'tcp' | 'udp' | null>(null)
-  const [rememberIp, setRememberIp] = useState(false)
-  // Snapshot of the draft restored from "Lembrar nome e URL". The footer
-  // confirm ignores it until the user edits one of its fields.
-  const [rememberedDraft, setRememberedDraft] = useState<IpCameraDraft | null>(null)
+  const [rememberCredentials, setRememberCredentials] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [confirmUnsaved, setConfirmUnsaved] = useState(false)
   const [clearingCache, setClearingCache] = useState(false)
   const [clearCacheSuccess, setClearCacheSuccess] = useState(false)
+  const [discoveredIpCameras, setDiscoveredIpCameras] = useState<Array<{ id: string; name: string; ip: string; suggestedUrl: string }>>([])
+  const [isDiscovering, setIsDiscovering] = useState(false)
+  const [selectedDiscoveredUrl, setSelectedDiscoveredUrl] = useState('')
 
   const webcamCameras = allCameras.filter((c) => c.source === 'webcam')
   const ipCameras = allCameras.filter((c) => c.source === 'ip')
 
+  const fetchDiscoveredCameras = useCallback(async () => {
+    setIsDiscovering(true)
+    try {
+      const res = await command<{ ok: boolean; cameras?: Array<{ id: string; name: string; ip: string; suggestedUrl: string }> }>(
+        'discover_cameras',
+        { timeoutMs: 2500 }
+      )
+      if (res?.cameras && Array.isArray(res.cameras)) {
+        setDiscoveredIpCameras(res.cameras)
+      }
+    } catch {
+    } finally {
+      setIsDiscovering(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (isOpen && isActive && activeTab === 'ip') {
+      void fetchDiscoveredCameras()
+    }
+  }, [isOpen, isActive, activeTab, fetchDiscoveredCameras])
+
+  const handleSelectDiscoveredCamera = (url: string) => {
+    if (!url) {
+      setSelectedDiscoveredUrl('')
+      return
+    }
+    setSelectedDiscoveredUrl(url)
+    const parsed = parseCameraAuth(url)
+    setIpUrl(parsed.cleanUrl)
+    if (parsed.username) {
+      setIpUsername(parsed.username)
+    } else if (!ipUsername.trim()) {
+      setIpUsername('admin')
+    }
+    if (parsed.password) {
+      setIpPassword(parsed.password)
+    }
+    const found = discoveredIpCameras.find((d) => d.suggestedUrl === url)
+    if (found && (!ipName.trim() || ipName.trim() === t('cameras.defaultIpName'))) {
+      setIpName(found.name)
+    }
+  }
+
   // Reset the pending selection every time the modal (re)opens, so a
-  // cancelled session never leaks cameras into the next one. A previously
-  // remembered IP draft (name + URL + transport) is restored instead.
+  // cancelled session never leaks cameras into the next one.
   useEffect(() => {
     if (!isOpen || !isActive) return
     setSelectedWebcamId('')
+    setSelectedDiscoveredUrl('')
     setPendingWebcamIds([])
     setPendingIpDrafts([])
     setTransportHelp(null)
@@ -3386,35 +3504,31 @@ function AddCameraModal({
     setConfirmUnsaved(false)
     setClearingCache(false)
     setClearCacheSuccess(false)
+    setShowPassword(false)
+    setIpUrl('')
+    setIpName('')
+
     try {
-      const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:ip-draft`) : null
-      const saved = raw ? JSON.parse(raw) as { name?: unknown; url?: unknown; transport?: unknown; previewWidth?: unknown; codec?: unknown } : null
-      if (saved && typeof saved.url === 'string' && saved.url.trim()) {
-        const restoredCodec = resolveRtspCodec(saved.codec)
-        const restoredDraft: IpCameraDraft = {
-          name: typeof saved.name === 'string' ? saved.name.trim() : '',
-          url: saved.url.trim(),
-          transport: saved.transport === 'udp' ? 'udp' : 'tcp',
-          previewWidth: resolvePreviewWidth(saved.previewWidth),
-          codec: restoredCodec
-        }
-        setRememberedDraft(restoredDraft)
-        setIpUrl(restoredDraft.url)
-        setIpName(restoredDraft.name)
-        setIpTransport(restoredDraft.transport)
-        setIpPreviewWidth(restoredDraft.previewWidth)
-        setIpCodec(restoredCodec)
-        setRememberIp(true)
+      localStorage.removeItem(`${EXT_ID}:ip-draft`)
+      const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:camera-defaults`) : null
+      const saved = raw ? (JSON.parse(raw) as { username?: unknown; password?: unknown; transport?: unknown; previewWidth?: unknown; codec?: unknown; remember?: unknown }) : null
+      if (saved && saved.remember) {
+        setIpUsername(typeof saved.username === 'string' && saved.username.trim() ? saved.username.trim() : 'admin')
+        setIpPassword(typeof saved.password === 'string' ? saved.password : '')
+        setIpTransport(saved.transport === 'tcp' ? 'tcp' : 'udp')
+        setIpPreviewWidth(resolvePreviewWidth(saved.previewWidth))
+        setIpCodec(resolveRtspCodec(saved.codec))
+        setRememberCredentials(true)
         return
       }
     } catch {}
-    setRememberedDraft(null)
-    setIpUrl('')
-    setIpName('')
-    setIpCodec(RTSP_CODEC_DEFAULT)
+
+    setIpUsername('admin')
+    setIpPassword('')
     setIpTransport('udp')
     setIpPreviewWidth(PREVIEW_WIDTH_DEFAULT)
-    setRememberIp(false)
+    setIpCodec(RTSP_CODEC_DEFAULT)
+    setRememberCredentials(false)
   }, [isOpen, isActive])
 
   useEffect(() => {
@@ -3447,44 +3561,38 @@ function AddCameraModal({
     void command('warm_webcam', { cameraId: val }).catch(() => {})
   }
 
-  const persistIpDraft = (draft: IpCameraDraft | null) => {
+  const persistCameraDefaults = (defaults: { username?: string; password?: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec; remember?: boolean } | null) => {
     try {
       if (typeof localStorage === 'undefined') return
-      if (draft && draft.url.trim()) {
-        const payload: Record<string, unknown> = {
-          name: draft.name,
-          url: draft.url,
-          transport: draft.transport,
-          previewWidth: draft.previewWidth
-        }
-        if (draft.codec && draft.codec !== 'h264') {
-          payload.codec = draft.codec
-        }
-        localStorage.setItem(`${EXT_ID}:ip-draft`, JSON.stringify(payload))
+      if (defaults && defaults.remember) {
+        localStorage.setItem(`${EXT_ID}:camera-defaults`, JSON.stringify(defaults))
       } else {
-        localStorage.removeItem(`${EXT_ID}:ip-draft`)
+        localStorage.removeItem(`${EXT_ID}:camera-defaults`)
       }
+      localStorage.removeItem(`${EXT_ID}:ip-draft`)
     } catch {}
   }
 
-  const handleToggleRememberIp = (checked: boolean) => {
-    setRememberIp(checked)
-    persistIpDraft(
+  const handleToggleRememberCredentials = (checked: boolean) => {
+    setRememberCredentials(checked)
+    persistCameraDefaults(
       checked
         ? {
-            name: ipName.trim(),
-            url: ipUrl.trim(),
+            username: ipUsername,
+            password: ipPassword,
             transport: ipTransport,
             previewWidth: ipPreviewWidth,
-            ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
+            codec: ipCodec,
+            remember: true
           }
         : null
     )
   }
 
   const handleStageIp = () => {
-    const url = ipUrl.trim()
-    if (!url) return
+    const rawUrl = ipUrl.trim()
+    if (!rawUrl) return
+    const url = buildAuthenticatedUrl(rawUrl, ipUsername, ipPassword)
     const id = `ip:${url}`
     if (ipCameras.some((c) => c.id === id)) {
       setModalError(t('cameras.addModal.alreadyRegistered'))
@@ -3495,16 +3603,29 @@ function AddCameraModal({
       return
     }
     const stagedDraft: IpCameraDraft = {
-      name: ipName.trim(),
+      name: ipName.trim() || t('cameras.defaultIpName'),
       url,
       transport: ipTransport,
       previewWidth: ipPreviewWidth,
       ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
     }
-    if (rememberIp) persistIpDraft(stagedDraft)
+    if (rememberCredentials) {
+      persistCameraDefaults({
+        username: ipUsername,
+        password: ipPassword,
+        transport: ipTransport,
+        previewWidth: ipPreviewWidth,
+        codec: ipCodec,
+        remember: true
+      })
+    }
     setPendingIpDrafts((prev) => [...prev, stagedDraft])
     setIpUrl('')
     setIpName('')
+    setSelectedDiscoveredUrl('')
+    if (!rememberCredentials) {
+      setIpPassword('')
+    }
     setModalError(null)
   }
 
@@ -3513,7 +3634,8 @@ function AddCameraModal({
     setClearCacheSuccess(false)
     setModalError(null)
     try {
-      await command('clear_camera_cache', { url: ipUrl.trim() || undefined })
+      const fullUrl = buildAuthenticatedUrl(ipUrl.trim(), ipUsername, ipPassword)
+      await command('clear_camera_cache', { url: fullUrl || undefined })
       setClearCacheSuccess(true)
       setTimeout(() => setClearCacheSuccess(false), 4000)
     } catch (err) {
@@ -3532,20 +3654,10 @@ function AddCameraModal({
     return /^(https?:\/\/|rtsp:\/\/).+/i.test(u)
   }
 
-  const hasUnsavedValidIp = hasUnsavedIpInput && isValidIpUrl(ipUrl)
-  // A restored "Lembrar nome e URL" draft is prefilled data, not a selection:
-  // it only counts once the user edits one of its fields.
-  const rememberedDraftUntouched =
-    rememberedDraft !== null &&
-    ipName.trim() === rememberedDraft.name &&
-    ipUrl.trim() === rememberedDraft.url &&
-    ipTransport === rememberedDraft.transport &&
-    ipPreviewWidth === rememberedDraft.previewWidth &&
-    ipCodec === (rememberedDraft.codec ?? RTSP_CODEC_DEFAULT)
-  const hasCountableIpDraft = hasUnsavedValidIp && !rememberedDraftUntouched
+  const hasUnsavedValidIp = isValidIpUrl(ipUrl)
   // Contagem efetiva: inclui o draft ainda não clicado em "Adicionar à seleção"
   // para que 1 clique no rodapé já adicione uma única IP sem passo extra.
-  const effectivePendingCount = pendingCount + (hasCountableIpDraft ? 1 : 0)
+  const effectivePendingCount = pendingCount + (hasUnsavedValidIp ? 1 : 0)
 
   const doConfirm = async (overrideWebcams?: string[], overrideIps?: IpCameraDraft[]) => {
     const webcamsToAdd = overrideWebcams ?? pendingWebcamIds
@@ -3577,9 +3689,10 @@ function AddCameraModal({
 
   const handleConfirm = async () => {
     // Se há um IP válido digitado mas ainda não "Adicionado à seleção",
-    // inclui automaticamente no confirm — evita o 2º clique + prompt.
-    if (hasCountableIpDraft) {
-      const url = ipUrl.trim()
+    // inclui automaticamente no confirm — evita o 2º clique.
+    if (hasUnsavedValidIp) {
+      const rawUrl = ipUrl.trim()
+      const url = buildAuthenticatedUrl(rawUrl, ipUsername, ipPassword)
       const id = `ip:${url}`
       if (ipCameras.some((c) => c.id === id)) {
         setModalError(t('cameras.addModal.alreadyRegistered'))
@@ -3590,14 +3703,23 @@ function AddCameraModal({
         return
       }
       const draftItem: IpCameraDraft = {
-        name: ipName.trim(),
+        name: ipName.trim() || t('cameras.defaultIpName'),
         url,
         transport: ipTransport,
         previewWidth: ipPreviewWidth,
         ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
       }
       const nextIps = [...pendingIpDrafts, draftItem]
-      if (rememberIp) persistIpDraft(draftItem)
+      if (rememberCredentials) {
+        persistCameraDefaults({
+          username: ipUsername,
+          password: ipPassword,
+          transport: ipTransport,
+          previewWidth: ipPreviewWidth,
+          codec: ipCodec,
+          remember: true
+        })
+      }
       await doConfirm(pendingWebcamIds, nextIps)
       return
     }
@@ -3615,6 +3737,12 @@ function AddCameraModal({
   const webcamOptions: CustomSelectOption[] = webcamCameras
     .filter((cam) => !selectedCameraIds.includes(cam.id) && !pendingWebcamIds.includes(cam.id))
     .map((cam) => ({ value: cam.id, label: formatCameraName(cam.name, cam.source, t), badge: t('cameras.addModal.available') }))
+
+  const discoveredOptions: CustomSelectOption[] = discoveredIpCameras.map((cam) => ({
+    value: cam.suggestedUrl,
+    label: `${cam.name} (${cam.ip})`,
+    badge: 'ONVIF'
+  }))
 
   const modalContent = (
     <div
@@ -3731,50 +3859,168 @@ function AddCameraModal({
 
                 {/* Tab 2: Câmeras IP */}
                 {activeTab === 'ip' && (
-                  <div className="animate-fadeIn">
+                  <div className="animate-fadeIn space-y-3">
+                    {/* Câmeras encontradas na rede local */}
+                    <div className="rounded-xl border border-border/40 bg-input/20 p-3 sm:p-4 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-medium text-text-muted">
+                          {t('cameras.addModal.networkCamerasAvailable')}
+                        </label>
+                        <button
+                          type="button"
+                          disabled={isDiscovering}
+                          onClick={() => void fetchDiscoveredCameras()}
+                          className="inline-flex items-center gap-1 text-[10px] text-text-muted hover:text-emerald-400 transition-colors cursor-pointer disabled:opacity-50"
+                          title={t('cameras.addModal.refreshDiscovery')}
+                        >
+                          <svg className={`w-3 h-3 ${isDiscovering ? 'animate-spin text-emerald-400' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                            <path d="M3 3v5h5" />
+                            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                            <path d="M21 21v-5h-5" />
+                          </svg>
+                          <span>{isDiscovering ? t('cameras.addModal.searchingNetwork') : t('cameras.addModal.refreshDiscovery')}</span>
+                        </button>
+                      </div>
+
+                      {isDiscovering && discoveredOptions.length === 0 ? (
+                        <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-4 text-center bg-input/20 flex items-center justify-center gap-2">
+                          <svg className="w-3.5 h-3.5 animate-spin text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                          </svg>
+                          <span>{t('cameras.addModal.searchingNetwork')}</span>
+                        </div>
+                      ) : discoveredOptions.length > 0 ? (
+                        <div className="relative overflow-visible z-30">
+                          <CustomSelect
+                            value={selectedDiscoveredUrl}
+                            onChange={handleSelectDiscoveredCamera}
+                            options={discoveredOptions}
+                            placeholder={t('cameras.addModal.selectDiscoveredCamera')}
+                            size="sm"
+                            direction="down"
+                            className="w-full"
+                          />
+                        </div>
+                      ) : (
+                        <div className="text-[11px] text-text-muted border border-dashed border-border/30 rounded-xl p-3 bg-input/10 space-y-2">
+                          <div className="flex items-center gap-1.5 font-medium text-text text-[11px]">
+                            <svg className="w-3.5 h-3.5 text-amber-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <circle cx="12" cy="12" r="10" />
+                              <line x1="12" y1="8" x2="12" y2="12" />
+                              <line x1="12" y1="16" x2="12.01" y2="16" />
+                            </svg>
+                            <span>{t('cameras.addModal.noNetworkCamerasTitle')}</span>
+                          </div>
+                          <ul className="space-y-1 text-[10.5px] leading-relaxed text-text-muted list-disc list-inside pl-0.5">
+                            <li>{t('cameras.addModal.noNetworkCamerasHintNvr')}</li>
+                            <li>{t('cameras.addModal.noNetworkCamerasHintWifi')}</li>
+                            <li>{t('cameras.addModal.noNetworkCamerasHintManual')}</li>
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+
                     <div className="rounded-xl border border-border/40 bg-input/20 p-3 sm:p-4 space-y-3">
                       <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.7fr] gap-3">
                         <div>
                           <label htmlFor="vision-ip-name" className="block text-[11px] font-medium text-text-muted mb-1.5">
                             {t('cameras.addModal.nameLabel')} <span className="text-text-muted/60 font-normal">{t('cameras.addModal.nameOptional')}</span>
                           </label>
-                        <input
-                          id="vision-ip-name"
-                          value={ipName}
-                          onChange={(e) => setIpName(e.target.value)}
-                          placeholder={t('cameras.addModal.namePlaceholder')}
-                          className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
-                        />
-                      </div>
-                      <div>
-                        <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                          {t('cameras.addModal.urlLabel')}
-                        </label>
-                        <input
-                          id="vision-ip-url"
-                          value={ipUrl}
-                          onChange={(e) => setIpUrl(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' && ipUrl.trim()) {
-                              e.preventDefault()
-                              handleStageIp()
-                            }
-                          }}
-                          placeholder={t('cameras.addModal.urlPlaceholder')}
-                          className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
-                        />
-                        <label className="mt-2 flex items-center gap-2 cursor-pointer select-none">
                           <input
-                            type="checkbox"
-                            checked={rememberIp}
-                            onChange={(e) => handleToggleRememberIp(e.target.checked)}
-                            className="w-3.5 h-3.5 shrink-0"
+                            id="vision-ip-name"
+                            value={ipName}
+                            onChange={(e) => setIpName(e.target.value)}
+                            placeholder={t('cameras.addModal.namePlaceholder')}
+                            className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
                           />
-                          <span className="text-[11px] text-text-muted">
-                            {t('cameras.addModal.rememberIp')}
-                          </span>
-                        </label>
+                        </div>
+                        <div>
+                          <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                            {t('cameras.addModal.urlLabel')}
+                          </label>
+                          <input
+                            id="vision-ip-url"
+                            value={ipUrl}
+                            onChange={(e) => {
+                              const val = e.target.value
+                              if (val.includes('@')) {
+                                const parsed = parseCameraAuth(val)
+                                setIpUrl(parsed.cleanUrl)
+                                if (parsed.username) setIpUsername(parsed.username)
+                                if (parsed.password) setIpPassword(parsed.password)
+                              } else {
+                                setIpUrl(val)
+                              }
+                              if (selectedDiscoveredUrl && val !== selectedDiscoveredUrl) {
+                                setSelectedDiscoveredUrl('')
+                              }
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && ipUrl.trim()) {
+                                e.preventDefault()
+                                handleStageIp()
+                              }
+                            }}
+                            placeholder={t('cameras.addModal.urlPlaceholder')}
+                            className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                          />
+                        </div>
                       </div>
+
+                      {/* Usuário e Senha RTSP */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label htmlFor="vision-ip-username" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                            {t('cameras.addModal.usernameLabel')}
+                          </label>
+                          <input
+                            id="vision-ip-username"
+                            value={ipUsername}
+                            onChange={(e) => setIpUsername(e.target.value)}
+                            placeholder={t('cameras.addModal.usernamePlaceholder')}
+                            className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="vision-ip-password" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                            {t('cameras.addModal.passwordLabel')}
+                          </label>
+                          <div className="relative">
+                            <input
+                              id="vision-ip-password"
+                              type={showPassword ? 'text' : 'password'}
+                              value={ipPassword}
+                              onChange={(e) => setIpPassword(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && ipUrl.trim()) {
+                                  e.preventDefault()
+                                  handleStageIp()
+                                }
+                              }}
+                              placeholder={t('cameras.addModal.passwordPlaceholder')}
+                              className="w-full bg-input border border-border/40 rounded-lg pl-3 pr-8 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setShowPassword((prev) => !prev)}
+                              aria-label={t(showPassword ? 'cameras.addModal.hidePassword' : 'cameras.addModal.showPassword')}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text p-1 text-xs"
+                            >
+                              {showPassword ? (
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                                  <line x1="1" y1="1" x2="23" y2="23" />
+                                </svg>
+                              ) : (
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                                  <circle cx="12" cy="12" r="3" />
+                                </svg>
+                              )}
+                            </button>
+                          </div>
+                        </div>
                       </div>
 
                       {/* Transport Selection */}
@@ -3864,7 +4110,22 @@ function AddCameraModal({
                         <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.codecHelp')}</p>
                       </div>
 
-                      <div className="flex items-center justify-between gap-2 pt-1">
+                      {/* Lembrar credenciais e preferências */}
+                      <div className="pt-1">
+                        <label className="flex items-center gap-2 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={rememberCredentials}
+                            onChange={(e) => handleToggleRememberCredentials(e.target.checked)}
+                            className="w-3.5 h-3.5 shrink-0"
+                          />
+                          <span className="text-[11px] text-text-muted">
+                            {t('cameras.addModal.rememberIp')}
+                          </span>
+                        </label>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/20">
                         <button
                           type="button"
                           disabled={clearingCache}
@@ -3898,7 +4159,7 @@ function AddCameraModal({
                           <span>{t('cameras.addModal.clearCacheSuccess')}</span>
                         </p>
                       ) : null}
-                      {hasCountableIpDraft ? (
+                      {hasUnsavedValidIp ? (
                         <p className="text-[11px] text-text-muted text-center">{t('cameras.addModal.addHint')}</p>
                       ) : null}
                     </div>
