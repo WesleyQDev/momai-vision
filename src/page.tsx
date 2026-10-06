@@ -4726,6 +4726,9 @@ function ExpandedCameraModal({
     }
 
     const parser = createParserWorker({
+      // Same dev-symlink caveat as the card preview: the URL must be built in
+      // page.tsx so it resolves next to src/mjpeg-worker.ts.
+      workerUrl: new URL('./mjpeg-worker.js', import.meta.url),
       onBitmap: (bitmap) => {
         if (cancelled) {
           bitmap.close()
