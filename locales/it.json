@@ -521,7 +521,7 @@
   },
   "settings": {
     "title": "Impostazioni Visione",
-    "subtitle": "Regola le preferenze telecamera, la conservazione foto e le modalità di tracciamento locali.",
+    "subtitle": "Regola le preferenze telecamera e la conservazione foto.",
     "retention": "Conservazione foto",
     "retentionDesc": "Imposta il limite di archiviazione locale per la galleria foto e la cronologia.",
     "daysLabel": "Giorni di conservazione (default: 7)",

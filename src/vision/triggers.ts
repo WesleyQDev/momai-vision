@@ -2,9 +2,8 @@
  * Monitoring trigger engine (pure, testable).
  *
  * Evaluates a monitor's triggers against a frame + detections and decides
- * whether an alert fires. `scene` triggers need the vision LLM — the runtime
- * performs those calls and passes answers in via `evaluateScene`; the pure
- * engine only tracks cadence and N-confirmation state.
+ * whether an alert fires. Every decision is local (motion gate / YOLO
+ * classes); no model or network call is involved.
  */
 
 export interface Detection {
@@ -22,8 +21,6 @@ export type Trigger =
   | { type: 'object'; className: string; minConfidence?: number; present?: boolean }
   | { type: 'presence'; className?: string; event: 'entered' | 'left' | 'still_present'; windowSec?: number }
   | { type: 'absence'; className?: string; event: 'entered' | 'left' | 'still_present'; windowSec?: number }
-  | { type: 'scene'; question: string; everySec?: number; onAnswer?: 'yes' | 'no' | 'change'; confirmN?: number }
-  | { type: 'periodic'; everySec: number; task?: string }
 
 export interface Schedule {
   days?: number[] // 0-6 (Sunday=0)
@@ -61,10 +58,7 @@ export interface MonitorConfig {
 
 export interface MonitorState {
   lastAlertTs: number
-  lastMotion: boolean
   presence: Record<string, { present: boolean; since: number; lastSeen: number }>
-  scene: Record<string, { lastCheckTs: number; lastAnswer: 'yes' | 'no' | null; confirmCount: number }>
-  periodic: Record<string, { lastRunTs: number }>
 }
 
 export interface AlertInfo {
@@ -84,22 +78,12 @@ export interface TriggerContext {
   motionDetected: boolean
   detections: Detection[]
   now: number
-  frameJpeg: string
-}
-
-export interface SceneAnswer {
-  monitorId: string
-  triggerIndex: number
-  answer: 'yes' | 'no'
 }
 
 export function createMonitorState(): MonitorState {
   return {
     lastAlertTs: 0,
-    lastMotion: false,
-    presence: {},
-    scene: {},
-    periodic: {}
+    presence: {}
   }
 }
 
@@ -308,24 +292,20 @@ export function normalizeClassName(name: string): string {
 }
 
 /**
- * Evaluates all triggers of a monitor. Returns alerts to fire. The runtime
- * calls this every tick with the latest frame data; `scene` triggers that
- * are due are returned in `sceneDue` so the runtime can query the vision
- * LLM and then call `applySceneAnswer`.
+ * Evaluates all triggers of a monitor and returns the alerts to fire. The
+ * runtime calls this every tick with the latest frame data.
  */
 export function evaluateMonitor(
   monitor: MonitorConfig,
   state: MonitorState,
   ctx: TriggerContext
-): { alerts: AlertInfo[]; sceneDue: Array<{ triggerIndex: number; question: string }> } {
+): { alerts: AlertInfo[] } {
   const alerts: AlertInfo[] = []
-  const sceneDue: Array<{ triggerIndex: number; question: string }> = []
   const now = ctx.now
 
-  if (!inSchedule(monitor.schedule, now)) return { alerts, sceneDue }
-  state.lastMotion = ctx.motionDetected
+  if (!inSchedule(monitor.schedule, now)) return { alerts }
 
-  monitor.triggers.forEach((trigger, index) => {
+  for (const trigger of monitor.triggers) {
     const base = {
       monitorId: monitor.id,
       monitorLabel: monitor.label,
@@ -340,7 +320,7 @@ export function evaluateMonitor(
         state.lastAlertTs = now
         alerts.push({ ...base, triggeredBy: 'motion', description: 'Movimento detectado' })
       }
-      return
+      continue
     }
 
     if (trigger.type === 'object') {
@@ -363,7 +343,7 @@ export function evaluateMonitor(
             : `${capitalize(className)} ausente`
         })
       }
-      return
+      continue
     }
 
     if (trigger.type === 'presence' || trigger.type === 'absence') {
@@ -407,88 +387,11 @@ export function evaluateMonitor(
           description: `${capitalize(className)}: ${label}`
         })
       }
-      return
-    }
-
-    if (trigger.type === 'scene') {
-      const every = Math.max(15, trigger.everySec ?? 60) * 1000
-      const entry = state.scene[index] || { lastCheckTs: 0, lastAnswer: null, confirmCount: 0 }
-      if (now - entry.lastCheckTs >= every) {
-        entry.lastCheckTs = now
-        state.scene[index] = entry
-        sceneDue.push({ triggerIndex: index, question: trigger.question })
-      }
-      return
-    }
-
-    if (trigger.type === 'periodic') {
-      const every = Math.max(15, trigger.everySec) * 1000
-      const entry = state.periodic[index] || { lastRunTs: 0 }
-      if (now - entry.lastRunTs >= every) {
-        entry.lastRunTs = now
-        state.periodic[index] = entry
-        sceneDue.push({ triggerIndex: index, question: trigger.task || 'Descreva o que mudou na cena' })
-      }
-      return
-    }
-  })
-
-  return { alerts, sceneDue }
-}
-
-/**
- * Applies a vision answer to a scene trigger. Fires an alert when the answer
- * matches (yes/no) or when it changes from the previous answer (change),
- * after N consecutive identical answers (anti-flapping).
- */
-export function applySceneAnswer(
-  monitor: MonitorConfig,
-  state: MonitorState,
-  triggerIndex: number,
-  answer: 'yes' | 'no',
-  now: number
-): AlertInfo | null {
-  const trigger = monitor.triggers[triggerIndex]
-  if (!trigger || trigger.type !== 'scene') return null
-
-  const entry = state.scene[triggerIndex] || { lastCheckTs: now, lastAnswer: null, confirmCount: 0 }
-  const confirmN = trigger.confirmN ?? 1
-
-  let shouldFire = false
-  const answerMode = trigger.onAnswer || 'yes'
-  if (answerMode === 'change') {
-    if (entry.lastAnswer !== null && answer !== entry.lastAnswer) {
-      entry.confirmCount++
-      if (entry.confirmCount >= confirmN) shouldFire = true
-    } else {
-      entry.confirmCount = 0
-    }
-  } else {
-    if (answer === answerMode) {
-      entry.confirmCount++
-      if (entry.confirmCount >= confirmN) shouldFire = true
-    } else {
-      entry.confirmCount = 0
+      continue
     }
   }
-  entry.lastAnswer = answer
-  state.scene[triggerIndex] = entry
 
-  if (shouldFire && !inCooldown(state, monitor, now)) {
-    state.lastAlertTs = now
-    entry.confirmCount = 0
-    state.scene[triggerIndex] = entry
-    return {
-      monitorId: monitor.id,
-      monitorLabel: monitor.label,
-      cameraId: monitor.cameraId,
-      cameraName: monitor.cameraName,
-      ts: now,
-      triggeredBy: `scene:${triggerIndex}`,
-      description: trigger.question
-    }
-  }
-  return null
+  return { alerts }
 }
 
 function capitalize(value: string): string {

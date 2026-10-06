@@ -521,7 +521,7 @@
   },
   "settings": {
     "title": "Configurações do Vision",
-    "subtitle": "Ajuste suas preferências de câmeras, retenção de prints e modos de rastreamento local.",
+    "subtitle": "Ajuste suas preferências de câmeras e retenção de prints.",
     "retention": "Retenção de Prints",
     "retentionDesc": "Defina o limite de armazenamento local para galeria de prints e histórico.",
     "daysLabel": "Dias de armazenamento (padrão: 7)",

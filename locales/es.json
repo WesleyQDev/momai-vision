@@ -521,7 +521,7 @@
   },
   "settings": {
     "title": "Configuración de Vision",
-    "subtitle": "Ajuste sus preferencias de cámaras, retención de capturas y modos de rastreo local.",
+    "subtitle": "Ajuste sus preferencias de cámaras y la retención de capturas.",
     "retention": "Retención de capturas",
     "retentionDesc": "Define el límite de almacenamiento local para la galería de capturas y el historial.",
     "daysLabel": "Días de almacenamiento (predeterminado: 7)",

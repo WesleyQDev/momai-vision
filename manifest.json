@@ -345,22 +345,6 @@
       }
     },
     {
-      "name": "describe_snapshot",
-      "description": "Re-descreve um print existente da galeria com o modelo de visão local.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "snapshotId": {
-            "type": "string",
-            "description": "ID do snapshot da galeria."
-          }
-        },
-        "required": [
-          "snapshotId"
-        ]
-      }
-    },
-    {
       "name": "update_monitoring",
       "description": "Edita as configurações de um monitoramento ativo existente (como alterar triggers, schedule, cooldownSec, câmera ou rótulo). Use get_status ou list_cameras para obter o monitorId.",
       "parameters": {
@@ -386,9 +370,7 @@
                     "motion",
                     "object",
                     "presence",
-                    "absence",
-                    "scene",
-                    "periodic"
+                    "absence"
                   ],
                   "description": "Tipo do gatilho."
                 },
@@ -429,26 +411,6 @@
                 "windowSec": {
                   "type": "number",
                   "description": "Janela em segundos para o estado de presenca"
-                },
-                "question": {
-                  "type": "string",
-                  "description": "Pergunta SIM/NAO quando type e scene"
-                },
-                "everySec": {
-                  "type": "number",
-                  "description": "Intervalo em segundos para scene/periodic"
-                },
-                "onAnswer": {
-                  "type": "string",
-                  "description": "Resposta que dispara: yes, no ou change"
-                },
-                "confirmN": {
-                  "type": "number",
-                  "description": "Numero de confirmacoes consecutivas para disparar"
-                },
-                "task": {
-                  "type": "string",
-                  "description": "Tarefa do resumo periodico"
                 }
               },
               "required": [

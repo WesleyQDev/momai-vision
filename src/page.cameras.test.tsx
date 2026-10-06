@@ -24,13 +24,17 @@ interface ServerState {
 
 // In-memory fake of the extension backend: list_cameras/get_status configure
 // keep one consistent state, and every configure call is recorded.
-function setupServer(initial: Partial<ServerState> = {}) {
+function setupServer(
+  initial: Partial<ServerState> = {},
+  credentials: Record<string, { username: string; password: string }> = {}
+) {
   const state: ServerState = {
     cameras: [],
     selectedCameras: [],
     ipCameras: [],
     ...initial
   }
+  const credentialStore = new Map(Object.entries(credentials))
   const calls: Array<{ toolName: string; args: Record<string, unknown> }> = []
   const sdk = getSDK()
   vi.mocked(sdk.api.post).mockImplementation(async (path: string, body?: { toolName: string; args: Record<string, unknown> }) => {
@@ -40,6 +44,14 @@ function setupServer(initial: Partial<ServerState> = {}) {
     const { toolName, args } = body || { toolName: '', args: {} }
     calls.push({ toolName, args })
     switch (toolName) {
+      case 'get_camera_credentials': {
+        const url = String(args.url || '')
+        const credential = credentialStore.get(url)
+        return {
+          ok: true,
+          data: credential ? { ok: true, url, ...credential } : { ok: false }
+        }
+      }
       case 'list_cameras':
         return {
           ok: true,
@@ -448,9 +460,11 @@ describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
       expect(write).toBeTruthy()
       expect(write!.args.ipCameras).toEqual([
         {
-          id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2',
+          id: 'ip:rtsp://192.168.0.4:554/onvif2',
           name: 'Quintal',
-          url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+          url: 'rtsp://192.168.0.4:554/onvif2',
+          username: 'admin',
+          password: 'pass',
           transport: 'udp',
           previewWidth: 640
         }
@@ -480,9 +494,11 @@ describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
       expect(write).toBeTruthy()
       expect(write!.args.ipCameras).toEqual([
         {
-          id: 'ip:rtsp://admin:pass@192.168.0.4:554/onvif2',
+          id: 'ip:rtsp://192.168.0.4:554/onvif2',
           name: 'Quintal',
-          url: 'rtsp://admin:pass@192.168.0.4:554/onvif2',
+          url: 'rtsp://192.168.0.4:554/onvif2',
+          username: 'admin',
+          password: 'pass',
           transport: 'udp',
           previewWidth: 640
         }
@@ -512,7 +528,7 @@ describe('VisionPage — modo de conexão da câmera IP (TCP/UDP)', () => {
 
 describe('VisionPage — lembrar credenciais e preferências da câmera IP', () => {
   it('caixinha Lembrar salva e preenche credenciais ao reabrir mantendo URL e nome limpos', async () => {
-    setupServer({ cameras: [] })
+    setupServer({ cameras: [] }, { 'rtsp://192.168.0.4:554/onvif2': { username: 'admin', password: 'pass123' } })
     const first = render(<VisionPage />)
     await screen.findByText('MomAI Vision')
     await openCameraModal()
@@ -525,14 +541,16 @@ describe('VisionPage — lembrar credenciais e preferências da câmera IP', () 
     fireEvent.click(screen.getByRole('checkbox', { name: 'Lembrar credenciais e preferências' }))
     fireEvent.click(screen.getByText('Adicionar à seleção'))
 
+    // The password never reaches localStorage; the URL is stored clean.
     expect(JSON.parse(localStorage.getItem('momai-vision:camera-defaults') || '{}')).toEqual({
       username: 'admin',
-      password: 'pass123',
+      url: 'rtsp://192.168.0.4:554/onvif2',
       transport: 'tcp',
       previewWidth: 640,
       codec: 'h264',
       remember: true
     })
+    expect(localStorage.getItem('momai-vision:camera-defaults')).not.toContain('pass123')
 
     first.unmount()
     render(<VisionPage />)
@@ -543,9 +561,11 @@ describe('VisionPage — lembrar credenciais e preferências da câmera IP', () 
     // Nome e URL iniciam limpos para adicionar uma nova câmera sem atrito
     expect((screen.getByPlaceholderText('Nome da câmera (ex.: Garagem, Entrada)') as HTMLInputElement).value).toBe('')
     expect((screen.getByPlaceholderText(/URL \(http/) as HTMLInputElement).value).toBe('')
-    // Mas credenciais e preferências foram restauradas
-    expect((screen.getByPlaceholderText('admin (opcional)') as HTMLInputElement).value).toBe('admin')
-    expect((screen.getByPlaceholderText('Senha da câmera (se houver)') as HTMLInputElement).value).toBe('pass123')
+    // Mas credenciais e preferências foram restauradas (senha vem do cofre)
+    await waitFor(() => {
+      expect((screen.getByPlaceholderText('admin (opcional)') as HTMLInputElement).value).toBe('admin')
+      expect((screen.getByPlaceholderText('Senha da câmera (se houver)') as HTMLInputElement).value).toBe('pass123')
+    })
     expect((screen.getByRole('radio', { name: 'TCP' }) as HTMLInputElement).checked).toBe(true)
     expect((screen.getByRole('checkbox', { name: 'Lembrar credenciais e preferências' }) as HTMLInputElement).checked).toBe(true)
   })
@@ -566,16 +586,24 @@ describe('VisionPage — lembrar credenciais e preferências da câmera IP', () 
   it('adiciona câmera com 1 clique usando credenciais restauradas ao preencher apenas a URL', async () => {
     localStorage.setItem('momai-vision:camera-defaults', JSON.stringify({
       username: 'admin',
-      password: 'mypassword',
+      url: 'rtsp://192.168.0.10:554/live',
       transport: 'tcp',
       previewWidth: 640,
       remember: true
     }))
-    const { calls } = setupServer({ cameras: [] })
+    const { calls } = setupServer(
+      { cameras: [] },
+      { 'rtsp://192.168.0.10:554/live': { username: 'admin', password: 'mypassword' } }
+    )
     render(<VisionPage />)
     await screen.findByText('MomAI Vision')
     await openCameraModal()
     fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    // Credenciais vindas do cofre (não ficam no localStorage)
+    await waitFor(() => {
+      expect((screen.getByPlaceholderText('Senha da câmera (se houver)') as HTMLInputElement).value).toBe('mypassword')
+    })
 
     // Preenche apenas a URL da nova câmera
     fireEvent.change(screen.getByPlaceholderText(/URL \(http/), { target: { value: 'rtsp://192.168.0.10:554/live' } })
@@ -586,9 +614,11 @@ describe('VisionPage — lembrar credenciais e preferências da câmera IP', () 
       expect(write).toBeTruthy()
       expect(write!.args.ipCameras).toEqual([
         {
-          id: 'ip:rtsp://admin:mypassword@192.168.0.10:554/live',
+          id: 'ip:rtsp://192.168.0.10:554/live',
           name: 'Câmera IP',
-          url: 'rtsp://admin:mypassword@192.168.0.10:554/live',
+          url: 'rtsp://192.168.0.10:554/live',
+          username: 'admin',
+          password: 'mypassword',
           transport: 'tcp',
           previewWidth: 640
         }
@@ -886,7 +916,7 @@ describe('VisionPage — Limpar Cache e Conexões da câmera IP', () => {
     await waitFor(() => {
       const clearCall = calls.find((c) => c.toolName === 'clear_camera_cache')
       expect(clearCall).toBeTruthy()
-      expect(clearCall!.args.url).toBe('rtsp://admin:pass@192.168.0.2:554/onvif1')
+      expect(clearCall!.args.url).toBe('rtsp://192.168.0.2:554/onvif1')
     })
 
     await screen.findByText(/Conexões e cache limpos!/i)

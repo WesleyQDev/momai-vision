@@ -11,7 +11,7 @@ import {
   resolveRtspCodec,
   type RtspCodec
 } from '../vision/rtsp'
-import { buildAuthenticatedUrl, parseCameraAuth, redactCameraUrl } from '../vision/rtsp-auth'
+import { parseCameraAuth, redactCameraUrl } from '../vision/rtsp-auth'
 import visionIconPng from '../../icon.png'
 
 const sdk = getSDK()
@@ -31,7 +31,15 @@ interface EditCameraModalProps {
   onClose: () => void
   onSave: (
     oldId: string,
-    payload: { name: string; url: string; transport: 'tcp' | 'udp'; previewWidth: number; codec: RtspCodec }
+    payload: {
+      name: string
+      url: string
+      username?: string
+      password?: string
+      transport: 'tcp' | 'udp'
+      previewWidth: number
+      codec: RtspCodec
+    }
   ) => Promise<void>
   /** Called after "Limpar Cache e Conexões" succeeds so the parent can leave the modal and watch the reconnect. */
   onCacheCleared?: (cameraId: string) => void
@@ -50,6 +58,12 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
   const [url, setUrl] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  // Baseline for "did the user change credentials?" so the Save button does
+  // not light up just because the stored password was prefilled.
+  const [initialCreds, setInitialCreds] = useState<{ username: string; password: string }>({
+    username: '',
+    password: ''
+  })
   const [showPassword, setShowPassword] = useState(false)
   const [transport, setTransport] = useState<'tcp' | 'udp'>('udp')
   const [previewWidth, setPreviewWidth] = useState<number>(PREVIEW_WIDTH_DEFAULT)
@@ -83,13 +97,35 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
     setName(target.name || '')
     if (target.source === 'ip' && target.url) {
       const parsed = parseCameraAuth(target.url)
+      const initialUsername = parsed.username || 'admin'
       setUrl(parsed.cleanUrl)
-      setUsername(parsed.username || 'admin')
+      setUsername(initialUsername)
       setPassword(parsed.password)
+      setInitialCreds({ username: initialUsername, password: parsed.password })
+      // The persisted URL carries no password: recover it from the encrypted
+      // credential store for prefill (same UX as before).
+      if (!parsed.password) {
+        void sdk.api
+          .post<{ ok?: boolean; username?: string; password?: string }>(
+            '/extensions/momai-vision/command',
+            { toolName: 'get_camera_credentials', args: { url: parsed.cleanUrl } }
+          )
+          .then((res) => {
+            const entry = res?.data
+            if (!entry?.ok) return
+            const nextUsername = entry.username || initialUsername
+            const nextPassword = entry.password || ''
+            setUsername(nextUsername)
+            setPassword(nextPassword)
+            setInitialCreds({ username: nextUsername, password: nextPassword })
+          })
+          .catch(() => {})
+      }
     } else {
       setUrl(target.url || '')
       setUsername('')
       setPassword('')
+      setInitialCreds({ username: '', password: '' })
     }
     setShowPassword(false)
     setTransport(target.transport === 'tcp' ? 'tcp' : 'udp')
@@ -117,11 +153,15 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
   const isIp = target.source === 'ip'
   const trimmedName = name.trim()
   const trimmedUrl = url.trim()
-  const finalUrl = isIp ? buildAuthenticatedUrl(trimmedUrl, username, password) : target.url
-  const urlChanged = isIp && finalUrl !== target.url
+  const finalUrl = isIp ? parseCameraAuth(trimmedUrl).cleanUrl : target.url
+  const targetCleanUrl = isIp ? parseCameraAuth(target.url).cleanUrl : target.url
+  const urlChanged = isIp && finalUrl !== targetCleanUrl
+  const credentialsChanged =
+    isIp && (username !== initialCreds.username || password !== initialCreds.password)
   const canSave = isIp
     ? trimmedName !== '' &&
       (urlChanged ||
+        credentialsChanged ||
         transport !== target.transport ||
         previewWidth !== resolvePreviewWidth(target.previewWidth) ||
         codec !== resolveRtspCodec(target.codec) ||
@@ -138,6 +178,7 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
       await onSave(target.id, {
         name: trimmedName,
         url: finalUrl,
+        ...(password ? { username, password } : {}),
         transport: isIp ? transport : 'tcp',
         previewWidth,
         codec

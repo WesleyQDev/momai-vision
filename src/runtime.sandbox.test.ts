@@ -114,9 +114,22 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       }
     )
     child.on('message', (msg: unknown) => {
-      const m = msg as { type?: string; id?: string; requestId?: string; method?: string; args?: unknown[] }
+      const m = msg as { type?: string; id?: string; requestId?: string; method?: string; args?: unknown[]; payload?: unknown }
       if (m.type === 'storage-request') {
         handleStorageRequest(m)
+        return
+      }
+      // Fake OS vault: the test harness answers the secure-storage protocol.
+      // Base64 stands in for safeStorage — the contract is what matters here.
+      if (m.type === 'secure-storage:encrypt' || m.type === 'secure-storage:decrypt') {
+        const payload = (m.payload || {}) as { plain?: string; encryptedBase64?: string }
+        const ack =
+          m.type === 'secure-storage:encrypt'
+            ? { ok: true, encrypted: Buffer.from(payload.plain || '', 'utf8').toString('base64') }
+            : { ok: true, plain: Buffer.from(payload.encryptedBase64 || '', 'base64').toString('utf8') }
+        try {
+          child.send({ type: `${m.type}-result`, requestId: m.requestId, ack })
+        } catch {}
         return
       }
       if (m.type === 'event') {
@@ -801,5 +814,52 @@ describe('runtime.js as a persistent worker (host contract)', () => {
       expect(normalized.config?.ipCameras?.find((c) => c.id === camera.id)?.previewWidth).toBe(640)
     },
     60000
+  )
+
+  it(
+    'migrates legacy credentials out of plain camera URLs on boot',
+    async () => {
+      const legacyUrl = 'rtsp://admin:secret@192.168.0.8:554/onvif1'
+      const cleanUrl = 'rtsp://192.168.0.8:554/onvif1'
+      const legacyId = `ip:${legacyUrl}`
+      // Simulate a config written by an older version (password inside URL).
+      storageState.set('config', {
+        ipCameras: [{ id: legacyId, name: 'Legado', url: legacyUrl, transport: 'udp' }],
+        selectedCameras: [legacyId]
+      })
+
+      // Boot a fresh worker so the one-time migration runs.
+      child.kill()
+      await new Promise<void>((resolve) => child.once('exit', () => resolve()))
+      await spawnWorker()
+
+      const list = (await execute({ toolName: 'list_cameras', args: {} })) as {
+        cameras: Array<{ id: string }>
+      }
+      expect(list.cameras.map((camera) => camera.id)).toContain(`ip:${cleanUrl}`)
+
+      const config = storageState.get('config') as {
+        ipCameras: Array<{ name: string; url: string }>
+        selectedCameras: string[]
+      }
+      expect(config.ipCameras.find((camera) => camera.name === 'Legado')?.url).toBe(cleanUrl)
+      expect(config.selectedCameras).toContain(`ip:${cleanUrl}`)
+      expect(JSON.stringify(config)).not.toContain('secret')
+
+      const stored = storageState.get('camera_credentials') as Record<
+        string,
+        { username: string; vault: boolean }
+      >
+      expect(stored[cleanUrl]?.username).toBe('admin')
+      expect(stored[cleanUrl]?.vault).toBe(true)
+
+      // The credential is recoverable through the UI helper, never through ids.
+      const credential = (await execute({
+        toolName: 'get_camera_credentials',
+        args: { url: cleanUrl }
+      })) as { ok: boolean; username?: string; password?: string }
+      expect(credential).toMatchObject({ ok: true, username: 'admin', password: 'secret' })
+    },
+    120000
   )
 })

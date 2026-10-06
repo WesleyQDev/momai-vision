@@ -521,7 +521,7 @@
   },
   "settings": {
     "title": "Vision Settings",
-    "subtitle": "Adjust your camera preferences, snapshot retention and local tracking modes.",
+    "subtitle": "Adjust your camera preferences and snapshot retention.",
     "retention": "Snapshot Retention",
     "retentionDesc": "Set the local storage limit for the snapshot gallery and history.",
     "daysLabel": "Storage days (default: 7)",

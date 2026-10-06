@@ -11,6 +11,28 @@ import { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { getSDK } from 'momai:sdk'
 import { ptLabel, PT_CLASS, triggerLabel, localizedClassLabel, localizedTriggerLabel } from './vision/labels'
+import {
+  TRIGGER_TYPES,
+  SENSITIVITY_OPTIONS,
+  ANIMAL_KEYS,
+  animalObjectOptions,
+  inanimateObjectOptions,
+  allObjectOptions,
+  COOLDOWN_PRESETS,
+  formatCooldown,
+  formatTriggerPortuguese,
+  eventPlaceholders,
+  withBoxesImageTemplate,
+  isOverlayAction,
+  toolLabel,
+  paramLabel,
+  formatActionArgs,
+  type TranslateFn,
+  type MonitorTriggerInfo
+} from './monitoring-format'
+
+export { withBoxesImageTemplate } from './monitoring-format'
+import { createParserWorker, type ParserWorker } from './vision/parser-worker'
 import { AlertCanvasOverlay } from './panel'
 import { useI18n } from './hooks/useI18n'
 import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
@@ -44,8 +66,6 @@ import {
 
 const sdk = getSDK()
 const EXT_ID = 'momai-vision'
-
-type TranslateFn = (key: string, vars?: Record<string, string | number>) => string
 
 interface CameraInfo {
   id: string
@@ -124,17 +144,6 @@ interface MonitorInfo {
 
 // Forma permissiva dos triggers vindos da API (o runtime normaliza para os
 // tipos de ./vision/triggers; aqui a página só lê campos para exibir/editar).
-interface MonitorTriggerInfo {
-  type: string
-  className?: string
-  sensitivity?: string
-  present?: boolean
-  event?: string
-  windowSec?: number
-  question?: string
-  everySec?: number
-}
-
 interface MonitorActionUI {
   id?: string
   target: string
@@ -200,7 +209,6 @@ interface Snapshot {
 interface VisionConfig {
   retentionDays?: number
   maxSnapshots?: number
-  trackingMode?: 'fluid' | 'balanced' | 'economy'
   selectedCameras?: string[]
   pausedCameras?: string[]
   sendActions?: MonitorActionUI[]
@@ -869,138 +877,6 @@ function jpegDims(buf: Uint8Array): { w: number; h: number } | null {
     i += 2 + len
   }
   return null
-}
-
-/**
- * Parser MJPEG em Web Worker: o fetch + parse + throttle acontecem numa THREAD
- * SEPARADA, fora do main thread do renderer principal (que também roda a UI do
- * MomAI). Os frames chegam via postMessage transferable (zero cópia no main);
- * o decode (createImageBitmap) e o draw ficam no main, como no caminho inline.
- *
- * O canvas NUNCA é transferido: se o worker não carregar (URL não resolvida
- * em dev, etc.), o caller cai no createMjpegReader inline e o preview continua
- * funcionando — sem canvas "queimado", sem "iniciando câmera" eterno.
- */
-interface ParserWorker {
-  start(url: string): void
-  stop(): void
-  reset?(): void
-  getFrame(): Promise<Uint8Array | null>
-  dispose(): void
-  /** true quando o script do worker carregou (ack 'ready' recebido). */
-  isReady(): boolean
-}
-
-function createParserWorker(opts: {
-  onBitmap?: (bitmap: ImageBitmap, origW: number, origH: number) => void
-  onFrame?: (frame: Uint8Array) => void
-  onError?: () => void
-  onFps?: (fps: number) => void
-  onKbs?: (kbs: number) => void
-}): ParserWorker | null {
-  if (typeof Worker === 'undefined') return null
-  let worker: Worker
-  try {
-    // Em prod o worker está em dist/mjpeg-worker.js; em dev (symlink) o
-    // electron.vite.config.ts agora serve o raw de src/mjpeg-worker.ts para
-    // este path, garantindo que o parse e o decode saiam do main thread.
-    worker = new Worker(new URL('./mjpeg-worker.js', import.meta.url), { type: 'module' })
-  } catch {
-    return null
-  }
-
-  let disposed = false
-  let ready = false
-  let pendingFrame: { resolve: (v: Uint8Array | null) => void; timer: ReturnType<typeof setTimeout> } | null = null
-
-  worker.onmessage = (e: MessageEvent) => {
-    if (disposed) return
-    const msg = e.data
-    switch (msg?.type) {
-      case 'ready':
-        // Ack de carregamento: o script avaliou e o worker está vivo.
-        ready = true
-        break
-      case 'bitmap':
-        if (msg.bitmap) opts.onBitmap?.(msg.bitmap, Number(msg.origW) || 0, Number(msg.origH) || 0)
-        break
-      case 'frame':
-        if (msg.buffer) opts.onFrame?.(new Uint8Array(msg.buffer))
-        break
-      case 'get_frame_response':
-        if (pendingFrame) {
-          clearTimeout(pendingFrame.timer)
-          const p = pendingFrame
-          pendingFrame = null
-          p.resolve(msg.buffer ? new Uint8Array(msg.buffer) : null)
-        }
-        break
-      case 'fps':
-        opts.onFps?.(Number(msg.fps) || 0)
-        if (typeof msg.kbs === 'number') {
-          opts.onKbs?.(msg.kbs)
-        }
-        break
-      case 'error':
-        opts.onError?.()
-        break
-    }
-  }
-
-  // O `new Worker` não lança quando a URL não resolve (ex.: mjpeg-worker.js
-  // não servido pelo Vite em dev): o erro é assíncrono. Sinalizamos que o
-  // worker NÃO está pronto para o caller cair no parser inline.
-  worker.onerror = () => {
-    ready = false
-  }
-
-  return {
-    start: (url: string) => {
-      if (!disposed) worker.postMessage({ type: 'start', url })
-    },
-    stop: () => {
-      if (!disposed) {
-        try {
-          worker.postMessage({ type: 'abort' })
-        } catch {}
-      }
-    },
-    reset: () => {
-      if (!disposed) {
-        try {
-          worker.postMessage({ type: 'reset' })
-        } catch {}
-      }
-    },
-    getFrame: () =>
-      new Promise<Uint8Array | null>((resolve) => {
-        if (disposed || pendingFrame || !ready) {
-          resolve(null)
-          return
-        }
-        const timer = setTimeout(() => {
-          if (pendingFrame) {
-            pendingFrame.resolve(null)
-            pendingFrame = null
-          }
-        }, 2000)
-        pendingFrame = { resolve, timer }
-        worker.postMessage({ type: 'get_frame' })
-      }),
-    isReady: () => ready && !disposed,
-    dispose: () => {
-      disposed = true
-      try {
-        worker.postMessage({ type: 'abort' })
-      } catch {}
-      worker.terminate()
-      if (pendingFrame) {
-        clearTimeout(pendingFrame.timer)
-        pendingFrame.resolve(null)
-        pendingFrame = null
-      }
-    }
-  }
 }
 
 interface CustomSelectOption<T extends string = string> {
@@ -3398,6 +3274,8 @@ function AddCameraCard({ onClick }: { onClick: () => void }): JSX.Element {
 interface IpCameraDraft {
   name: string
   url: string
+  username?: string
+  password?: string
   transport: 'tcp' | 'udp'
   previewWidth: number
   codec?: RtspCodec
@@ -3511,14 +3389,28 @@ function AddCameraModal({
     try {
       localStorage.removeItem(`${EXT_ID}:ip-draft`)
       const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:camera-defaults`) : null
-      const saved = raw ? (JSON.parse(raw) as { username?: unknown; password?: unknown; transport?: unknown; previewWidth?: unknown; codec?: unknown; remember?: unknown }) : null
+      const saved = raw ? (JSON.parse(raw) as { username?: unknown; url?: unknown; transport?: unknown; previewWidth?: unknown; codec?: unknown; remember?: unknown }) : null
       if (saved && saved.remember) {
         setIpUsername(typeof saved.username === 'string' && saved.username.trim() ? saved.username.trim() : 'admin')
-        setIpPassword(typeof saved.password === 'string' ? saved.password : '')
+        // Passwords are never stored in localStorage; recover it from the
+        // encrypted credential store when the host has one on file.
+        setIpPassword('')
         setIpTransport(saved.transport === 'tcp' ? 'tcp' : 'udp')
         setIpPreviewWidth(resolvePreviewWidth(saved.previewWidth))
         setIpCodec(resolveRtspCodec(saved.codec))
         setRememberCredentials(true)
+        if (typeof saved.url === 'string' && saved.url) {
+          void command<{ ok?: boolean; username?: string; password?: string }>('get_camera_credentials', {
+            url: saved.url
+          })
+            .then((res) => {
+              if (res?.ok) {
+                if (res.username) setIpUsername(res.username)
+                if (res.password) setIpPassword(res.password)
+              }
+            })
+            .catch(() => {})
+        }
         return
       }
     } catch {}
@@ -3561,11 +3453,15 @@ function AddCameraModal({
     void command('warm_webcam', { cameraId: val }).catch(() => {})
   }
 
-  const persistCameraDefaults = (defaults: { username?: string; password?: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec; remember?: boolean } | null) => {
+  const persistCameraDefaults = (defaults: { username?: string; password?: string; url?: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec; remember?: boolean } | null) => {
     try {
       if (typeof localStorage === 'undefined') return
       if (defaults && defaults.remember) {
-        localStorage.setItem(`${EXT_ID}:camera-defaults`, JSON.stringify(defaults))
+        // Never persist the password in localStorage: only the encrypted
+        // credential store keeps it.
+        const { password: _password, ...safe } = defaults
+        void _password
+        localStorage.setItem(`${EXT_ID}:camera-defaults`, JSON.stringify(safe))
       } else {
         localStorage.removeItem(`${EXT_ID}:camera-defaults`)
       }
@@ -3579,7 +3475,6 @@ function AddCameraModal({
       checked
         ? {
             username: ipUsername,
-            password: ipPassword,
             transport: ipTransport,
             previewWidth: ipPreviewWidth,
             codec: ipCodec,
@@ -3592,8 +3487,13 @@ function AddCameraModal({
   const handleStageIp = () => {
     const rawUrl = ipUrl.trim()
     if (!rawUrl) return
-    const url = buildAuthenticatedUrl(rawUrl, ipUsername, ipPassword)
-    const id = `ip:${url}`
+    // Keep the persisted URL clean (no credentials) and carry the secret
+    // separately — the runtime encrypts it and never stores it in config.
+    const parsed = parseCameraAuth(rawUrl)
+    const cleanUrl = parsed.cleanUrl
+    const username = (ipUsername.trim() || parsed.username || 'admin').trim()
+    const password = ipPassword || parsed.password
+    const id = `ip:${cleanUrl}`
     if (ipCameras.some((c) => c.id === id)) {
       setModalError(t('cameras.addModal.alreadyRegistered'))
       return
@@ -3604,15 +3504,18 @@ function AddCameraModal({
     }
     const stagedDraft: IpCameraDraft = {
       name: ipName.trim() || t('cameras.defaultIpName'),
-      url,
+      url: cleanUrl,
+      // Credentials are only carried when a password exists: a bare username
+      // (default 'admin') must not create a credential entry by itself.
+      ...(password ? { username, password } : {}),
       transport: ipTransport,
       previewWidth: ipPreviewWidth,
       ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
     }
     if (rememberCredentials) {
       persistCameraDefaults({
-        username: ipUsername,
-        password: ipPassword,
+        username,
+        url: cleanUrl,
         transport: ipTransport,
         previewWidth: ipPreviewWidth,
         codec: ipCodec,
@@ -3634,8 +3537,8 @@ function AddCameraModal({
     setClearCacheSuccess(false)
     setModalError(null)
     try {
-      const fullUrl = buildAuthenticatedUrl(ipUrl.trim(), ipUsername, ipPassword)
-      await command('clear_camera_cache', { url: fullUrl || undefined })
+      const cleanUrl = parseCameraAuth(ipUrl.trim()).cleanUrl
+      await command('clear_camera_cache', { url: cleanUrl || undefined })
       setClearCacheSuccess(true)
       setTimeout(() => setClearCacheSuccess(false), 4000)
     } catch (err) {
@@ -3692,8 +3595,11 @@ function AddCameraModal({
     // inclui automaticamente no confirm — evita o 2º clique.
     if (hasUnsavedValidIp) {
       const rawUrl = ipUrl.trim()
-      const url = buildAuthenticatedUrl(rawUrl, ipUsername, ipPassword)
-      const id = `ip:${url}`
+      const parsed = parseCameraAuth(rawUrl)
+      const cleanUrl = parsed.cleanUrl
+      const username = (ipUsername.trim() || parsed.username || 'admin').trim()
+      const password = ipPassword || parsed.password
+      const id = `ip:${cleanUrl}`
       if (ipCameras.some((c) => c.id === id)) {
         setModalError(t('cameras.addModal.alreadyRegistered'))
         return
@@ -3704,7 +3610,8 @@ function AddCameraModal({
       }
       const draftItem: IpCameraDraft = {
         name: ipName.trim() || t('cameras.defaultIpName'),
-        url,
+        url: cleanUrl,
+        ...(password ? { username, password } : {}),
         transport: ipTransport,
         previewWidth: ipPreviewWidth,
         ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
@@ -3712,8 +3619,8 @@ function AddCameraModal({
       const nextIps = [...pendingIpDrafts, draftItem]
       if (rememberCredentials) {
         persistCameraDefaults({
-          username: ipUsername,
-          password: ipPassword,
+          username,
+          url: cleanUrl,
           transport: ipTransport,
           previewWidth: ipPreviewWidth,
           codec: ipCodec,
@@ -4383,7 +4290,6 @@ function ExpandedCameraModal({
   onClose,
   onSnapshot,
   onDetections,
-  mode = 'balanced',
   zone,
   showBoxes = true,
   onToggleShowBoxes,
@@ -4411,7 +4317,6 @@ function ExpandedCameraModal({
   onClose: () => void
   onSnapshot: (cameraId: string) => Promise<void> | void
   onDetections?: (cameraId: string, boxes: Detection[]) => void
-  mode?: 'fluid' | 'balanced' | 'economy'
   zone?: Point[] | null
   showBoxes?: boolean
   onToggleShowBoxes?: () => void
@@ -5405,14 +5310,12 @@ function ExpandedCameraModal({
 function ExpandedPrintModal({
   snap,
   onClose,
-  onDescribe,
   onDelete,
   onContextMenu,
   busy
 }: {
   snap: Snapshot | null
   onClose: () => void
-  onDescribe: (snapId: string) => Promise<void>
   onDelete: (snapId: string) => Promise<void>
   onContextMenu?: (e: React.MouseEvent, snap: Snapshot) => void
   busy: boolean
@@ -5456,13 +5359,6 @@ function ExpandedPrintModal({
         <div className="px-4 py-3 bg-zinc-900 border-t border-white/10 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <p className="text-xs text-gray-300 max-w-xl">{snap.description || t('gallery.noDescription')}</p>
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              disabled={busy}
-              onClick={() => void onDescribe(snap.id)}
-              className="text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-3 py-1.5 transition-colors shrink-0"
-            >
-              {t('gallery.describeAgain')}
-            </button>
             <button
               disabled={busy}
               onClick={() => void onDelete(snap.id)}
@@ -5556,275 +5452,12 @@ function ExpandedAlertModal({
   )
 }
 
-const TRIGGER_TYPES = [
-  { value: 'motion', labelKey: 'monitoring.typeMotion' },
-  { value: 'object', labelKey: 'monitoring.typeObject' },
-  { value: 'person', labelKey: 'monitoring.typePeople' },
-  { value: 'animal', labelKey: 'monitoring.typeAnimals' },
-  { value: 'presence', labelKey: 'monitoring.typePresence' },
-  { value: 'absence', labelKey: 'monitoring.typeAbsence' }
-]
-
-const SENSITIVITY_OPTIONS = [
-  { value: 'med', labelKey: 'monitoring.sensMed' },
-  { value: 'low', labelKey: 'monitoring.sensLow' },
-  { value: 'high', labelKey: 'monitoring.sensHigh' }
-]
-
-const ANIMAL_KEYS = ['dog', 'cat', 'bird', 'horse', 'sheep', 'cow', 'bear', 'elephant', 'zebra', 'giraffe']
-
-function objectOptionLabel(key: string, translate?: TranslateFn): string {
-  const base = translate ? localizedClassLabel(key, translate) : ptLabel(key)
-  const label = base || key
-  return `${label.charAt(0).toUpperCase() + label.slice(1)} (${key})`
-}
-
-function animalObjectOptions(translate?: TranslateFn): Array<{ value: string; label: string }> {
-  return ANIMAL_KEYS.map((key) => ({ value: key, label: objectOptionLabel(key, translate) }))
-}
-
-function inanimateObjectOptions(translate?: TranslateFn): Array<{ value: string; label: string }> {
-  return Object.entries(PT_CLASS)
-    .filter(([key]) => key !== 'person' && !ANIMAL_KEYS.includes(key))
-    .map(([key]) => ({ value: key, label: objectOptionLabel(key, translate) }))
-}
-
-function allObjectOptions(translate?: TranslateFn): Array<{ value: string; label: string }> {
-  return Object.entries(PT_CLASS).map(([key]) => ({ value: key, label: objectOptionLabel(key, translate) }))
-}
-
-const COOLDOWN_PRESETS = [
-  { label: '30s', seconds: 30 },
-  { label: '1m', seconds: 60 },
-  { label: '5m', seconds: 300 },
-  { label: '15m', seconds: 900 }
-]
-
-function formatCooldown(sec?: number): string {
-  if (!sec || isNaN(sec) || sec <= 0) return '5 min'
-  if (sec % 60 === 0) {
-    return `${sec / 60} min`
-  }
-  if (sec >= 60) {
-    const m = Math.floor(sec / 60)
-    const s = sec % 60
-    return s > 0 ? `${m}m ${s}s` : `${m} min`
-  }
-  return `${sec}s`
-}
-
-function formatTriggerPortuguese(trigger: MonitorTriggerInfo, translate?: TranslateFn): string {
-  const pick = (key: string, fallback: string, vars?: Record<string, string | number>): string => {
-    if (!translate) return fallback
-    const translated = vars ? translate(key, vars) : translate(key)
-    return translated && translated !== key ? translated : fallback
-  }
-  const classLabel = (name?: string, fallback = ''): string =>
-    translate ? localizedClassLabel(name, translate) || fallback : ptLabel(name) || fallback
-  switch (trigger.type) {
-    case 'motion':
-      return `${pick('monitoring.sumMotion', 'Movimento')} (${trigger.sensitivity === 'high' ? pick('monitoring.sumHigh', 'Alta sensibilidade') : trigger.sensitivity === 'low' ? pick('monitoring.sumLow', 'Baixa sensibilidade') : pick('monitoring.sumMed', 'Sensibilidade média')})`
-    case 'object':
-      if (trigger.className === 'person') {
-        return `${pick('monitoring.sumPeople', 'Pessoas')} (${trigger.present === false ? pick('monitoring.sumAbsent', 'Ausente') : pick('monitoring.sumDetectPresence', 'Detectar presença')})`
-      }
-      if (ANIMAL_KEYS.includes(trigger.className || '')) {
-        return `${pick('monitoring.sumAnimal', 'Animal')}: ${classLabel(trigger.className)} (${trigger.present === false ? pick('monitoring.sumAbsent', 'Ausente') : pick('monitoring.sumPresent', 'Presente')})`
-      }
-      return `${pick('monitoring.sumObject', 'Objeto')}: ${classLabel(trigger.className, 'objeto')} (${trigger.present === false ? pick('monitoring.sumAbsent', 'Ausente') : pick('monitoring.sumPresent', 'Presente')})`
-    case 'presence':
-      return `${pick('monitoring.sumPresence', 'Presença')}: ${classLabel(trigger.className, 'pessoa')} (${trigger.event === 'entered' ? pick('monitoring.sumEntered', 'Entrou') : trigger.event === 'left' ? pick('monitoring.sumLeft', 'Saiu') : pick('monitoring.sumStayed', 'Permaneceu')}${trigger.windowSec ? `, ${trigger.windowSec}s` : ''})`
-    case 'absence':
-      return `${pick('monitoring.sumAbsence', 'Ausência')}: ${classLabel(trigger.className, 'pessoa')}${trigger.windowSec ? ` (${trigger.windowSec}s)` : ''}`
-    case 'scene':
-      return pick('monitoring.sumAiQuestion', `Pergunta IA: "${trigger.question}"`, { question: trigger.question || '' })
-    case 'periodic':
-      return pick('monitoring.sumEvery', `Resumo a cada ${trigger.everySec || 300}s`, { sec: trigger.everySec || 300 })
-    default:
-      if (
-        !trigger.type ||
-        trigger.type === 'momai-vision.vision_alert' ||
-        trigger.type === 'vision_alert' ||
-        trigger.type === 'vision:detection'
-      ) {
-        return ''
-      }
-      return trigger.type
-  }
-}
-
 interface AddEditMonitorModalProps {
   isOpen: boolean
   onClose: () => void
   cameras: CameraInfo[]
   initialMonitor?: MonitorInfo | null
   onSave: (updated?: Partial<MonitorInfo>) => Promise<void> | void
-}
-
-function eventPlaceholders(translate?: TranslateFn): Array<{ token: string; label: string }> {
-  const pick = (key: string, fallback: string): string => {
-    if (!translate) return fallback
-    const translated = translate(key)
-    return translated && translated !== key ? translated : fallback
-  }
-  return [
-    { token: '{cameraName}', label: pick('monitoring.phCamera', 'Câmera') },
-    { token: '{description}', label: pick('monitoring.phDescription', 'Descrição') },
-    { token: '{ts}', label: pick('monitoring.phTime', 'Horário') },
-    { token: '{event.imageDataUri}', label: pick('monitoring.phImage', 'Imagem') }
-  ]
-}
-
-/**
- * Switches an action image template between the clean snapshot and the
- * annotated variant with detection boxes burned in. Preserves the brace
- * style the action already uses ({event.*} or {{trigger.payload.*}}), so
- * the toggle works for both legacy monitors and Hub automations. Missing
- * images fall back to the clean default (no change needed for opt-out).
- */
-export function withBoxesImageTemplate(image: unknown, enable: boolean): unknown {
-  if (enable) {
-    if (typeof image === 'string' && image.includes('imageDataUri')) {
-      if (image.includes('annotatedImageDataUri')) return image
-      return image.split('imageDataUri').join('annotatedImageDataUri')
-    }
-    return '{event.annotatedImageDataUri}'
-  }
-  if (typeof image === 'string' && image.includes('annotatedImageDataUri')) {
-    return image.split('annotatedImageDataUri').join('imageDataUri')
-  }
-  return image
-}
-
-function isOverlayAction(item: { target?: string; tool?: string; action?: string; action_id?: string }): boolean {
-  const tool = String(item.tool || '')
-  const actionId = String((item as { action?: unknown }).action || (item as { action_id?: unknown }).action_id || '')
-  return tool === 'show_overlay' || actionId.includes('show_overlay')
-}
-
-// Human-readable fallback labels (pt-BR) for tool and field names shown in
-// the action selector. The locale dictionary takes precedence when a
-// translate function is provided; the technical name stays as last resort.
-const TOOL_LABEL_KEYS: Record<string, string> = {
-  send_message: 'monitoring.tools.sendMessage',
-  list_contacts: 'monitoring.tools.listContacts',
-  add_contact: 'monitoring.tools.addContact',
-  remove_contact: 'monitoring.tools.removeContact',
-  get_stats: 'monitoring.tools.getStats',
-  get_history: 'monitoring.tools.getHistory',
-  get_wa_contacts: 'monitoring.tools.getWaContacts',
-  get_wa_groups: 'monitoring.tools.getWaGroups',
-  control_device: 'monitoring.tools.controlDevice',
-  set_light_color: 'monitoring.tools.setLightColor',
-  control_tv_remote: 'monitoring.tools.controlTv',
-  control_climate: 'monitoring.tools.controlClimate',
-  call_ha_service: 'monitoring.tools.callHa',
-  list_devices: 'monitoring.tools.listDevices',
-  query_device: 'monitoring.tools.queryDevice',
-  capture_snapshot: 'monitoring.tools.captureSnapshot',
-  start_monitoring: 'monitoring.tools.startMonitoring',
-  set_actions: 'monitoring.tools.setActions',
-  get_actions: 'monitoring.tools.getActions'
-}
-
-const TOOL_LABEL_FALLBACK: Record<string, string> = {
-  send_message: 'Enviar mensagem',
-  list_contacts: 'Listar contatos',
-  add_contact: 'Adicionar contato',
-  remove_contact: 'Remover contato',
-  get_stats: 'Estatísticas',
-  get_history: 'Histórico',
-  get_wa_contacts: 'Buscar contatos',
-  get_wa_groups: 'Buscar grupos',
-  control_device: 'Controlar dispositivo',
-  set_light_color: 'Cor da luz',
-  control_tv_remote: 'Controle da TV',
-  control_climate: 'Controlar clima',
-  call_ha_service: 'Serviço da casa',
-  list_devices: 'Listar dispositivos',
-  query_device: 'Consultar dispositivo',
-  capture_snapshot: 'Capturar print',
-  start_monitoring: 'Iniciar monitoramento',
-  set_actions: 'Configurar ações',
-  get_actions: 'Ver ações'
-}
-
-const PARAM_LABEL_KEYS: Record<string, string> = {
-  contact: 'monitoring.params.contact',
-  message: 'monitoring.params.message',
-  image: 'monitoring.params.image',
-  media: 'monitoring.params.media',
-  device_name: 'monitoring.params.deviceName',
-  action: 'monitoring.params.action',
-  brightness: 'monitoring.params.brightness',
-  color: 'monitoring.params.color',
-  temperature: 'monitoring.params.temperature',
-  domain: 'monitoring.params.domain',
-  service: 'monitoring.params.service',
-  data: 'monitoring.params.data',
-  room: 'monitoring.params.room',
-  cameraId: 'monitoring.params.cameraId',
-  camera: 'monitoring.params.camera',
-  monitorId: 'monitoring.params.monitorId',
-  label: 'monitoring.params.label'
-}
-
-const PARAM_LABELS: Record<string, string> = {
-  contact: 'Contato ou número',
-  message: 'Mensagem',
-  image: 'Imagem',
-  media: 'Imagem',
-  device_name: 'Dispositivo',
-  action: 'Ação',
-  brightness: 'Brilho',
-  color: 'Cor',
-  temperature: 'Temperatura',
-  domain: 'Domínio',
-  service: 'Serviço',
-  data: 'Dados',
-  room: 'Cômodo',
-  cameraId: 'Câmera',
-  camera: 'Câmera',
-  monitorId: 'Monitor',
-  label: 'Rótulo'
-}
-
-function humanizeKey(key: string): string {
-  return key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-}
-
-function lookupLabel(
-  keys: Record<string, string>,
-  fallback: Record<string, string>,
-  name: string,
-  translate?: TranslateFn
-): string {
-  const key = keys[name]
-  if (translate && key) {
-    const translated = translate(key)
-    if (translated && translated !== key) return translated
-  }
-  return fallback[name] || humanizeKey(name)
-}
-
-function toolLabel(name: string, translate?: TranslateFn): string {
-  return lookupLabel(TOOL_LABEL_KEYS, TOOL_LABEL_FALLBACK, name, translate)
-}
-
-function paramLabel(key: string, translate?: TranslateFn): string {
-  return lookupLabel(PARAM_LABEL_KEYS, PARAM_LABELS, key, translate)
-}
-
-// Formata os args de uma ação em texto legível, ex.: "Dispositivo: Luz, Cor: verde".
-function formatActionArgs(args?: Record<string, unknown>, translate?: TranslateFn): string {
-  if (!args) return ''
-  return Object.entries(args)
-    .filter(([, v]) => !(typeof v === 'string' && !v.trim()))
-    .map(([k, v]) => {
-      const val = v && typeof v === 'object' ? JSON.stringify(v) : String(v)
-      return `${paramLabel(k, translate)}: ${val}`
-    })
-    .join(' · ')
 }
 
 // Campos que representam "entidades" (contato, dispositivo, câmera…) e
@@ -7854,7 +7487,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
 
   const handleSaveEdit = useCallback(async (
     oldId: string,
-    payload: { name: string; url: string; transport: 'tcp' | 'udp'; previewWidth: number; codec?: RtspCodec }
+    payload: { name: string; url: string; username?: string; password?: string; transport: 'tcp' | 'udp'; previewWidth: number; codec?: RtspCodec }
   ) => {
     const target = cameras.find((c) => c.id === oldId)
     if (!target) throw new Error('Camera not found')
@@ -7896,6 +7529,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       id: nextId,
       name: payload.name.trim() || t('cameras.defaultIpName'),
       url: nextUrl,
+      ...(payload.username ? { username: payload.username } : {}),
+      ...(payload.password ? { password: payload.password } : {}),
       transport: payload.transport,
       previewWidth: resolvePreviewWidth(payload.previewWidth),
       ...(payload.codec && payload.codec !== 'h264' ? { codec: payload.codec } : {})
@@ -7999,7 +7634,7 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
           const existingIpIds = new Set(ipCamerasList.map((c) => c.id))
 
-          const newIpCameras: Array<{ id: string; name: string; url: string; transport: 'tcp' | 'udp'; previewWidth: number; codec?: RtspCodec }> = []
+          const newIpCameras: Array<{ id: string; name: string; url: string; username?: string; password?: string; transport: 'tcp' | 'udp'; previewWidth: number; codec?: RtspCodec }> = []
           for (const draft of ipDrafts) {
             const id = `ip:${draft.url}`
             if (existingIpIds.has(id)) continue
@@ -8008,6 +7643,8 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
               id,
               name: draft.name || t('cameras.defaultIpName'),
               url: draft.url,
+              ...(draft.username ? { username: draft.username } : {}),
+              ...(draft.password ? { password: draft.password } : {}),
               transport: draft.transport,
               previewWidth: resolvePreviewWidth(draft.previewWidth),
               ...(draft.codec && draft.codec !== 'h264' ? { codec: draft.codec } : {})
@@ -8040,25 +7677,6 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       })()
     },
     [config.selectedCameras, refresh]
-  )
-
-  const describePrint = useCallback(
-    async (snapshotId: string) => {
-      setBusy(true)
-      try {
-        const res = await command<{ description: string }>('describe_snapshot', { snapshotId })
-        await refreshGallery()
-        if (expandedPrint && expandedPrint.id === snapshotId) {
-          setExpandedPrint((prev) => (prev ? { ...prev, description: res.description } : null))
-        }
-        setError(res.description ? null : t('page.descriptionOffline'))
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err))
-      } finally {
-        setBusy(false)
-      }
-    },
-    [expandedPrint, refreshGallery]
   )
 
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
@@ -8893,7 +8511,6 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
           setEditingZoneCameraId(null)
         }}
         onSnapshot={takeSnapshot}
-        mode={config.trackingMode || 'balanced'}
         zone={expandedCamera ? config.detectionZones?.[expandedCamera.id] : null}
         showBoxes={expandedCamera ? config.showBoxes?.[expandedCamera.id] !== false : true}
         onToggleShowBoxes={expandedCamera ? () => void handleToggleShowBoxes(expandedCamera.id) : undefined}
@@ -8928,7 +8545,6 @@ export default function VisionPage({ isActive = true }: { isActive?: boolean }):
       <ExpandedPrintModal
         snap={expandedPrint}
         onClose={() => setExpandedPrint(null)}
-        onDescribe={describePrint}
         onDelete={handleDeletePrint}
         onContextMenu={handleSnapshotContextMenu}
         busy={busy}

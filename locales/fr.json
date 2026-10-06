@@ -521,7 +521,7 @@
   },
   "settings": {
     "title": "Paramètres Vision",
-    "subtitle": "Ajustez vos préférences de caméra, la conservation des photos et les modes de suivi locaux.",
+    "subtitle": "Ajustez vos préférences de caméra et la conservation des photos.",
     "retention": "Conservation des photos",
     "retentionDesc": "Définissez la limite de stockage local pour la galerie de photos et l'historique.",
     "daysLabel": "Jours de stockage (défaut : 7)",

@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import {
   createMonitorState,
   evaluateMonitor,
-  applySceneAnswer,
   inSchedule,
   normalizeClassName,
   automationTimingToMonitor,
@@ -40,7 +39,6 @@ function ctx(overrides: Partial<Parameters<typeof evaluateMonitor>[2]> = {}) {
     motionDetected: false,
     detections: [],
     now: NOW,
-    frameJpeg: 'fake',
     ...overrides
   }
 }
@@ -180,74 +178,6 @@ describe('evaluateMonitor — presence', () => {
     const after = evaluateMonitor(config, state, ctx({ detections: [person], now: NOW + 121_000 }))
     expect(after.alerts).toHaveLength(1)
     expect(after.alerts[0].description).toContain('parado')
-  })
-})
-
-describe('evaluateMonitor — scene', () => {
-  it('marks the trigger as due on cadence', () => {
-    const config = monitor([{ type: 'scene', question: 'tem um gato?', everySec: 30 }])
-    const state = createMonitorState()
-    const { sceneDue } = evaluateMonitor(config, state, ctx({}))
-    expect(sceneDue).toHaveLength(1)
-    expect(sceneDue[0].question).toBe('tem um gato?')
-  })
-
-  it('does not fire before everySec elapses', () => {
-    const config = monitor([{ type: 'scene', question: 'x?', everySec: 300 }])
-    const state = createMonitorState()
-    evaluateMonitor(config, state, ctx({ now: NOW }))
-    const again = evaluateMonitor(config, state, ctx({ now: NOW + 60_000 }))
-    expect(again.sceneDue).toHaveLength(0)
-  })
-})
-
-describe('applySceneAnswer', () => {
-  it('fires after confirmN consecutive yes answers', () => {
-    const config = monitor([{ type: 'scene', question: 'porta aberta?', onAnswer: 'yes', confirmN: 2 }])
-    const state = createMonitorState()
-    const first = applySceneAnswer(config, state, 0, 'yes', NOW)
-    expect(first).toBeNull()
-    const second = applySceneAnswer(config, state, 0, 'yes', NOW + 30_000)
-    expect(second).not.toBeNull()
-    expect(second!.triggeredBy).toBe('scene:0')
-  })
-
-  it('resets the counter on a non-matching answer', () => {
-    const config = monitor([{ type: 'scene', question: 'x?', onAnswer: 'yes', confirmN: 2 }])
-    const state = createMonitorState()
-    applySceneAnswer(config, state, 0, 'yes', NOW)
-    applySceneAnswer(config, state, 0, 'no', NOW + 30_000)
-    const third = applySceneAnswer(config, state, 0, 'yes', NOW + 60_000)
-    expect(third).toBeNull()
-  })
-
-  it('fires on change when onAnswer is change', () => {
-    const config = monitor([{ type: 'scene', question: 'luz acesa?', onAnswer: 'change', confirmN: 1 }])
-    const state = createMonitorState()
-    applySceneAnswer(config, state, 0, 'yes', NOW)
-    const changed = applySceneAnswer(config, state, 0, 'no', NOW + 30_000)
-    expect(changed).not.toBeNull()
-  })
-
-  it('respects cooldown for repeated scene alerts', () => {
-    const config = monitor([{ type: 'scene', question: 'x?', onAnswer: 'yes', confirmN: 1 }], { cooldownSec: 120 })
-    const state = createMonitorState()
-    applySceneAnswer(config, state, 0, 'yes', NOW)
-    const within = applySceneAnswer(config, state, 0, 'yes', NOW + 60_000)
-    expect(within).toBeNull()
-    const after = applySceneAnswer(config, state, 0, 'yes', NOW + 121_000)
-    expect(after).not.toBeNull()
-  })
-})
-
-describe('evaluateMonitor — periodic', () => {
-  it('is due on its cadence', () => {
-    const config = monitor([{ type: 'periodic', everySec: 60, task: 'descreva' }])
-    const state = createMonitorState()
-    const { sceneDue } = evaluateMonitor(config, state, ctx({ now: NOW }))
-    expect(sceneDue).toHaveLength(1)
-    const again = evaluateMonitor(config, state, ctx({ now: NOW + 30_000 }))
-    expect(again.sceneDue).toHaveLength(0)
   })
 })
 

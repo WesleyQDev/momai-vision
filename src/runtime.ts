@@ -45,7 +45,6 @@ import {
 import {
   createMonitorState,
   evaluateMonitor,
-  applySceneAnswer,
   inSchedule,
   normalizeClassName,
   automationTimingToMonitor,
@@ -53,11 +52,21 @@ import {
   type MonitorState,
   type MonitorAction,
   type Trigger,
-  type Detection,
-  type SceneAnswer
+  type Detection
 } from './vision/triggers'
 import { markRtspClearCooldown, rtspCooldownRemaining } from './vision/rtsp-cooldown'
-import { redactCameraUrl } from './vision/rtsp-auth'
+import { redactCameraUrl, buildAuthenticatedUrl, parseCameraAuth } from './vision/rtsp-auth'
+import {
+  CREDENTIALS_KEY,
+  credentialKey,
+  getCredential,
+  hasCredential,
+  loadCredentialMap,
+  putCredential,
+  removeCredential,
+  saveCredentialMap,
+  type CredentialMap
+} from './credentials'
 import {
   FROZEN_HARD_COOLDOWN_MS,
   extractRtspHost,
@@ -104,6 +113,11 @@ interface MomaiBridge {
   }
   loadAsset: (relativePath: string) => Promise<{ bytes: Uint8Array; text: string }>
   saveFile: (relativePath: string, content: Uint8Array | { bytes: Uint8Array } | string) => Promise<{ ok: boolean; path: string }>
+  /** OS vault (Electron safeStorage) forwarded by the host; absent in standalone servers. */
+  secureStorage?: {
+    encrypt: (plain: string) => Promise<string | null>
+    decrypt: (encryptedBase64: string) => Promise<string | null>
+  }
 }
 
 let bridge: MomaiBridge | null = null
@@ -165,6 +179,9 @@ interface CameraEntry {
   source: 'webcam' | 'ip'
   deviceId?: string
   url?: string
+  /** Decrypted credentials kept in memory only (never persisted). */
+  username?: string
+  password?: string
   /** User-chosen RTSP transport. Retries never switch transports. */
   transport?: RtspTransport
   /** MJPEG preview width in px (curated set; 640 default). */
@@ -183,10 +200,10 @@ let webcamCache: CameraEntry[] = []
 interface StoredConfig {
   retentionDays?: number
   maxSnapshots?: number
-  trackingMode?: 'fluid' | 'balanced' | 'economy'
   ipCameras?: Array<{
     id: string
     name: string
+    /** Clean URL only: credentials live encrypted in the credential store. */
     url: string
     transport?: RtspTransport
     previewWidth?: number
@@ -250,17 +267,129 @@ async function updateConfig(mutator: (config: StoredConfig) => void): Promise<St
   })
 }
 
+// ---------------------------------------------------------------------------
+// Camera credentials (OS vault / encrypted at rest)
+// ---------------------------------------------------------------------------
+
+let credentialMap: CredentialMap | null = null
+let credentialsMigrated = false
+
+async function credentialStore(): Promise<CredentialMap> {
+  if (!credentialMap) {
+    credentialMap = bridge ? await loadCredentialMap(bridge.storage) : {}
+  }
+  return credentialMap
+}
+
+/**
+ * One-time migration of legacy configs that embedded `user:pass@` in the
+ * camera URL. Moves the secret into the encrypted store, rewrites the config
+ * to the clean URL and remaps every reference (selection, pause, zones and
+ * persisted monitors) so nothing loses its camera.
+ */
+async function migrateCameraCredentials(): Promise<void> {
+  if (credentialsMigrated || !bridge) return
+  credentialsMigrated = true
+  try {
+    const config = await loadConfig()
+    const cameras = Array.isArray(config.ipCameras) ? config.ipCameras : []
+    const remap = new Map<string, string>()
+    const map = await credentialStore()
+    let changed = false
+    for (const cam of cameras) {
+      if (!cam || typeof cam.url !== 'string') continue
+      const parsed = parseCameraAuth(cam.url)
+      if (!parsed.username && !parsed.password) continue
+      const cleanUrl = parsed.cleanUrl
+      remap.set(`ip:${cam.url}`, `ip:${cleanUrl}`)
+      if (parsed.password) {
+        await putCredential(
+          bridge.storage,
+          bridge.secureStorage,
+          map,
+          cleanUrl,
+          parsed.username,
+          parsed.password
+        )
+      }
+      cam.url = cleanUrl
+      // The stored id mirrors the URL and must not keep the legacy secret.
+      if (typeof cam.id === 'string' && cam.id.startsWith('ip:')) {
+        cam.id = `ip:${cleanUrl}`
+      }
+      changed = true
+    }
+    if (!changed) return
+    const remapId = (id: string): string => remap.get(id) ?? id
+    const remapList = (list?: string[]): string[] | undefined =>
+      Array.isArray(list) ? list.map(remapId) : list
+    const remapRecord = <T>(record?: Record<string, T>): Record<string, T> | undefined => {
+      if (!record) return record
+      const next: Record<string, T> = {}
+      for (const [key, value] of Object.entries(record)) next[remapId(key)] = value
+      return next
+    }
+    await updateConfig((cfg) => {
+      cfg.ipCameras = cameras
+      cfg.selectedCameras = remapList(cfg.selectedCameras)
+      cfg.pausedCameras = remapList(cfg.pausedCameras)
+      cfg.detectionZones = remapRecord(cfg.detectionZones)
+      cfg.showBoxes = remapRecord(cfg.showBoxes)
+      cfg.showZones = remapRecord(cfg.showZones)
+    })
+    try {
+      const stored = (await bridge.storage.get('monitors')) as Array<{ cameraId?: string }> | null
+      if (Array.isArray(stored)) {
+        let monitorsChanged = false
+        for (const monitor of stored) {
+          if (monitor && typeof monitor.cameraId === 'string' && remap.has(monitor.cameraId)) {
+            monitor.cameraId = remapId(monitor.cameraId)
+            monitorsChanged = true
+          }
+        }
+        if (monitorsChanged) await bridge.storage.set('monitors', stored)
+      }
+    } catch {}
+    bridge.log(`[vision] migrated ${remap.size} camera credential(s) out of plain URLs`)
+  } catch (err) {
+    credentialsMigrated = false
+    bridge.log(
+      `[vision] camera credential migration failed: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+/** Resolves stored credentials and builds the authenticated URL used in memory. */
+async function authenticateCameraUrl(
+  cleanUrl: string
+): Promise<{ url: string; username?: string; password?: string }> {
+  if (!bridge) return { url: cleanUrl }
+  const map = await credentialStore()
+  const credential = await getCredential(bridge.storage, bridge.secureStorage, map, cleanUrl)
+  if (!credential) return { url: cleanUrl }
+  return {
+    url: buildAuthenticatedUrl(cleanUrl, credential.username, credential.password),
+    username: credential.username,
+    password: credential.password
+  }
+}
+
 async function syncIpCameras(): Promise<void> {
+  await migrateCameraCredentials()
   const config = await loadConfig()
   ipCameras.length = 0
   for (const cam of config.ipCameras || []) {
     if (cam && cam.url && typeof cam.url === 'string') {
+      const cleanUrl = credentialKey(cam.url)
+      const auth = await authenticateCameraUrl(cleanUrl)
       const transport = cam.transport === 'tcp' || cam.transport === 'udp' ? cam.transport : undefined
       ipCameras.push({
-        id: `ip:${cam.url}`,
+        id: `ip:${cleanUrl}`,
         name: cam.name || 'Câmera IP',
         source: 'ip',
-        url: cam.url,
+        url: auth.url,
+        username: auth.username,
+        password: auth.password,
         transport,
         previewWidth: resolvePreviewWidth(cam.previewWidth),
         codec: resolveRtspCodec(cam.codec),
@@ -1609,30 +1738,6 @@ export { stopEngine }
 export { resizeJpegBase64 }
 
 // ---------------------------------------------------------------------------
-// Vision (local LLM)
-// ---------------------------------------------------------------------------
-
-async function describeImage(jpegBase64: string, prompt: string): Promise<string> {
-  // Timeout firme: o LLM de visão pode travar (modelo local lento, host sem
-  // resposta); sem isto describe_snapshot e runSceneCheck ficavam pendurados
-  // para sempre. 30s cobre um modelo local razoável; scene/periodic re-tentam
-  // no próximo ciclo.
-  const res = await withTimeout(
-    hostFetch('/extensions/llm/vision', {
-      method: 'POST',
-      body: JSON.stringify({ image_base64: jpegBase64, prompt, max_tokens: 256 })
-    }),
-    30000,
-    'llm vision'
-  )
-  const data = (await res.json().catch(() => ({}))) as { text?: string; visionAvailable?: boolean; error?: string }
-  if (!res.ok || data.visionAvailable === false) {
-    throw new Error(data.error === 'vision_unavailable' ? 'vision_unavailable' : 'vision_failed')
-  }
-  return (data.text || '').trim()
-}
-
-// ---------------------------------------------------------------------------
 // Snapshots
 // ---------------------------------------------------------------------------
 
@@ -1689,17 +1794,9 @@ async function deleteSnapshotFiles(ids: string[]): Promise<void> {
   } catch {}
 }
 
-async function readSnapshotBase64(snapshotId: string): Promise<string | null> {
-  try {
-    const asset = await bridge!.loadAsset(`snapshots/${snapshotId}.jpg`)
-    return Buffer.from(asset.bytes).toString('base64')
-  } catch {
-    return null
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Embed de imagens em payloads (SSE / structuredResponse / overlay)
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // O frame full-res (1080p/4K) vira ~1-3MB em base64 — embutir isso em cada
 // structuredResponse/overlay incha o IPC e, no histórico de alertas, estourava
@@ -1915,11 +2012,7 @@ function needsDetection(config: MonitorConfig): boolean {
 }
 
 function needsMotion(config: MonitorConfig): boolean {
-  return config.triggers.some((t) => t.type === 'motion' || t.type === 'scene')
-}
-
-function needsVision(config: MonitorConfig): boolean {
-  return config.triggers.some((t) => t.type === 'scene' || t.type === 'periodic')
+  return config.triggers.some((t) => t.type === 'motion')
 }
 
 // ---------------------------------------------------------------------------
@@ -2319,9 +2412,8 @@ async function tickCamera(cameraId: string): Promise<void> {
   metricFor(cameraId).framesIn++
   const anyMotion = active.some((m) => needsMotion(m.config))
   const anyDetect = active.some((m) => needsDetection(m.config))
-  const anyVision = active.some((m) => needsVision(m.config))
 
-  // Cheap gate first: motion only matters for monitors with motion/scene triggers.
+  // Cheap gate first: motion only matters for monitors with motion triggers.
   let motionDetected = false
   if (anyMotion) {
     const gate = motionGates.get(cameraId) || new MotionGate()
@@ -2369,59 +2461,15 @@ async function tickCamera(cameraId: string): Promise<void> {
 
   for (const activeMonitor of active) {
     const { config, state } = activeMonitor
-    const { alerts, sceneDue } = evaluateMonitor(config, state, {
+    const { alerts } = evaluateMonitor(config, state, {
       motionDetected,
       detections,
-      now,
-      frameJpeg: frame.jpegBase64
+      now
     })
 
     for (const alert of alerts) {
       await fireAlert(config, alert, frame.jpegBase64)
     }
-
-    for (const due of sceneDue) {
-      void runSceneCheck(config, state, due.triggerIndex, frame.jpegBase64).then((alert) => {
-        if (alert) void fireAlert(config, alert, frame.jpegBase64)
-      })
-    }
-  }
-}
-
-async function runSceneCheck(
-  config: MonitorConfig,
-  state: MonitorState,
-  triggerIndex: number,
-  jpegBase64: string
-): Promise<import('./vision/triggers').AlertInfo | null> {
-  const trigger = config.triggers[triggerIndex]
-  if (!trigger || (trigger.type !== 'scene' && trigger.type !== 'periodic')) return null
-  try {
-    const prompt =
-      trigger.type === 'scene'
-        ? `Responda apenas SIM ou NAO. Pergunta sobre a imagem: ${trigger.question}`
-        : trigger.task || 'Descreva brevemente o que mudou na cena.'
-    const answer = await describeImage(jpegBase64, prompt)
-    if (trigger.type === 'periodic') {
-      // Periodic is informational: alert with the description.
-      return {
-        monitorId: config.id,
-        monitorLabel: config.label,
-        cameraId: config.cameraId,
-        cameraName: config.cameraName,
-        ts: Date.now(),
-        triggeredBy: `periodic:${triggerIndex}`,
-        description: answer
-      }
-    }
-    const normalized = /^sim\b/i.test(answer.trim()) ? 'yes' : answer.trim().toLowerCase() === 'sim' ? 'yes' : answer.trim().toLowerCase() === 'não' || answer.trim().toLowerCase() === 'nao' ? 'no' : null
-    if (!normalized) return null
-    return applySceneAnswer(config, state, triggerIndex, normalized as 'yes' | 'no', Date.now())
-  } catch (err) {
-    if ((err as Error).message === 'vision_unavailable') {
-      bridge?.log('[vision] scene check skipped: vision unavailable')
-    }
-    return null
   }
 }
 
@@ -2450,7 +2498,6 @@ function describeAlert(alert: import('./vision/triggers').AlertInfo): string {
     if (by.endsWith(':left')) return `${who} saiu`
     if (by.endsWith(':still_present')) return `${who} está parado(a) há um tempo`
   }
-  // scene/periodic already carry a description from their own flow.
   return alert.description || 'Alerta de visão'
 }
 
@@ -3191,27 +3238,6 @@ async function toolCaptureSnapshot(args: { cameraId?: string; camera?: string; n
   }
 }
 
-async function toolDescribeSnapshot(args: { snapshotId: string }): Promise<unknown> {
-  if (!args.snapshotId) return { ok: false, error: 'snapshotId required' }
-  const jpegBase64 = await readSnapshotBase64(args.snapshotId)
-  if (!jpegBase64) return { ok: false, error: `snapshot not found: ${args.snapshotId}` }
-  try {
-    const description = await describeImage(
-      jpegBase64,
-      'Descreva a cena nesta imagem em 1-2 frases, em portugues.'
-    )
-    return { ok: true, snapshotId: args.snapshotId, description }
-  } catch (err) {
-    // Não engolir: falha real retorna ok:false com motivo (a página mostra o
-    // erro no lugar de "descrição vazia").
-    return {
-      ok: false,
-      snapshotId: args.snapshotId,
-      error: (err as Error).message === 'vision_unavailable' ? 'vision_unavailable' : 'vision_failed'
-    }
-  }
-}
-
 interface StartMonitoringArgs {
   cameraId?: string
   triggers: Trigger[]
@@ -3332,7 +3358,7 @@ async function toolStartMonitoring(
       triggers = [{ type: 'presence', event: 'entered' }]
     }
   }
-  const validTypes = ['motion', 'object', 'presence', 'absence', 'scene', 'periodic']
+  const validTypes = ['motion', 'object', 'presence', 'absence']
   for (const trigger of triggers) {
     if (!validTypes.includes(trigger.type)) {
       bridge?.log(
@@ -3540,7 +3566,7 @@ async function toolUpdateMonitoring(args: UpdateMonitoringArgs): Promise<unknown
   }
 
   if (Array.isArray(args.triggers) && args.triggers.length > 0) {
-    const validTypes = ['motion', 'object', 'presence', 'absence', 'scene', 'periodic']
+    const validTypes = ['motion', 'object', 'presence', 'absence']
     for (const trigger of args.triggers) {
       if (!validTypes.includes(trigger.type)) {
         return { ok: false, error: `invalid trigger type: ${(trigger as { type: string }).type}` }
@@ -3811,7 +3837,9 @@ async function fetchHostActiveTriggers(includeDisabled = true): Promise<any[]> {
   // portas fixas 8050/8100/8000/8200 — o fallback agora é 8050 (node-core).
   try {
     const res = await withTimeout(
-      hostFetch(`/automations/active-triggers?provider=vision${includeDisabled ? '&include_disabled=true' : ''}`),
+      hostFetch(
+        `/automations/active-triggers?provider=${encodeURIComponent(SKILL_ID)}${includeDisabled ? '&include_disabled=true' : ''}`
+      ),
       2500,
       'active-triggers'
     )
@@ -4095,9 +4123,9 @@ async function toolClearCameraCache(args: {
   url?: string
   resetAll?: boolean
 }): Promise<unknown> {
-  const targetCamId =
-    args.cameraId ||
-    (args.url ? (args.url.startsWith('ip:') ? args.url : `ip:${args.url}`) : undefined)
+  // Accepts legacy URLs with credentials, but only the clean URL is used.
+  const cleanUrl = args.url ? credentialKey(args.url) : ''
+  const targetCamId = args.cameraId || (cleanUrl ? `ip:${cleanUrl}` : undefined)
   const cleanedIds: string[] = []
 
   // Shared cooldown FIRST: every worker pauses its retry timers before the
@@ -4140,7 +4168,7 @@ async function toolClearCameraCache(args: {
     if (process.platform === 'win32') {
       const { exec } = await import('node:child_process')
       let targetHost = ''
-      const hostSource = args.url || (targetCamId?.startsWith('ip:') ? targetCamId.slice(3) : '')
+      const hostSource = cleanUrl || (targetCamId?.startsWith('ip:') ? targetCamId.slice(3) : '')
       if (hostSource) {
         targetHost = extractRtspHost(hostSource)
       }
@@ -4323,15 +4351,27 @@ async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): 
   return { ok: true, detections: first || [] }
 }
 
+/** UI-only helper: returns the decrypted credential for prefilling the edit modal. */
+async function toolGetCameraCredentials(args: { url?: string }): Promise<unknown> {
+  if (!bridge) return { ok: false, error: 'not ready' }
+  const map = await credentialStore()
+  const key = args.url ? credentialKey(args.url) : Object.keys(map)[0]
+  if (!key || !hasCredential(map, key)) return { ok: false, error: 'no credentials stored' }
+  const credential = await getCredential(bridge.storage, bridge.secureStorage, map, key)
+  if (!credential) return { ok: false, error: 'credentials unavailable' }
+  return { ok: true, url: credentialKey(key), username: credential.username, password: credential.password }
+}
+
 // POST /extensions/momai-vision/configure — settings from the dashboard page.
 async function toolConfigure(args: {
   retentionDays?: number
   maxSnapshots?: number
-  trackingMode?: 'fluid' | 'balanced' | 'economy'
   ipCameras?: Array<{
     id: string
     name: string
     url: string
+    username?: string
+    password?: string
     transport?: RtspTransport
     previewWidth?: number
     codec?: RtspCodec
@@ -4346,11 +4386,18 @@ async function toolConfigure(args: {
   // SSRF: valida cada URL de câmera IP ANTES de persistir (esquema http/https/
   // rtsp, bloqueia loopback/link-local/metadata + resolução de hostname). Uma
   // URL inválida rejeita o configure inteiro — a página mostra o erro no banner.
+  const credentialWrites: Array<{ cleanUrl: string; username: string; password: string }> = []
   if (Array.isArray(args.ipCameras)) {
     for (const cam of args.ipCameras) {
       if (!cam || typeof cam.url !== 'string') {
         return { ok: false, error: 'URL de câmera IP inválida' }
       }
+      // Legacy callers may still send `user:pass@` inside the URL; extract it
+      // here so only the clean URL is validated and persisted.
+      const parsed = parseCameraAuth(cam.url)
+      const cleanUrl = parsed.cleanUrl
+      const username = String(cam.username ?? parsed.username ?? '').trim()
+      const password = String(cam.password ?? parsed.password ?? '')
       // Only tcp/udp are valid RTSP transports; anything else falls back
       // to the automatic TCP-first failover instead of failing the save.
       if (cam.transport !== undefined && cam.transport !== 'tcp' && cam.transport !== 'udp') {
@@ -4363,10 +4410,14 @@ async function toolConfigure(args: {
       if (cam.codec !== undefined) {
         cam.codec = resolveRtspCodec(cam.codec)
       }
-      const validation = await assertCameraUrlSafe(cam.url)
+      const validation = await assertCameraUrlSafe(cleanUrl)
       if (!validation.ok) {
-        return { ok: false, error: `URL de câmera IP bloqueada (${cam.name || cam.url}): ${validation.error}` }
+        return { ok: false, error: `URL de câmera IP bloqueada (${cam.name || cleanUrl}): ${validation.error}` }
       }
+      cam.url = cleanUrl
+      delete cam.username
+      delete cam.password
+      credentialWrites.push({ cleanUrl, username, password })
     }
   }
 
@@ -4378,7 +4429,6 @@ async function toolConfigure(args: {
   const config = await updateConfig((cfg) => {
     if (args.retentionDays !== undefined) cfg.retentionDays = args.retentionDays
     if (args.maxSnapshots !== undefined) cfg.maxSnapshots = args.maxSnapshots
-    if (args.trackingMode !== undefined) cfg.trackingMode = args.trackingMode
     if (args.ipCameras !== undefined) cfg.ipCameras = args.ipCameras
     if (args.selectedCameras !== undefined) cfg.selectedCameras = args.selectedCameras
     if (args.pausedCameras !== undefined) cfg.pausedCameras = args.pausedCameras
@@ -4389,6 +4439,29 @@ async function toolConfigure(args: {
   })
   _configCache = config
   _configCacheAt = Date.now()
+
+  // Credentials are stored encrypted (OS vault when available), never inside
+  // config or persisted URLs. Removed cameras drop their stored credential.
+  if (Array.isArray(args.ipCameras) && bridge) {
+    const map = await credentialStore()
+    for (const write of credentialWrites) {
+      if (write.password) {
+        await putCredential(bridge.storage, bridge.secureStorage, map, write.cleanUrl, write.username, write.password)
+      } else if (write.username) {
+        const entry = map[credentialKey(write.cleanUrl)]
+        if (entry) {
+          entry.username = write.username
+          await saveCredentialMap(bridge.storage, map)
+        }
+      }
+    }
+    const nextKeys = new Set(args.ipCameras.map((cam) => credentialKey(cam.url)))
+    for (const key of Object.keys(map)) {
+      if (!nextKeys.has(key)) {
+        await removeCredential(bridge.storage, map, key)
+      }
+    }
+  }
 
   // Feedback direto do clique "mostrar/esconder boxes" + consequência no YOLO.
   // Sem isto o usuário não via nada até o próximo ciclo do pump/engine.
@@ -4492,10 +4565,6 @@ function describePlan(camera: CameraEntry, triggers: Trigger[]): string {
         return `presença de ${t.className || 'pessoa'} (${t.event}${t.windowSec ? `, ${t.windowSec}s` : ''})`
       case 'absence':
         return `ausência de ${t.className || 'pessoa'} (${t.event})`
-      case 'scene':
-        return `pergunta: "${t.question}"`
-      case 'periodic':
-        return `resumo periódico a cada ${t.everySec}s`
       default:
         return (t as { type: string }).type
     }
@@ -4744,7 +4813,6 @@ const tools: Record<string, (args: any) => Promise<unknown>> = {
   list_cameras: toolListCameras,
   discover_cameras: toolDiscoverCameras,
   capture_snapshot: toolCaptureSnapshot,
-  describe_snapshot: toolDescribeSnapshot,
   delete_snapshot: toolDeleteSnapshot,
   clear_snapshots: toolClearSnapshots,
   start_monitoring: toolStartMonitoring,
@@ -4760,6 +4828,7 @@ const tools: Record<string, (args: any) => Promise<unknown>> = {
   get_frame: toolGetFrame,
   reload_camera: toolReloadCamera,
   clear_camera_cache: toolClearCameraCache,
+  get_camera_credentials: toolGetCameraCredentials,
   frame_pump: toolFramePump,
   configure: toolConfigure,
   warm_webcam: toolWarmWebcam,
@@ -4882,6 +4951,7 @@ const NO_YOLO_WARMUP_TOOLS = new Set([
   'warm_webcam',
   'reload_camera',
   'clear_camera_cache',
+  'get_camera_credentials',
   'discover_cameras'
 ])
 

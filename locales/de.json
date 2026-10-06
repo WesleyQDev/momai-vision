@@ -521,7 +521,7 @@
   },
   "settings": {
     "title": "Vision-Einstellungen",
-    "subtitle": "Passen Sie Ihre Kameraeinstellungen, Foto-Aufbewahrung und lokale Tracking-Modi an.",
+    "subtitle": "Passen Sie Ihre Kameraeinstellungen und die Foto-Aufbewahrung an.",
     "retention": "Foto-Aufbewahrung",
     "retentionDesc": "Legen Sie das lokale Speicherlimit für die Foto-Galerie und den Verlauf fest.",
     "daysLabel": "Speichertage (Standard: 7)",

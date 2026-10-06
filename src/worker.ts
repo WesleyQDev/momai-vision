@@ -37,6 +37,55 @@ const ipcBridge = createIpcVisionStorage({
   storageDir: displayStorageDir
 })
 
+// ---------------------------------------------------------------------------
+// OS vault bridge (Electron safeStorage, forwarded by the host).
+// ---------------------------------------------------------------------------
+type SecureStorageAck = { ok?: boolean; encrypted?: string; plain?: string } | null
+const securePending = new Map<
+  string,
+  { resolve: (value: string | null) => void; timer: ReturnType<typeof setTimeout> }
+>()
+let secureSeq = 0
+
+function secureCall(kind: 'encrypt' | 'decrypt', payload: unknown): Promise<string | null> {
+  return new Promise((resolve) => {
+    const requestId = `vision-secure-${Date.now()}.${secureSeq++}`
+    const timer = setTimeout(() => {
+      securePending.delete(requestId)
+      resolve(null)
+    }, 8000)
+    securePending.set(requestId, { resolve, timer })
+    try {
+      process.send?.({ type: `secure-storage:${kind}`, requestId, payload } as any)
+    } catch {
+      clearTimeout(timer)
+      securePending.delete(requestId)
+      resolve(null)
+    }
+  })
+}
+
+function handleSecureStorageResult(message: {
+  type?: string
+  requestId?: string
+  ack?: SecureStorageAck
+}): boolean {
+  if (
+    message.type !== 'secure-storage:encrypt-result' &&
+    message.type !== 'secure-storage:decrypt-result'
+  ) {
+    return false
+  }
+  if (!message.requestId) return true
+  const entry = securePending.get(message.requestId)
+  if (!entry) return true
+  securePending.delete(message.requestId)
+  clearTimeout(entry.timer)
+  const ack = message.ack
+  entry.resolve(ack && ack.ok ? (ack.encrypted ?? ack.plain ?? null) : null)
+  return true
+}
+
 async function migrateLegacySharedJsonOnce(): Promise<void> {
   try {
     const current = await ipcBridge.storage.get('config')
@@ -90,6 +139,11 @@ const momai = {
   storage,
   collections: ipcBridge.collections,
   sessionFiles: ipcBridge.sessionFiles,
+  secureStorage: {
+    encrypt: (plain: string): Promise<string | null> => secureCall('encrypt', { plain }),
+    decrypt: (encryptedBase64: string): Promise<string | null> =>
+      secureCall('decrypt', { encryptedBase64 })
+  },
   async loadAsset(relativePath: string) {
     const fullPath = resolveInsideExtensionDir(relativePath, 'loadAsset')
     let stat
@@ -147,6 +201,7 @@ process.on('message', async (msg: unknown) => {
     } catch {}
     return
   }
+  if (handleSecureStorageResult(message)) return
   if (message.type === 'execute') {
     const { requestId, payload } = message
     const t0 = Date.now()
