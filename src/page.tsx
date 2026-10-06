@@ -2473,6 +2473,11 @@ export const CameraCard = memo(function CameraCard({
     let parser = parserWorkerRef.current
     if (!parser) {
       parser = createParserWorker({
+        // Keep this URL in page.tsx: in the dev symlink workflow the page is
+        // served as a source module and `./mjpeg-worker.js` must resolve
+        // relative to src/page.tsx (where src/mjpeg-worker.ts lives). Moving
+        // this into another module breaks worker loading in dev.
+        workerUrl: new URL('./mjpeg-worker.js', import.meta.url),
         onBitmap: (bitmap, origW, origH) => {
           if ( parserCallbacksRef.current.onBitmap ) {
             parserCallbacksRef.current.onBitmap(bitmap, origW, origH)

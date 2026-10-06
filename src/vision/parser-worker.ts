@@ -20,6 +20,15 @@ export interface ParserWorker {
 }
 
 export function createParserWorker(opts: {
+  /**
+   * URL of the built/transpiled worker script. Callers should pass
+   * `new URL('./mjpeg-worker.js', import.meta.url)` FROM page.tsx: in the dev
+   * symlink workflow the page is served as a source module, so the worker URL
+   * must resolve relative to `src/page.tsx` (where `src/mjpeg-worker.ts`
+   * lives). Creating it here instead would resolve to `src/vision/` and the
+   * worker would 404, forcing the 8s inline fallback on every card mount.
+   */
+  workerUrl?: URL | string
   onBitmap?: (bitmap: ImageBitmap, origW: number, origH: number) => void
   onFrame?: (frame: Uint8Array) => void
   onError?: () => void
@@ -30,9 +39,10 @@ export function createParserWorker(opts: {
   let worker: Worker
   try {
     // Em prod o worker está em dist/mjpeg-worker.js; em dev (symlink) o
-    // electron.vite.config.ts agora serve o raw de src/mjpeg-worker.ts para
-    // este path, garantindo que o parse e o decode saiam do main thread.
-    worker = new Worker(new URL('./mjpeg-worker.js', import.meta.url), { type: 'module' })
+    // electron.vite.config.ts serve o source para este path, garantindo que o
+    // parse e o decode saiam do main thread.
+    const workerUrl = opts.workerUrl ?? new URL('./mjpeg-worker.js', import.meta.url)
+    worker = new Worker(workerUrl, { type: 'module' })
   } catch {
     return null
   }
