@@ -1596,7 +1596,7 @@ function stopEngine(reason: string = 'idle'): void {
   if (engine) {
     logLifecycle(`[vision] CV engine stopping (YOLO shutdown, reason=${reason})...`)
   }
-  cancelEngineIdleShutdown()
+  clearEngineIdleTimer()
   try {
     engine?.child.send({ type: 'shutdown' })
   } catch {}
@@ -1710,8 +1710,49 @@ async function readSnapshotBase64(snapshotId: string): Promise<string | null> {
 const MAX_EMBED_WIDTH = 640
 const EMBED_JPEG_QUALITY = 85
 
+/**
+ * Reads the image width straight from the JPEG SOF marker, without decoding
+ * pixels. Lets already-small frames skip the expensive decode/resize/encode
+ * round-trip entirely.
+ */
+export function readJpegWidth(jpegBase64: string): number | null {
+  try {
+    const buf = Buffer.from(jpegBase64, 'base64')
+    if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null
+    let offset = 2
+    while (offset + 9 < buf.length) {
+      if (buf[offset] !== 0xff) {
+        offset += 1
+        continue
+      }
+      const marker = buf[offset + 1]
+      const isStartOfFrame =
+        (marker >= 0xc0 && marker <= 0xc3) ||
+        (marker >= 0xc5 && marker <= 0xc7) ||
+        (marker >= 0xc9 && marker <= 0xcb) ||
+        (marker >= 0xcd && marker <= 0xcf)
+      if (isStartOfFrame) {
+        return buf.readUInt16BE(offset + 7)
+      }
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+        offset += 2
+        continue
+      }
+      const segmentLength = buf.readUInt16BE(offset + 2)
+      if (segmentLength < 2) return null
+      offset += 2 + segmentLength
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 function resizeJpegBase64(jpegBase64: string): string | null {
   try {
+    const knownWidth = readJpegWidth(jpegBase64)
+    if (knownWidth !== null && knownWidth <= MAX_EMBED_WIDTH) return jpegBase64
+
     const jpeg = Buffer.from(jpegBase64, 'base64')
     const raw = decode(new Uint8Array(jpeg.buffer, jpeg.byteOffset, jpeg.byteLength), {
       useTArray: true,
@@ -1744,9 +1785,11 @@ function resizeJpegBase64(jpegBase64: string): string | null {
   }
 }
 
-function toEmbeddedDataUri(jpegBase64: string): string {
+function toEmbeddedDataUri(jpegBase64: string): string | null {
   const resized = resizeJpegBase64(jpegBase64)
-  return `data:image/jpeg;base64,${resized || jpegBase64}`
+  // Never embed the full-res frame as a fallback: the panel/page load it on
+  // demand via snapshotId, and a multi-MB data URI would block IPC/event loop.
+  return resized ? `data:image/jpeg;base64,${resized}` : null
 }
 
 function parseHexColor(hex: string): { r: number; g: number; b: number } | null {
@@ -2001,12 +2044,18 @@ export function recordPumpActivity(cameraId: string, now: number = Date.now()): 
   lastPumpSeenAt.set(cameraId, now)
 }
 
-function cancelEngineIdleShutdown(): void {
+/** Clears the pending idle timer without claiming new detection demand. */
+function clearEngineIdleTimer(): void {
   if (engineIdleTimer) {
     clearTimeout(engineIdleTimer)
     engineIdleTimer = undefined
-    logLifecycle('[vision] CV engine idle shutdown aborted (new YOLO demand)')
   }
+}
+
+function cancelEngineIdleShutdown(): void {
+  if (!engineIdleTimer) return
+  clearEngineIdleTimer()
+  logLifecycle('[vision] CV engine idle shutdown aborted (new YOLO demand)')
 }
 
 /** Shut the engine down after a grace period when nothing needs it anymore. */
@@ -2016,7 +2065,7 @@ export function scheduleEngineIdleShutdown(): void {
     return
   }
   if (!engine) {
-    cancelEngineIdleShutdown()
+    clearEngineIdleTimer()
     return
   }
   if (engineIdleTimer) return
@@ -2496,21 +2545,26 @@ async function fireAlert(config: MonitorConfig, alert: import('./vision/triggers
   let annotatedImageDataUri: string | undefined
   try {
     if (Array.isArray(alert.boxes) && alert.boxes.length > 0) {
-      const annotated = annotateJpegWithBoxes(jpegBase64, alert.boxes)
+      // Annotate the already-downscaled frame when possible: box coordinates
+      // are normalized, so this avoids decoding the full-res frame twice
+      // (annotate + resize) on every alert.
+      const annotateSource = resizeJpegBase64(jpegBase64) || jpegBase64
+      const annotated = annotateJpegWithBoxes(annotateSource, alert.boxes)
       if (annotated) {
-        const resized = resizeJpegBase64(annotated)
-        annotatedImageDataUri = `data:image/jpeg;base64,${resized || annotated}`
+        annotatedImageDataUri = `data:image/jpeg;base64,${annotated}`
       }
     }
   } catch {
     annotatedImageDataUri = undefined
   }
 
+  const imageDataUri = toEmbeddedDataUri(jpegBase64)
+
   const data = {
     type: 'vision_alert',
     data: {
       ...alertPayload,
-      imageDataUri: toEmbeddedDataUri(jpegBase64),
+      ...(imageDataUri ? { imageDataUri } : {}),
       ...(annotatedImageDataUri ? { annotatedImageDataUri } : {}),
       tts: description
     }
@@ -3111,6 +3165,7 @@ async function toolCaptureSnapshot(args: { cameraId?: string; camera?: string; n
   if (!frame) return { ok: false, error: 'no frame available' }
   const snapshot = await saveSnapshot(frame.jpegBase64, { cameraId: camera.id })
   const description = ''
+  const imageDataUri = toEmbeddedDataUri(frame.jpegBase64)
   const structuredResponse = {
     type: 'vision_alert',
     data: {
@@ -3121,7 +3176,7 @@ async function toolCaptureSnapshot(args: { cameraId?: string; camera?: string; n
       snapshotId: snapshot.id,
       ts: snapshot.ts,
       description,
-      imageDataUri: toEmbeddedDataUri(frame.jpegBase64)
+      ...(imageDataUri ? { imageDataUri } : {})
     }
   }
   bridge?.sendStructuredResponse(structuredResponse)
@@ -4128,6 +4183,28 @@ const FRAME_PUMP_FIRST_GRACE_MS = 1000
 
 // POST /extensions/momai-vision/frame — the dashboard page pumps webcam & IP camera
 // frames for live bounding boxes.
+/**
+ * Pure gate for a single frame_pump call. A pump only counts as a live
+ * detection consumer when it actually has a frame to infer: frameless pumps
+ * happen at boot while the stream is still starting, and their heartbeat used
+ * to fabricate YOLO demand — the engine warmed up (~0.7s) and idled out 60s
+ * later without running a single detection.
+ */
+export type FramePumpDemand =
+  | { action: 'idle' }
+  | { action: 'no-frame' }
+  | { action: 'active'; jpegBase64: string }
+
+export function resolveFramePumpDemand(input: {
+  jpegBase64?: string
+  boxesRequested: boolean
+  hasDetectionMonitor: boolean
+}): FramePumpDemand {
+  if (!input.boxesRequested && !input.hasDetectionMonitor) return { action: 'idle' }
+  if (!input.jpegBase64) return { action: 'no-frame' }
+  return { action: 'active', jpegBase64: input.jpegBase64 }
+}
+
 async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): Promise<unknown> {
   const cameraId = args.cameraId || 'page'
   if (_configCache?.pausedCameras?.includes(cameraId)) {
@@ -4137,10 +4214,25 @@ async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): 
   // stream without waking the YOLO engine. Boxes imply demand only together
   // with a live consumer, tracked through the pump heartbeat below.
   const boxesRequested = isBoxesVisible(cameraId)
-  if (!boxesRequested && !hasActiveDetectionMonitor(cameraId)) {
+  // Cameras streamed by this worker already hold the newest frame in memory:
+  // the page can request detection without shipping the JPEG back through
+  // renderer → node-core → worker (~150KB base64 per second per visible card).
+  const demand = resolveFramePumpDemand({
+    jpegBase64: args.jpegBase64 || mjpegStreams.get(cameraId)?.latest?.toString('base64'),
+    boxesRequested,
+    hasDetectionMonitor: hasActiveDetectionMonitor(cameraId)
+  })
+  if (demand.action === 'idle') {
     scheduleEngineIdleShutdown()
     return { ok: true, detections: [], idle: true }
   }
+  if (demand.action === 'no-frame') {
+    // A frameless pump is not a live consumer: do not register the heartbeat.
+    // It counts again as soon as a frame exists to infer (next cycle).
+    scheduleEngineIdleShutdown()
+    return { ok: false, error: 'no frame available' }
+  }
+  const jpegBase64 = demand.jpegBase64
   recordPumpActivity(cameraId)
   if (!needsYoloForCamera(cameraId)) {
     scheduleEngineIdleShutdown()
@@ -4148,11 +4240,6 @@ async function toolFramePump(args: { jpegBase64?: string; cameraId?: string }): 
   }
   cancelEngineIdleShutdown()
   void startWarmupIfNeeded()
-  // Cameras streamed by this worker already hold the newest frame in memory:
-  // the page can request detection without shipping the JPEG back through
-  // renderer → node-core → worker (~150KB base64 per second per visible card).
-  const jpegBase64 = args.jpegBase64 || mjpegStreams.get(cameraId)?.latest?.toString('base64')
-  if (!jpegBase64) return { ok: false, error: 'no frame available' }
   const cached = lastPumpBoxes.get(cameraId)
 
   const publish = (result: EngineResult): void => {
