@@ -5,15 +5,15 @@ description: Olhos para a MomAI: snapshots de câmeras, monitoramento e alertas 
 
 # MomAI Vision
 
-A MomAI Vision dá olhos à MomAI: snapshots de câmeras (webcam + IP/MJPEG),
-descrição de cena com o modelo de visão local e monitoramento com alertas —
-funcionando mesmo com a M## Ferramentas
+A MomAI Vision dá olhos à MomAI: snapshots de câmeras (webcam + IP/MJPEG) e
+monitoramento com alertas — funcionando de forma 100% local.
+
+## Ferramentas
 
 | Ferramenta | Uso |
 | --- | --- |
 | `list_cameras` | Lista câmeras (webcam/IP) com status e monitors ativos |
-| `capture_snapshot {cameraId?}` | Captura e descreve a cena ("o que você vê aí?") |
-| `describe_snapshot {snapshotId}` | Re-descreve um snapshot da galeria |
+| `capture_snapshot {cameraId?}` | Captura um print da câmera e mostra no chat |
 | `update_monitoring {monitorId, cameraId?, triggers?, ...}` | Edita as configurações de um monitoramento existente |
 | `pause_monitoring {monitorId?}` | Pausa sem excluir: para a execução e o card some, mas os dados ficam salvos |
 | `resume_monitoring {monitorId?}` | Retoma um monitoramento pausado |
@@ -51,8 +51,6 @@ funcionando mesmo com a M## Ferramentas
 - `motion` — movimento (absdiff); `sensitivity`: low/med/high; `minArea`.
 - `object` — detecção COCO: `className` (person, cat, dog, car…), `minConfidence`, `present`.
 - `presence`/`absence` — `className` (default person), `event`: entered/left/still_present, `windowSec`.
-- `scene` — pergunta SIM/NÃO via visão local: `question`, `everySec` (15-300), `onAnswer`: yes/no/change, `confirmN`.
-- `periodic` — resumo periódico: `everySec`, `task`.
 - `cooldownSec` — intervalo mínimo entre alertas do mesmo monitor (padrão 300 = 5min; aceita desde 10s).
 - `schedule.days`: 0-6 (domingo=0).
 
@@ -82,7 +80,7 @@ Para alterar um monitoramento existente (ex.: "mude o tempo do alerta da garagem
 - **Iluminação/clima**: noite sem IR, chuva, reflexos reduzem a qualidade.
 - **Geometria/escala**: objeto muito pequeno ou distante não é detectado.
 - **Subjetivo**: "está arrumado", "está triste" — não consigo avaliar; refinar para uma pergunta verificável.
-- "Encomenda/pacote", "porta aberta", "luz acesa" **não são classes COCO** — use `scene` com pergunta SIM/NÃO.
+- "Encomenda/pacote", "porta aberta", "luz acesa" **não são classes COCO** — o monitoramento por objeto cobre apenas as classes suportadas; para esses casos, use `presence`/`absence` de pessoa ou movimento conforme o objetivo.
 
 ## Fluxo de monitoramento
 
@@ -95,7 +93,7 @@ Para alterar um monitoramento existente (ex.: "mude o tempo do alerta da garagem
 ## Performance
 
 - Orçamento padrão: 1fps por câmera. Com muitas câmeras ativas, o sistema pode reduzir a taxa.
-- Motion (gate barato) roda primeiro; detecção YOLO e visão só quando necessário.
+- Motion (gate barato) roda primeiro; a detecção YOLO roda só quando necessário.
 - Cooldown/dedupe por monitor evita alertas repetidos.
 
 ## Privacidade
