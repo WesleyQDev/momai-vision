@@ -88,6 +88,9 @@ export interface MomAISDK {
 }
 
 export declare function getSDK(): MomAISDK
+export declare function useExtensionVisibility(explicitIsActive?: boolean, extensionId?: string): boolean
+export declare function useWarmup(fn: () => void | Promise<void>, deps?: unknown[]): void
+export declare function useCachedState<T>(cacheKey: string, fetcher: () => Promise<T>, initialData?: T): { data: T | undefined; isLoading: boolean; error: Error | null; refresh: () => Promise<void> }
 
 declare global {
   interface Window {

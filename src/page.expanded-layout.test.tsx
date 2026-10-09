@@ -87,6 +87,20 @@ describe('VisionPage — expanded camera stays inside content area', () => {
   })
 })
 
+describe('VisionPage — double-click expand', () => {
+  it('opens the expanded view when the camera preview is double-clicked', async () => {
+    setupServer()
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    const preview = await screen.findByTitle(/Dois cliques para ampliar|Double-click to enlarge/i)
+    fireEvent.doubleClick(preview)
+
+    await screen.findByTitle(/Dois cliques para fechar|Double-click to close/i)
+    expect(screen.getByTestId('expanded-camera')).toBeTruthy()
+  })
+})
+
 describe('VisionPage — fundo da câmera ampliada segue o tema', () => {
   it('não pinta preto nas sobras do vídeo quando há uma câmera só', async () => {
     setupServer()

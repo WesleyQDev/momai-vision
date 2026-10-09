@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, memo } from 'react'
 import { createPortal } from 'react-dom'
-import { getSDK } from 'momai:sdk'
+import { getSDK, useExtensionVisibility } from 'momai:sdk'
 import { ptLabel, PT_CLASS, triggerLabel, localizedClassLabel, localizedTriggerLabel } from './vision/labels'
 import {
   TRIGGER_TYPES,
@@ -6550,7 +6550,8 @@ function AddEditMonitorModal({
 // Main Dashboard Page
 // ---------------------------------------------------------------------------
 
-export default function VisionPage({ isActive = true }: { isActive?: boolean }): JSX.Element {
+export default function VisionPage({ isActive: propIsActive = true }: { isActive?: boolean }): JSX.Element {
+  const isActive = useExtensionVisibility(propIsActive, EXT_ID)
   const { t, locale } = useI18n()
   const [cameras, setCameras] = useState<CameraInfo[]>(() => {
     try {

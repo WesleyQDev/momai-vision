@@ -60,3 +60,11 @@ const sdk = createSDK()
 export function getSDK() {
   return sdk
 }
+
+export function useExtensionVisibility(explicitIsActive?: boolean) {
+  return typeof explicitIsActive === 'boolean' ? explicitIsActive : true
+}
+
+export function useWarmup(fn: () => void | Promise<void>) {
+  // no-op in tests
+}

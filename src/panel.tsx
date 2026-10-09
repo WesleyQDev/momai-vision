@@ -293,7 +293,7 @@ export function VisionAlertCard({ data }: { data?: AlertData }): JSX.Element {
 
   return (
     <div
-      className={`w-full ${expanded && isOverlay ? '' : 'max-w-md'} rounded-xl border border-border/40 bg-card/95 text-text shadow-lg overflow-hidden`}
+      className={`w-full ${expanded && isOverlay ? '' : 'max-w-md'} rounded-xl border border-border/40 bg-card/95 text-text overflow-hidden`}
       style={isOverlay ? ({ WebkitAppRegion: 'no-drag' } as any) : undefined}
       onContextMenu={(e) => {
         e.preventDefault()

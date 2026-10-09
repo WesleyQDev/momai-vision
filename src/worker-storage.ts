@@ -89,7 +89,7 @@ export function createIpcVisionStorage({
         timer
       })
       try {
-        send({ type: 'storage-request', requestId, method, args })
+        send({ type: 'storage-request', requestId, method, args, extensionId: 'momai-vision' })
       } catch (err) {
         pending.delete(requestId)
         clearTimeout(timer)
