@@ -92,4 +92,11 @@ export function redactCameraUrl(rawUrl: string): string {
   return rawUrl.replace(/:\/\/[^@]+@/, '://***@')
 }
 
+/** Clean URL used as the credential key (credentials stripped). */
+export function credentialKey(rawUrl: string): string {
+  const clean = parseCameraAuth(String(rawUrl || '')).cleanUrl.trim()
+  return clean || String(rawUrl || '').trim()
+}
+
+
 

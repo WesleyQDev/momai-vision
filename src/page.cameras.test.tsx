@@ -305,6 +305,35 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
     expect(screen.getByText('Esta câmera IP já está na lista de seleção.')).toBeTruthy()
   })
 
+  it('permite recadastrar uma câmera IP após a sua remoção', async () => {
+    const registeredIp = { id: 'ip:http://10.0.0.1:8080/video', name: 'Portão', url: 'http://10.0.0.1:8080/video' }
+    const { state } = setupServer({
+      cameras: [{ id: registeredIp.id, name: 'Portão', source: 'ip', online: true, monitors: 0 }],
+      selectedCameras: [registeredIp.id],
+      ipCameras: [registeredIp]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await screen.findByText('Portão')
+
+    // Remover a câmera IP existente através do botão de remoção no card
+    fireEvent.click(await screen.findByTitle('Remover câmera IP (cadastro e exibição)'))
+    await screen.findByText('Fechar câmera?')
+    fireEvent.click(screen.getByRole('button', { name: 'Sim' }))
+
+    // Aguardar atualização do estado (removida do ipCameras)
+    await waitFor(() => {
+      expect(state.ipCameras).toHaveLength(0)
+    })
+
+    // Abrir modal e tentar recadastrar a mesma URL
+    await openCameraModal()
+    await stageIp('Portão Novo', 'http://10.0.0.1:8080/video')
+
+    expect(screen.queryByText('Esta câmera IP já está cadastrada.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Adicionar 1 câmera' })).toBeTruthy()
+  })
+
   it('preserva câmeras IP já cadastradas ao confirmar novas seleções', async () => {
     const registeredIp = { id: 'ip:http://10.0.0.1:8080/video', name: 'Portão', url: 'http://10.0.0.1:8080/video' }
     const { calls } = setupServer({

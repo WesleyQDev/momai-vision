@@ -36,7 +36,7 @@ import { createParserWorker, type ParserWorker } from './vision/parser-worker'
 import { AlertCanvasOverlay } from './panel'
 import { useI18n } from './hooks/useI18n'
 import { extractJpegFrame, indexOfSeq } from './vision/mjpeg-parse'
-import { buildAuthenticatedUrl, parseCameraAuth } from './vision/rtsp-auth'
+import { buildAuthenticatedUrl, credentialKey, parseCameraAuth } from './vision/rtsp-auth'
 import {
   describeRtspIssue,
   isRtspMidStreamStalled,
@@ -75,6 +75,7 @@ interface CameraInfo {
   monitors: number
   connecting?: boolean
   lastError?: string
+  url?: string
 }
 
 interface AutomationWorkflowSnapshot {
@@ -3499,11 +3500,27 @@ function AddCameraModal({
     const username = (ipUsername.trim() || parsed.username || 'admin').trim()
     const password = ipPassword || parsed.password
     const id = `ip:${cleanUrl}`
-    if (ipCameras.some((c) => c.id === id)) {
+    const cleanKey = credentialKey(cleanUrl)
+    const isAlreadyActive =
+      ipCameras.some((c) => {
+        if (!c || !c.url) return c?.id === id
+        const cClean = parseCameraAuth(c.url).cleanUrl
+        return c.id === id || cClean === cleanUrl || credentialKey(cClean) === cleanKey
+      }) ||
+      selectedCameraIds.some((sId) => {
+        if (sId === id || sId === cleanUrl || sId === `ip:${cleanUrl}`) return true
+        const parsedSId = parseCameraAuth(sId.replace(/^ip:/, '')).cleanUrl
+        return parsedSId === cleanUrl || credentialKey(parsedSId) === cleanKey
+      })
+    if (isAlreadyActive) {
       setModalError(t('cameras.addModal.alreadyRegistered'))
       return
     }
-    if (pendingIpDrafts.some((d) => `ip:${d.url}` === id)) {
+    const isAlreadyStaged = pendingIpDrafts.some((d) => {
+      const itemClean = parseCameraAuth(d.url).cleanUrl
+      return itemClean === cleanUrl || credentialKey(itemClean) === cleanKey
+    })
+    if (isAlreadyStaged) {
       setModalError(t('cameras.addModal.alreadyStaged'))
       return
     }
@@ -3605,11 +3622,27 @@ function AddCameraModal({
       const username = (ipUsername.trim() || parsed.username || 'admin').trim()
       const password = ipPassword || parsed.password
       const id = `ip:${cleanUrl}`
-      if (ipCameras.some((c) => c.id === id)) {
+      const cleanKey = credentialKey(cleanUrl)
+      const isAlreadyActive =
+        ipCameras.some((c) => {
+          if (!c || !c.url) return c?.id === id
+          const cClean = parseCameraAuth(c.url).cleanUrl
+          return c.id === id || cClean === cleanUrl || credentialKey(cClean) === cleanKey
+        }) ||
+        selectedCameraIds.some((sId) => {
+          if (sId === id || sId === cleanUrl || sId === `ip:${cleanUrl}`) return true
+          const parsedSId = parseCameraAuth(sId.replace(/^ip:/, '')).cleanUrl
+          return parsedSId === cleanUrl || credentialKey(parsedSId) === cleanKey
+        })
+      if (isAlreadyActive) {
         setModalError(t('cameras.addModal.alreadyRegistered'))
         return
       }
-      if (pendingIpDrafts.some((d) => `ip:${d.url}` === id)) {
+      const isAlreadyStaged = pendingIpDrafts.some((d) => {
+        const itemClean = parseCameraAuth(d.url).cleanUrl
+        return itemClean === cleanUrl || credentialKey(itemClean) === cleanKey
+      })
+      if (isAlreadyStaged) {
         setModalError(t('cameras.addModal.alreadyStaged'))
         return
       }
@@ -7307,6 +7340,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       lastSelectionChangeAtRef.current = Date.now()
       const currentSelected = config.selectedCameras ?? []
       const isRemoving = currentSelected.includes(cameraId)
+      const isIpCamera = cameraId.startsWith('ip:')
       const nextSelected = isRemoving
         ? currentSelected.filter((id) => id !== cameraId)
         : [...currentSelected, cameraId]
@@ -7323,9 +7357,24 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       if (isRemoving) clearCachedFrame(cameraId)
 
       // Se for remoção de câmera IP, remove também da lista de câmeras da tela imediatamente
-      if (cameraId.startsWith('ip:')) {
-        setCameras((prev) => prev.filter((c) => c.id !== cameraId))
+      if (isIpCamera) {
+        const rawUrl = cameraId.replace(/^ip:/, '')
+        const cleanUrl = parseCameraAuth(rawUrl).cleanUrl
+        const cleanKey = credentialKey(cleanUrl)
+
+        setCameras((prev) =>
+          prev.filter((c) => {
+            if (c.id === cameraId || c.id === cleanUrl || c.id === `ip:${cleanUrl}`) return false
+            if (c.url) {
+              const itemClean = parseCameraAuth(c.url).cleanUrl
+              if (itemClean === cleanUrl || credentialKey(itemClean) === cleanKey) return false
+            }
+            return true
+          })
+        )
         delete knownCamerasRef.current[cameraId]
+        delete knownCamerasRef.current[cleanUrl]
+        delete knownCamerasRef.current[`ip:${cleanUrl}`]
       }
 
       // Se a câmera foi fechada/removida, pausa automaticamente os monitoramentos ativos associados a ela
@@ -7354,15 +7403,26 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       }
 
       try {
-        const isRemovingIp = cameraId.startsWith('ip:') && isRemoving
-        if (isRemovingIp) {
-          const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string }> } }>(
+        if (isIpCamera) {
+          const configRes = await command<{ config: { ipCameras?: Array<{ id?: string; name?: string; url: string }> } }>(
             'configure',
             {}
           )
           const current = configRes.config || {}
           const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
-          const updatedIp = ipCamerasList.filter((c) => c.id !== cameraId)
+          const rawUrl = cameraId.replace(/^ip:/, '')
+          const cleanUrl = parseCameraAuth(rawUrl).cleanUrl
+          const cleanKey = credentialKey(cleanUrl)
+
+          const updatedIp = ipCamerasList.filter((c) => {
+            if (!c || !c.url) return false
+            if (c.id && (c.id === cameraId || c.id === cleanUrl || c.id === `ip:${cleanUrl}`)) return false
+            const itemClean = parseCameraAuth(c.url).cleanUrl
+            if (itemClean === cleanUrl) return false
+            if (credentialKey(itemClean) === cleanKey) return false
+            if (`ip:${itemClean}` === cameraId) return false
+            return true
+          })
           await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
         } else {
           await command('configure', { selectedCameras: nextSelected })

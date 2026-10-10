@@ -16,7 +16,7 @@
  */
 
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto'
-import { parseCameraAuth } from './vision/rtsp-auth'
+import { credentialKey, parseCameraAuth } from './vision/rtsp-auth'
 
 export interface SecureStorageBridge {
   encrypt(plain: string): Promise<string | null>
@@ -49,11 +49,8 @@ const IV_LENGTH = 12
 const TAG_LENGTH = 16
 const KEY_LENGTH = 32
 
-/** Clean URL used as the credential key (credentials stripped). */
-export function credentialKey(rawUrl: string): string {
-  const clean = parseCameraAuth(String(rawUrl || '')).cleanUrl.trim()
-  return clean || String(rawUrl || '').trim()
-}
+export { credentialKey } from './vision/rtsp-auth'
+
 
 async function loadFallbackKey(storage: CredentialStorageBridge): Promise<Buffer> {
   try {
