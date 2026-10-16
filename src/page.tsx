@@ -6927,7 +6927,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
     try {
       const [camRes, statusRes, alertsRes, activeTriggersRes] = await Promise.all([
         command<{ cameras: CameraInfo[]; availableWebcams?: CameraInfo[]; selectedCameras?: string[] | null }>('list_cameras', { includeDiscovered: true }),
-        command<{ monitors: MonitorInfo[]; detectionZones?: Record<string, Point[]>; showBoxes?: Record<string, boolean>; showZones?: Record<string, boolean> }>('get_status'),
+        command<{ monitors: MonitorInfo[]; detectionZones?: Record<string, Point[]>; showBoxes?: Record<string, boolean>; showZones?: Record<string, boolean>; pausedCameras?: string[] }>('get_status'),
         command<{ alerts: Alert[] }>('list_alerts').catch(() => null),
         fetchActiveAutomationTriggers()
       ])
