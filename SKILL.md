@@ -1,6 +1,6 @@
 ---
-name: MomAI Vision
-description: Olhos para a MomAI: snapshots de câmeras, monitoramento e alertas 100% locais. Use quando o usuario falar de câmera, ver, enxergar, monitorar, vigiar, movimento, alguem chegou, encomenda, porta, ou pedir o que a câmera está vendo.
+name: Vision
+description: Captura frames e vídeos de webcams e câmeras de segurança físicas instaladas, monitora presença e descreve o que está visível no campo de visão das câmeras do ambiente físico. Use quando o usuário pedir para ver através de uma câmera, verificar se alguém está no portão/porta, monitorar o ambiente físico ou tirar uma foto pela webcam.
 ---
 
 # MomAI Vision
@@ -13,13 +13,13 @@ monitoramento com alertas — funcionando de forma 100% local.
 | Ferramenta | Uso |
 | --- | --- |
 | `list_cameras` | Lista câmeras (webcam/IP) com status e monitors ativos |
-| `capture_snapshot {cameraId?}` | Captura um print da câmera e mostra no chat |
+| `capture_snapshot {cameraId?}` | Tira uma foto de uma CÂMERA (webcam/IP), nunca da tela do computador, e mostra no chat |
 | `update_monitoring {monitorId, cameraId?, triggers?, ...}` | Edita as configurações de um monitoramento existente |
 | `pause_monitoring {monitorId?}` | Pausa sem excluir: para a execução e o card some, mas os dados ficam salvos |
 | `resume_monitoring {monitorId?}` | Retoma um monitoramento pausado |
 | `stop_monitoring {monitorId?}` | **EXCLUI** definitivamente o monitoramento e seus dados |
 | `get_status` | Monitors ativos/pausados por câmera |
-| `list_snapshots {limit?}` | Galeria (mais recentes primeiro) |
+| `list_snapshots {limit?}` | Galeria de fotos das câmeras (mais recentes primeiro) |
 
 ## Regra Estrita de Câmera para Snapshots
 

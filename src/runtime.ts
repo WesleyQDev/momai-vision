@@ -3158,7 +3158,8 @@ async function toolListCameras(args?: { all?: boolean; includeDiscovered?: boole
       deviceId: c.deviceId,
       selected: selectedSet.has(c.id)
     })),
-    selectedCameras: config.selectedCameras || []
+    selectedCameras: config.selectedCameras || [],
+    pausedCameras: config.pausedCameras || []
   }
 }
 
@@ -3919,6 +3920,7 @@ async function toolGetStatus(): Promise<unknown> {
     ok: true,
     monitors: combined,
     cameras: status,
+    pausedCameras: cfg.pausedCameras || [],
     detectionZones: cfg.detectionZones || {},
     showBoxes: cfg.showBoxes || {},
     showZones: cfg.showZones || {}

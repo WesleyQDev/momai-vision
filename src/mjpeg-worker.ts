@@ -110,6 +110,11 @@ function parse(buf: Uint8Array): Uint8Array {
     const after = idx + BOUNDARY.length
     const range = extractJpegFrame(buf, BOUNDARY, HEADER_END, (bytes) => DECODER.decode(bytes), after)
     if (!range) break
+    if (range.end <= range.start) {
+      buf = buf.subarray(range.end)
+      idx = indexOfSeq(buf, BOUNDARY)
+      continue
+    }
     const frame = buf.subarray(range.start, range.end)
     lastFrame = frame
     currentFrame = frame

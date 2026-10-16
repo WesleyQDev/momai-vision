@@ -53,8 +53,11 @@ export function extractJpegFrame(
   const dataStart = hEnd + headerEnd.length
 
   const clMatch = /content-length:\s*(\d+)/i.exec(header)
-  if (clMatch && Number(clMatch[1]) > 0) {
+  if (clMatch) {
     const length = Number(clMatch[1])
+    if (length <= 0) {
+      return { start: dataStart, end: dataStart }
+    }
     if (buf.length < dataStart + length) return null
     return { start: dataStart, end: dataStart + length }
   }

@@ -1131,6 +1131,86 @@ describe('VisionPage — pausar e retomar vídeo da câmera', () => {
       expect(configureCall!.args.pausedCameras).toEqual([])
     })
   })
+
+  it('exibe opção Retomar vídeo ao clicar com o botão direito em câmera pausada', async () => {
+    const CAM = {
+      id: 'ip:rtsp://192.168.0.2:554/onvif2',
+      name: 'Garagem',
+      source: 'ip',
+      online: true,
+      monitors: 0
+    } as const
+    localStorage.setItem('momai-vision:config', JSON.stringify({
+      selectedCameras: [CAM.id],
+      pausedCameras: [CAM.id]
+    }))
+    const { calls } = setupServer({
+      cameras: [{ ...CAM }],
+      selectedCameras: [CAM.id],
+      pausedCameras: [CAM.id],
+      ipCameras: [{ id: CAM.id, name: 'Garagem', url: 'rtsp://192.168.0.2:554/onvif2' }]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    const card = screen.getByText('Garagem').closest('.group')
+    expect(card).toBeTruthy()
+    fireEvent.contextMenu(card!)
+
+    const cameraGroup = await screen.findByRole('menuitem', { name: 'Câmera' })
+    fireEvent.mouseEnter(cameraGroup.parentElement!)
+
+    // Right-clicking a paused camera MUST show "Retomar vídeo", NOT "Pausar vídeo"
+    const resumeItem = await screen.findByText('Retomar vídeo')
+    expect(resumeItem).toBeTruthy()
+    expect(screen.queryByText('Pausar vídeo')).toBeNull()
+
+    // Canvas must stay visible (not opacity-0) while paused
+    const canvas = card!.querySelector('canvas')
+    expect(canvas).toBeTruthy()
+    expect(canvas!.className).not.toContain('opacity-0')
+
+    // Clicking "Retomar vídeo" resumes the camera
+    fireEvent.click(resumeItem)
+    await waitFor(() => {
+      const configureCall = calls.find((c) => c.toolName === 'configure' && c.args.pausedCameras !== undefined)
+      expect(configureCall).toBeTruthy()
+      expect(configureCall!.args.pausedCameras).toEqual([])
+    })
+  })
+
+  it('reconhece câmera pausada mesmo com credenciais na URL e mantém após poll', async () => {
+    const CAM_WITH_AUTH = {
+      id: 'ip:rtsp://admin:secret@192.168.0.2:554/onvif2',
+      name: 'Entrada',
+      source: 'ip',
+      online: true,
+      monitors: 0
+    } as const
+    const CLEAN_ID = 'ip:rtsp://192.168.0.2:554/onvif2'
+    localStorage.setItem('momai-vision:config', JSON.stringify({
+      selectedCameras: [CAM_WITH_AUTH.id],
+      pausedCameras: [CLEAN_ID]
+    }))
+    setupServer({
+      cameras: [{ ...CAM_WITH_AUTH }],
+      selectedCameras: [CAM_WITH_AUTH.id],
+      pausedCameras: [CLEAN_ID],
+      ipCameras: [{ id: CAM_WITH_AUTH.id, name: 'Entrada', url: 'rtsp://192.168.0.2:554/onvif2' }]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    const card = screen.getByText('Entrada').closest('.group')
+    expect(card).toBeTruthy()
+    fireEvent.contextMenu(card!)
+
+    const cameraGroup = await screen.findByRole('menuitem', { name: 'Câmera' })
+    fireEvent.mouseEnter(cameraGroup.parentElement!)
+
+    const resumeItem = await screen.findByText('Retomar vídeo')
+    expect(resumeItem).toBeTruthy()
+  })
 })
 
 

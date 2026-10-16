@@ -1,7 +1,7 @@
 {
   "id": "momai-vision",
   "name": "MomAI Vision",
-  "version": "1.11.1",
+  "version": "1.12.0",
   "is_official": true,
   "description": "Veja suas câmeras, receba alertas de movimento e pergunte o que está acontecendo.",
   "category": "utility",
@@ -325,7 +325,7 @@
     },
     {
       "name": "capture_snapshot",
-      "description": "Captura um print da câmera especificada, salva na galeria e mostra a imagem no chat. Quando o usuário nomear uma câmera, SEMPRE passe o cameraId exato retornado por list_cameras (ou o nome dela, ex.: 'caza'). Se o usuário não especificar, pode omitir o argumento para usar a câmera padrão.",
+      "description": "Tira uma foto de uma CÂMERA (webcam ou IP), nunca da tela do computador: salva na galeria e mostra a imagem no chat. Quando o usuário nomear uma câmera, SEMPRE passe o cameraId exato retornado por list_cameras (ou o nome dela, ex.: 'caza'). Se o usuário não especificar, pode omitir o argumento para usar a câmera padrão.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -524,7 +524,7 @@
     },
     {
       "name": "list_snapshots",
-      "description": "Lista os prints da galeria (mais recentes primeiro).",
+      "description": "Lista as fotos da galeria das câmeras (mais recentes primeiro).",
       "parameters": {
         "type": "object",
         "properties": {
@@ -602,10 +602,6 @@
         }
       }
     ]
-  },
-  "toolPriority": {
-    "label": "VISAO",
-    "rule": "usar ferramentas de visao/camera quando o usuario falar de camera, ver, enxergar, monitorar, vigiar, movimento, encomenda, deteccao ou pedir o que a camera esta vendo."
   },
   "theme": {
     "gradient": "from-emerald-500 to-green-600",
