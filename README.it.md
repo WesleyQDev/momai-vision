@@ -1,34 +1,35 @@
 # MomAI Vision
 
-L'estensione MomAI Vision dà occhi alla tua assistente. Con essa, MomAI può connettersi alla tua webcam o alle telecamere di sicurezza per osservare l'ambiente, descrivere cosa sta succedendo e avvisarti dei movimenti importanti.
+MomAI Vision collega la webcam e le telecamere di sicurezza all'assistente. Vede cosa sta succedendo, descrive la scena e ti avvisa quando trova movimento o una persona.
 
-## Occhi intelligenti per proteggere e semplificare la tua giornata
+## Cosa puoi fare
 
-Che si tratti di sapere chi è appena arrivato al cancello, controllare cosa sta succedendo in giardino o semplicemente chiedere cosa sta vedendo la telecamera, MomAI Vision offre un'esperienza visiva intuitiva e sicura.
+- Chiedere una descrizione di ciò che vede la telecamera.
+- Ricevere avvisi quando qualcuno compare nell'area monitorata.
+- Creare domande automatiche, come avvisarti se il cancello è rimasto aperto.
+- Guardare le telecamere in diretta e rivedere le foto catturate.
+- Mettere in pausa e riprendere il monitoraggio quando vuoi.
 
-### Funzionalità principali
+## Esempi
 
-- **Descrizione della scena**: Chiedi all'assistente di guardare verso la telecamera e descriverà in dettaglio ciò che ha di fronte con un linguaggio chiaro e naturale.
-- **Rilevamento di movimento e persone**: Ricevi avvisi sullo schermo del computer ogni volta che una persona viene identificata nell'area monitorata.
-- **Domande visive personalizzate**: Lascia configurate domande automatiche, come avvisarti se il cancello è rimasto aperto o se c'è qualcuno alla porta sul retro.
-- **Pannello e galleria fotografica**: Segui le tue telecamere in tempo reale e consulta la galleria delle immagini acquisite direttamente dalla barra laterale.
-- **Completamente locale e privato**: Tutta l'elaborazione visiva avviene sul tuo computer. Nessuna immagine o video della tua casa viene inviato su Internet.
-
-## Cosa puoi chiedere a MomAI
-
-- "MomAI, cosa stai vedendo adesso?"
-- "Scatta una foto dalla telecamera del garage."
-- "Avvisami quando qualcuno arriva all'ingresso di casa."
-- "Avvisa se c'è movimento alla porta sul retro."
+- "Cosa stai vedendo adesso?"
+- "Scatta una foto con la telecamera del garage."
+- "Avvisami quando qualcuno arriva all'ingresso."
+- "Avvisami se c'è movimento alla porta sul retro."
 - "Metti in pausa il monitoraggio del garage."
 
 ## Come usare
 
-1. Apri MomAI e fai clic sull'icona Telecamere nella barra laterale.
-2. Nell'elenco dei dispositivi, seleziona la tua webcam oppure inserisci l'indirizzo di rete della tua telecamera di sicurezza.
-3. Attiva le telecamere che desideri seguire.
-4. Puoi già chiedere all'assistente di scattare foto, descrivere scene o monitorare aree in tempo reale.
+1. Apri MomAI e fai clic sull'icona Telecamere.
+2. Scegli la webcam o inserisci l'indirizzo della telecamera di sicurezza.
+3. Attiva le telecamere che vuoi seguire.
+4. Chiedi foto, descrizioni o monitoraggio nella chat.
 
-## Privacy e sicurezza
+## Privacy
 
-La privacy della tua casa è trattata con assoluta priorità. L'elaborazione delle immagini avviene al 100% sul tuo dispositivo fisico. I tuoi video e le tue foto non vengono mai caricati su server esterni e restano sotto il tuo controllo esclusivo.
+L'elaborazione delle immagini avviene sul tuo computer. Le foto vengono salvate localmente e la descrizione usa il modello di visione locale di MomAI. Le immagini non vengono inviate ai server di MomAI.
+
+## Permessi
+
+- **Telecamera:** per accedere alla webcam.
+- **Rete:** per accedere alle telecamere IP sulla rete locale.

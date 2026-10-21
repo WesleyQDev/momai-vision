@@ -1,34 +1,35 @@
 # MomAI Vision
 
-L'extension MomAI Vision donne des yeux à votre assistante. Grâce à elle, MomAI peut se connecter à votre webcam ou à vos caméras de sécurité pour observer l'environnement, décrire ce qui se passe et vous alerter des mouvements importants.
+MomAI Vision connecte votre webcam et vos caméras de sécurité à l'assistant. Il voit ce qui se passe, décrit la scène et vous alerte lorsqu'il détecte un mouvement ou une personne.
 
-## Des yeux intelligents pour protéger et faciliter votre journée
+## Ce que vous pouvez faire
 
-Que ce soit pour savoir qui vient d'arriver au portail, vérifier ce qui se passe dans le jardin ou simplement demander ce que la caméra voit, MomAI Vision offre une expérience visuelle intuitive et sûre.
+- Demander une description de ce que voit la caméra.
+- Recevoir une alerte quand quelqu'un apparaît dans la zone surveillée.
+- Configurer des questions automatiques, par exemple pour savoir si le portail est resté ouvert.
+- Suivre les caméras en direct et consulter les photos capturées.
+- Mettre la surveillance en pause et la reprendre quand vous voulez.
 
-### Fonctionnalités principales
+## Exemples
 
-- **Description de scène** : Demandez à l'assistante de regarder la caméra et elle décrira en détail ce qui se trouve devant elle dans un langage clair et naturel.
-- **Détection de mouvement et de personnes** : Recevez des alertes sur l'écran de votre ordinateur dès qu'une personne est identifiée dans la zone surveillée.
-- **Questions visuelles personnalisées** : Laissez des questions automatiques configurées, comme vous prévenir si le portail est resté ouvert ou s'il y a quelqu'un à la porte de derrière.
-- **Panneau et galerie de photos** : Suivez vos caméras en temps réel et consultez la galerie d'images capturées directement dans la barre latérale.
-- **Entièrement local et privé** : Tout le traitement visuel s'exécute sur votre propre ordinateur. Aucune image ni vidéo de votre maison n'est envoyée sur Internet.
+- « Que vois-tu en ce moment ? »
+- « Prends une photo avec la caméra du garage. »
+- « Préviens-moi quand quelqu'un arrive à l'entrée. »
+- « Préviens-moi s'il y a du mouvement à la porte de derrière. »
+- « Mets la surveillance du garage en pause. »
 
-## Ce que vous pouvez demander à MomAI
+## Utilisation
 
-- "MomAI, que vois-tu en ce moment ?"
-- "Prends une photo de la caméra du garage."
-- "Préviens-moi quand quelqu'un arrivera à l'entrée de la maison."
-- "Préviens-moi s'il y a du mouvement à la porte de derrière."
-- "Suspendre la surveillance du garage."
+1. Ouvrez MomAI et cliquez sur l'icône Caméras.
+2. Choisissez la webcam ou saisissez l'adresse de la caméra de sécurité.
+3. Activez les caméras que vous voulez suivre.
+4. Demandez des photos, des descriptions ou une surveillance dans le chat.
 
-## Comment utiliser
+## Confidentialité
 
-1. Ouvrez MomAI et cliquez sur l'icône Caméras dans la barre latérale.
-2. Dans la liste des appareils, sélectionnez votre webcam ou indiquez l'adresse réseau de votre caméra de sécurité.
-3. Activez les caméras que vous souhaitez suivre.
-4. Vous pouvez déjà demander à l'assistante de prendre des photos, de décrire des scènes ou de surveiller des zones en temps réel.
+Le traitement des images se fait sur votre ordinateur. Les photos sont enregistrées localement et la description utilise le modèle de vision local de MomAI. Les images ne sont pas envoyées aux serveurs de MomAI.
 
-## Confidentialité et sécurité
+## Autorisations
 
-La confidentialité de votre foyer est traitée avec une priorité absolue. Le traitement des images a lieu à 100 % sur votre équipement physique. Vos vidéos et photos ne sont jamais téléversées vers des serveurs externes et restent sous votre contrôle exclusif.
+- **Caméra :** pour accéder à la webcam.
+- **Réseau :** pour accéder aux caméras IP sur votre réseau local.

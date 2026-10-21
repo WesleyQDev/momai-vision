@@ -1,34 +1,35 @@
 # MomAI Vision
 
-La extensión MomAI Vision da ojos a tu asistente. Con ella, MomAI puede conectarse a tu cámara web o cámaras de seguridad para ver el entorno, describir lo que sucede y alertarte sobre eventos importantes.
+MomAI Vision conecta la webcam y las cámaras de seguridad al asistente. Ve lo que está pasando, describe la escena y te avisa cuando encuentra movimiento o una persona.
 
-## Ojos inteligentes para proteger y asistir tu día a día
+## Qué puedes hacer
 
-Ya sea para saber quién acaba de llegar al portón, verificar qué sucede en el patio o simplemente preguntar qué ve la cámara, MomAI Vision ofrece una experiencia visual intuitiva y segura.
+- Pedir una descripción de lo que ve la cámara.
+- Recibir avisos cuando alguien aparece en el área vigilada.
+- Crear preguntas automáticas, como avisarte si el portón quedó abierto.
+- Ver las cámaras en vivo y revisar las fotos capturadas.
+- Pausar y reanudar el monitoreo cuando quieras.
 
-### Características Principales
+## Ejemplos
 
-- **Descripción de Escena**: Pídele a la asistente que mire a la cámara y describirá en lenguaje natural y claro lo que está frente a ella.
-- **Detección de Movimiento y Personas**: Recibe alertas en tu pantalla cada vez que se detecte una persona u objeto en el área vigilada.
-- **Consultas Visuales Personalizadas**: Configura preguntas automáticas, como alertar si el portón quedó abierto o si hay alguien en la puerta trasera.
-- **Panel en Vivo y Galería de Fotos**: Monitorea tus cámaras en tiempo real y consulta la galería de imágenes capturadas directamente desde la barra lateral.
-- **100% Local y Privado**: Todo el procesamiento visual se ejecuta en tu propia computadora. Ningún video o foto se sube a internet.
-
-## Qué puedes pedirle a MomAI
-
-- "MomAI, ¿qué estás viendo ahora mismo?"
-- "Toma una foto de la cámara del garaje."
+- "¿Qué estás viendo ahora?"
+- "Haz una foto con la cámara del garaje."
 - "Avísame cuando alguien llegue a la entrada."
-- "Notifícame si hay movimiento en el patio trasero."
-- "Pausar el monitoreo de la cámara del garaje."
+- "Avísame si hay movimiento en la puerta trasera."
+- "Pausa el monitoreo del garaje."
 
-## Cómo Usar
+## Cómo usar
 
-1. Abre MomAI y haz clic en el ícono de Cámaras en la barra lateral.
-2. Selecciona tu cámara web local o introduce la dirección de red de tu cámara de seguridad (RTSP/ONVIF).
-3. Activa las cámaras que deseas monitorear.
-4. Ya puedes pedirle a MomAI tomar fotos, describir escenas o monitorear áreas en tiempo real.
+1. Abre MomAI y haz clic en el icono de Cámaras.
+2. Elige la webcam o escribe la dirección de la cámara de seguridad.
+3. Activa las cámaras que quieres seguir.
+4. Pide fotos, descripciones o monitoreo en el chat.
 
-## Privacidad y Seguridad
+## Privacidad
 
-La privacidad de tu hogar es la máxima prioridad. El procesamiento de imágenes ocurre 100% en tu equipo físico. Tus fotos y videos nunca se cargan en la nube y permanecen bajo tu control exclusivo.
+El procesamiento de las imágenes ocurre en tu computador. Las fotos se guardan localmente y la descripción usa el modelo de visión local de MomAI. Las imágenes no se envían a servidores de MomAI.
+
+## Permisos
+
+- **Cámara:** para acceder a la webcam.
+- **Red:** para acceder a las cámaras IP en tu red local.
