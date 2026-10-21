@@ -191,5 +191,39 @@ describe('VisionPage — Histórico de Alertas', () => {
       expect(screen.queryByText(/Câmera Alerta 12/)).toBeNull()
     })
   })
+
+  it('permite compartilhar um alerta através do botão de compartilhamento', async () => {
+    const sdk = getSDK()
+    setupServer([
+      {
+        ts: 1600000000000,
+        cameraName: 'Entrada Principal',
+        triggeredBy: 'person',
+        description: 'Pessoa detectada na entrada',
+        imageDataUri: 'data:image/jpeg;base64,alertpic'
+      }
+    ])
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openAlertsTab()
+
+    await screen.findByText(/Entrada Principal/)
+    const shareButton = screen.getByRole('button', { name: 'Compartilhar' })
+    fireEvent.click(shareButton)
+
+    await waitFor(() => {
+      expect(sdk.share.open).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining('Entrada Principal'),
+          text: expect.stringContaining('Pessoa detectada'),
+          files: expect.arrayContaining([
+            expect.objectContaining({
+              dataUrl: 'data:image/jpeg;base64,alertpic'
+            })
+          ])
+        })
+      )
+    })
+  })
 })
 

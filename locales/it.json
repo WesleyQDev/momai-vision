@@ -502,7 +502,10 @@
     "remove": "Rimuovi",
     "copy": "Copia",
     "select": "Seleziona...",
-    "pause": "Pausa"
+    "pause": "Pausa",
+    "share": "Condividi",
+    "sharePrint": "Condividi print",
+    "shareAlert": "Condividi avviso"
   },
   "page": {
     "subtitle": "Visione e monitoraggio 100% locali — nulla lascia il tuo computer.",

@@ -55,7 +55,7 @@ import ContextMenu, { type ContextMenuOption } from './components/ContextMenu'
 import EditCameraModal, { type EditingCameraTarget } from './components/EditCameraModal'
 import { Pagination } from './components/Pagination'
 import { useWindowMaximized } from './hooks/useWindowMaximized'
-import { readCachedFrame, storeCachedFrame, shouldCaptureFrameCache, clearCachedFrame } from './vision/frame-cache'
+import { readCachedFrame, storeCachedFrame, shouldCaptureFrameCache, clearCachedFrame, captureOptimizedSnapshot } from './vision/frame-cache'
 import {
   BACKGROUND_WARMUP_INTERVAL_MS,
   pollIntervalMs,
@@ -505,6 +505,113 @@ async function copyImageToClipboard(imgSrc: string): Promise<boolean> {
     console.debug('Direct blob clipboard write fallback:', err)
   }
 
+  return false
+}
+
+async function resolveImageDataUrl(src: string): Promise<string> {
+  if (!src) return ''
+  if (src.startsWith('data:')) return src
+  const fullUrl = resolveFullImageUrl(src)
+  try {
+    const res = await fetch(fullUrl)
+    const blob = await res.blob()
+    return new Promise<string>((resolve) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve((reader.result as string) || fullUrl)
+      reader.onerror = () => resolve(fullUrl)
+      reader.readAsDataURL(blob)
+    })
+  } catch {
+    return fullUrl
+  }
+}
+
+async function sharePrint(snap: Snapshot, t: TranslateFn, locale?: string): Promise<boolean> {
+  const imgSrc =
+    snap.imageDataUri ||
+    `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${snap.id}.jpg`)}`
+
+  const dateStr = formatTime(snap.ts, locale)
+  const title = snap.description || `${t('gallery.cameraPrints')} - ${dateStr}`
+  const text = snap.description ? `${snap.description} (${dateStr})` : `Print da câmera capturado em ${dateStr}`
+
+  try {
+    const shareApi = (sdk as any)?.share || (typeof window !== 'undefined' && (window as any).MomAISDK?.share)
+    if (shareApi && typeof shareApi.open === 'function') {
+      const dataUrl = await resolveImageDataUrl(imgSrc)
+      const res = await shareApi.open({
+        title,
+        text,
+        url: resolveFullImageUrl(imgSrc),
+        files: dataUrl
+          ? [
+              {
+                name: `print-${snap.id}.jpg`,
+                dataUrl,
+                mimeType: 'image/jpeg'
+              }
+            ]
+          : []
+      })
+      return res?.ok ?? true
+    }
+  } catch (err) {
+    console.warn('[momai-vision] Share print failed, fallback to copy:', err)
+  }
+
+  return copyImageToClipboard(imgSrc)
+}
+
+async function shareAlert(alert: Alert, t: TranslateFn, locale?: string): Promise<boolean> {
+  const imgSrc =
+    alert.imageDataUri ||
+    (alert.snapshotId
+      ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
+      : '')
+
+  const camera = formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')
+  const trigger = alert.triggeredBy
+    ? localizedTriggerLabel(alert, t)
+    : (alert.className ? localizedClassLabel(alert.className, t) : '')
+  const dateStr = formatTime(alert.ts, locale)
+  const title = `Alerta: ${camera}${trigger ? ` · ${trigger}` : ''}`
+  const text = [
+    `🚨 Alerta — MomAI Vision`,
+    `📹 Câmera: ${camera}`,
+    trigger ? `⚡ Evento: ${trigger}` : '',
+    alert.description ? `📝 ${alert.description}` : '',
+    `🕒 ${dateStr}`
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  try {
+    const shareApi = (sdk as any)?.share || (typeof window !== 'undefined' && (window as any).MomAISDK?.share)
+    if (shareApi && typeof shareApi.open === 'function') {
+      const dataUrl = imgSrc ? await resolveImageDataUrl(imgSrc) : ''
+      const res = await shareApi.open({
+        title,
+        text,
+        url: imgSrc ? resolveFullImageUrl(imgSrc) : undefined,
+        files: dataUrl
+          ? [
+              {
+                name: `alerta-${alert.snapshotId || alert.ts}.jpg`,
+                dataUrl,
+                mimeType: 'image/jpeg'
+              }
+            ]
+          : []
+      })
+      return res?.ok ?? true
+    }
+  } catch (err) {
+    console.warn('[momai-vision] Share alert failed, fallback to copy:', err)
+  }
+
+  if (imgSrc) {
+    return copyImageToClipboard(imgSrc)
+  }
   return false
 }
 
@@ -1971,6 +2078,7 @@ export const CameraCard = memo(function CameraCard({
   // while the live stream reconnects — the reload icon spins meanwhile.
   const [cachedFrameShown, setCachedFrameShown] = useState(false)
   const cachedFrameShownRef = useRef(false)
+  const [frozenFrame, setFrozenFrame] = useState<string | null>(() => readCachedFrame(camera.id))
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
   const [drawMode, setDrawMode] = useState<DrawMode>('freehand')
 
@@ -2064,7 +2172,10 @@ export const CameraCard = memo(function CameraCard({
   const handleTriggerExpand = useCallback(() => {
     if (frameCanvasRef.current && (hasFrame || cachedFrameShown)) {
       try {
-        storeCachedFrame(camera.id, frameCanvasRef.current.toDataURL('image/jpeg', 0.7))
+        const snap = captureOptimizedSnapshot(frameCanvasRef.current)
+        if (snap && snap.length > 100) {
+          storeCachedFrame(camera.id, snap)
+        }
       } catch {
         // ignore
       }
@@ -2227,6 +2338,9 @@ export const CameraCard = memo(function CameraCard({
     if (!cached) return
     cachedFrameShownRef.current = true
     setCachedFrameShown(true)
+    if (isPaused) {
+      setFrozenFrame(cached)
+    }
     const canvas = frameCanvasRef.current
     const ctx = canvas?.getContext('2d')
     if (!canvas || !ctx) return
@@ -2279,14 +2393,27 @@ export const CameraCard = memo(function CameraCard({
       parserWorkerRef.current?.stop()
       setFps(0)
       setKbs(0)
-      const frameCanvas = frameCanvasRef.current
-      if (frameCanvas && frameCanvas.width > 0 && frameCanvas.height > 0) {
-        try {
-          const snapshot = frameCanvas.toDataURL('image/jpeg', 0.85)
-          if (snapshot && snapshot.length > 100) {
-            storeCachedFrame(camera.id, snapshot)
+      if (isPaused) {
+        if (hasFrameRef.current) {
+          let snap = captureOptimizedSnapshot(frameCanvasRef.current)
+          if (!snap && lastFrameRef.current && lastFrameRef.current.length > 0) {
+            try {
+              let binary = ''
+              const bytes = lastFrameRef.current
+              const len = bytes.byteLength
+              for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i])
+              snap = `data:image/jpeg;base64,${btoa(binary)}`
+            } catch {}
           }
-        } catch {}
+          if (snap && snap.length > 100) {
+            setFrozenFrame(snap)
+            storeCachedFrame(camera.id, snap)
+          } else {
+            setFrozenFrame((prev) => prev || readCachedFrame(camera.id))
+          }
+        } else {
+          setFrozenFrame((prev) => prev || readCachedFrame(camera.id))
+        }
       }
       return
     }
@@ -2359,6 +2486,9 @@ export const CameraCard = memo(function CameraCard({
       if (cachedFrameShownRef.current) {
         cachedFrameShownRef.current = false
         setCachedFrameShown(false)
+      }
+      if (frozenFrame) {
+        setFrozenFrame(null)
       }
       if (!hasFrameRef.current) {
         hasFrameRef.current = true
@@ -2868,6 +2998,34 @@ export const CameraCard = memo(function CameraCard({
     lastAutoReloadAtRef.current = 0
   }, [camera.id, refreshKey])
 
+  // Synchronize frozen frame when camera is paused so the background never goes black
+  useEffect(() => {
+    if (isPaused) {
+      if (hasFrameRef.current) {
+        let snap = captureOptimizedSnapshot(frameCanvasRef.current)
+        if (!snap && lastFrameRef.current && lastFrameRef.current.length > 0) {
+          try {
+            let binary = ''
+            const bytes = lastFrameRef.current
+            const len = bytes.byteLength
+            for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i])
+            snap = `data:image/jpeg;base64,${btoa(binary)}`
+          } catch {}
+        }
+        if (snap && snap.length > 100) {
+          setFrozenFrame(snap)
+          storeCachedFrame(camera.id, snap)
+        } else {
+          setFrozenFrame((prev) => prev || readCachedFrame(camera.id))
+        }
+      } else {
+        setFrozenFrame((prev) => prev || readCachedFrame(camera.id))
+      }
+    } else {
+      setFrozenFrame(null)
+    }
+  }, [isPaused, camera.id])
+
   // Same recovery as the manual reload button, triggered when the preview
   // freezes mid-stream (frames arrived before, then silence). Webcams are
   // excluded because their host reacquire is destructive to the capture device.
@@ -2943,6 +3101,15 @@ export const CameraCard = memo(function CameraCard({
             data-camera-id={camera.id}
             className={`absolute inset-0 w-full h-full object-cover ${hasFrame || cachedFrameShown || isPaused ? 'block' : 'opacity-0'}`}
           />
+          {/* Imagem estática persistente do último frame enquanto pausada */}
+          {isPaused && (frozenFrame || readCachedFrame(camera.id)) ? (
+            <img
+              src={frozenFrame || readCachedFrame(camera.id) || undefined}
+              alt=""
+              aria-hidden="true"
+              className="absolute inset-0 w-full h-full object-cover pointer-events-none select-none z-10"
+            />
+          ) : null}
           {!hasFrame && !cachedFrameShown && !isPaused && (
             <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-xs text-text-muted bg-input/60 p-3 text-center gap-1">
               <VisionBlinkStyleTag />
@@ -4414,6 +4581,7 @@ function ExpandedCameraModal({
   const [cachedFrameShown, setCachedFrameShown] = useState(false)
   const cachedFrameShownRef = useRef(false)
   const hasLiveFrameRef = useRef(false)
+  const [frozenFrame, setFrozenFrame] = useState<string | null>(() => (camera ? readCachedFrame(camera.id) : null))
 
   // Carrega e desenha o frame em cache imediatamente ao abrir ou alternar a câmera,
   // eliminando o card branco / tela em branco enquanto o stream ao vivo conecta.
@@ -4428,6 +4596,9 @@ function ExpandedCameraModal({
     }
     cachedFrameShownRef.current = true
     setCachedFrameShown(true)
+    if (isPaused) {
+      setFrozenFrame(cached)
+    }
     const canvas = frameCanvasRef.current
     const ctx = canvas?.getContext('2d')
     if (!canvas || !ctx) return
@@ -4674,6 +4845,28 @@ function ExpandedCameraModal({
     if (!camera || isPaused) {
       parserWorkerRef.current?.stop()
       setKbs(0)
+      if (camera && isPaused) {
+        if (hasLiveFrameRef.current) {
+          let snap = captureOptimizedSnapshot(frameCanvasRef.current)
+          if (!snap && lastFrameRef.current && lastFrameRef.current.length > 0) {
+            try {
+              let binary = ''
+              const bytes = lastFrameRef.current
+              const len = bytes.byteLength
+              for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i])
+              snap = `data:image/jpeg;base64,${btoa(binary)}`
+            } catch {}
+          }
+          if (snap && snap.length > 100) {
+            setFrozenFrame(snap)
+            storeCachedFrame(camera.id, snap)
+          } else {
+            setFrozenFrame((prev) => prev || readCachedFrame(camera.id))
+          }
+        } else {
+          setFrozenFrame((prev) => prev || readCachedFrame(camera.id))
+        }
+      }
       return
     }
     let cancelled = false
@@ -4699,6 +4892,9 @@ function ExpandedCameraModal({
 
     const drawToCanvas = (bitmap: ImageBitmap | HTMLImageElement): void => {
       hasLiveFrameRef.current = true
+      if (frozenFrame) {
+        setFrozenFrame(null)
+      }
       if (cachedFrameShownRef.current) {
         cachedFrameShownRef.current = false
         setCachedFrameShown(false)
@@ -5261,8 +5457,19 @@ function ExpandedCameraModal({
               <canvas
                 ref={frameCanvasRef}
                 data-testid="expanded-video"
+                data-camera-id={camera?.id}
                 className={`max-w-full max-h-full w-full h-full ${fillMode === 'cover' ? 'object-cover' : 'object-contain'} ${ready || cachedFrameShown || isPaused ? 'block' : 'opacity-0'}`}
               />
+
+              {/* Imagem estática persistente do último frame enquanto pausada */}
+              {isPaused && (frozenFrame || (camera ? readCachedFrame(camera.id) : null)) ? (
+                <img
+                  src={frozenFrame || (camera ? readCachedFrame(camera.id) : null) || undefined}
+                  alt=""
+                  aria-hidden="true"
+                  className={`max-w-full max-h-full w-full h-full ${fillMode === 'cover' ? 'object-cover' : 'object-contain'} pointer-events-none select-none z-10`}
+                />
+              ) : null}
 
               {!ready && !cachedFrameShown && !isPaused && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center text-xs text-text-muted bg-input/60 p-4 text-center gap-2 pointer-events-none z-10">
@@ -5383,12 +5590,14 @@ function ExpandedPrintModal({
   snap,
   onClose,
   onDelete,
+  onShare,
   onContextMenu,
   busy
 }: {
   snap: Snapshot | null
   onClose: () => void
   onDelete: (snapId: string) => Promise<void>
+  onShare?: (snap: Snapshot) => void
   onContextMenu?: (e: React.MouseEvent, snap: Snapshot) => void
   busy: boolean
 }): JSX.Element | null {
@@ -5432,6 +5641,20 @@ function ExpandedPrintModal({
           <p className="text-xs text-text-muted max-w-xl">{snap.description || t('gallery.noDescription')}</p>
           <div className="flex items-center gap-2 shrink-0">
             <button
+              onClick={() => void onShare?.(snap)}
+              title={t('common.share')}
+              className="text-xs font-medium rounded-lg bg-input hover:bg-input/80 text-text border border-border/40 px-3 py-1.5 transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="18" cy="5" r="3" />
+                <circle cx="6" cy="12" r="3" />
+                <circle cx="18" cy="19" r="3" />
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+              </svg>
+              {t('common.share')}
+            </button>
+            <button
               disabled={busy}
               onClick={() => void onDelete(snap.id)}
               className="text-xs font-medium rounded-lg bg-error hover:bg-error/80 disabled:opacity-50 text-text px-3 py-1.5 transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
@@ -5455,10 +5678,12 @@ function ExpandedPrintModal({
 function ExpandedAlertModal({
   alert,
   onClose,
+  onShare,
   onContextMenu
 }: {
   alert: Alert | null
   onClose: () => void
+  onShare?: (alert: Alert) => void
   onContextMenu?: (e: React.MouseEvent, alert: Alert) => void
 }): JSX.Element | null {
   const { t, locale } = useI18n()
@@ -5485,16 +5710,33 @@ function ExpandedAlertModal({
           </h2>
           <span className="text-xs text-text-muted shrink-0">({formatTime(alert.ts, locale)})</span>
         </div>
-        <button
-          onClick={onClose}
-          className="text-text-muted hover:text-text rounded-lg p-1.5 hover:bg-input transition-colors"
-          title={t('common.close')}
-        >
-          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => void onShare?.(alert)}
+            title={t('common.share')}
+            aria-label={t('common.share')}
+            className="text-xs font-medium rounded-lg bg-input hover:bg-input/80 text-text border border-border/40 px-2.5 py-1.5 transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="18" cy="5" r="3" />
+              <circle cx="6" cy="12" r="3" />
+              <circle cx="18" cy="19" r="3" />
+              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+              <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+            </svg>
+            <span>{t('common.share')}</span>
+          </button>
+          <button
+            onClick={onClose}
+            className="text-text-muted hover:text-text rounded-lg p-1.5 hover:bg-input transition-colors"
+            title={t('common.close')}
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div
@@ -7199,6 +7441,26 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
     []
   )
 
+  const handleSharePrint = useCallback(
+    async (snap: Snapshot) => {
+      const ok = await sharePrint(snap, t, locale)
+      if (!ok) {
+        showCopyToast(t('page.copyFailed'))
+      }
+    },
+    [t, locale, showCopyToast]
+  )
+
+  const handleShareAlert = useCallback(
+    async (alert: Alert) => {
+      const ok = await shareAlert(alert, t, locale)
+      if (!ok) {
+        showCopyToast(t('page.copyFailed'))
+      }
+    },
+    [t, locale, showCopyToast]
+  )
+
   const handleDeleteFromContextMenu = useCallback(
     async (target: { type: 'snapshot'; snap: Snapshot; imgSrc: string } | { type: 'alert'; alert: Alert; imgSrc: string }) => {
       setContextMenu(null)
@@ -7383,9 +7645,10 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
   const toggleCameraSelection = useCallback(
     async (cameraId: string) => {
       lastSelectionChangeAtRef.current = Date.now()
+      const targetCam = cameras.find((c) => c.id === cameraId)
       const currentSelected = config.selectedCameras ?? []
       const isRemoving = currentSelected.includes(cameraId)
-      const isIpCamera = cameraId.startsWith('ip:')
+      const isIpCamera = cameraId.startsWith('ip:') || targetCam?.source === 'ip'
       const nextSelected = isRemoving
         ? currentSelected.filter((id) => id !== cameraId)
         : [...currentSelected, cameraId]
@@ -7403,20 +7666,26 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
 
       // Se for remoção de câmera IP, remove também da lista de câmeras da tela imediatamente
       if (isIpCamera) {
-        const rawUrl = cameraId.replace(/^ip:/, '')
+        const rawUrl = (targetCam?.url || cameraId).replace(/^ip:/, '')
         const cleanUrl = parseCameraAuth(rawUrl).cleanUrl
         const cleanKey = credentialKey(cleanUrl)
 
-        setCameras((prev) =>
-          prev.filter((c) => {
-            if (c.id === cameraId || c.id === cleanUrl || c.id === `ip:${cleanUrl}`) return false
+        setCameras((prev) => {
+          const next = prev.filter((c) => {
+            if (c.id === cameraId || c.id === cleanUrl || c.id === `ip:${cleanUrl}` || c.id.replace(/^ip:/, '') === cleanUrl) return false
             if (c.url) {
               const itemClean = parseCameraAuth(c.url).cleanUrl
               if (itemClean === cleanUrl || credentialKey(itemClean) === cleanKey) return false
             }
             return true
           })
-        )
+          try {
+            if (typeof localStorage !== 'undefined') {
+              localStorage.setItem(`${EXT_ID}:cameras`, JSON.stringify(next))
+            }
+          } catch {}
+          return next
+        })
         delete knownCamerasRef.current[cameraId]
         delete knownCamerasRef.current[cleanUrl]
         delete knownCamerasRef.current[`ip:${cleanUrl}`]
@@ -7424,7 +7693,6 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
 
       // Se a câmera foi fechada/removida, pausa automaticamente os monitoramentos ativos associados a ela
       if (isRemoving) {
-        const targetCam = cameras.find((c) => c.id === cameraId)
         const camName = targetCam?.name || cameraId
         const monitorsToPause = monitors.filter(
           (m) =>
@@ -7455,7 +7723,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           )
           const current = configRes.config || {}
           const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
-          const rawUrl = cameraId.replace(/^ip:/, '')
+          const rawUrl = (targetCam?.url || cameraId).replace(/^ip:/, '')
           const cleanUrl = parseCameraAuth(rawUrl).cleanUrl
           const cleanKey = credentialKey(cleanUrl)
 
@@ -7469,14 +7737,22 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             return true
           })
           await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
+          setConfig((prev) => {
+            const next = { ...prev, ipCameras: updatedIp, selectedCameras: nextSelected }
+            if (typeof localStorage !== 'undefined') {
+              localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
+            }
+            return next
+          })
         } else {
           await command('configure', { selectedCameras: nextSelected })
         }
+        void poll()
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
       }
     },
-    [config.selectedCameras, cameras, monitors]
+    [config.selectedCameras, cameras, monitors, poll]
   )
 
   const handleRemoveCamera = useCallback(
@@ -7561,12 +7837,11 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
 
     if (!isPaused && typeof document !== 'undefined') {
       try {
-        const cardCanvas = document.querySelector(`canvas[data-camera-id="${CSS.escape(cameraId)}"]`) as HTMLCanvasElement | null
-        if (cardCanvas && cardCanvas.width > 0 && cardCanvas.height > 0) {
-          const snap = cardCanvas.toDataURL('image/jpeg', 0.85)
-          if (snap && snap.length > 100) {
-            storeCachedFrame(cameraId, snap)
-          }
+        const canvases = Array.from(document.querySelectorAll<HTMLCanvasElement>('canvas[data-camera-id]'))
+        const cardCanvas = canvases.find((c) => isSameCameraId(c.getAttribute('data-camera-id') || '', cameraId)) || null
+        const snap = captureOptimizedSnapshot(cardCanvas)
+        if (snap && snap.length > 100) {
+          storeCachedFrame(cameraId, snap)
         }
       } catch {}
     }
@@ -8405,6 +8680,23 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
+                            void handleShareAlert(alert)
+                          }}
+                          title={t('common.share')}
+                          aria-label={t('common.share')}
+                          className="p-1.5 text-text-muted hover:text-text hover:bg-input rounded-lg transition-colors shrink-0 cursor-pointer"
+                        >
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="18" cy="5" r="3" />
+                            <circle cx="6" cy="12" r="3" />
+                            <circle cx="18" cy="19" r="3" />
+                            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
                             void handleDeleteAlert(alert)
                           }}
                           title={t('alerts.deleteOne')}
@@ -8505,18 +8797,37 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                         <p className="text-[11px] text-text font-medium truncate">{snap.description || formatTime(snap.ts, locale)}</p>
                         <div className="flex items-center justify-between mt-1 pt-1 border-t border-border/20">
                           <span className="text-[10px] text-text-muted">{formatTime(snap.ts, locale)}</span>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              void handleDeletePrint(snap.id)
-                            }}
-                            title={t('gallery.deletePrint')}
-                            className="p-1 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors cursor-pointer"
-                          >
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                            </svg>
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                void handleSharePrint(snap)
+                              }}
+                              title={t('common.share')}
+                              aria-label={t('common.share')}
+                              className="p-1 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
+                            >
+                              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <circle cx="18" cy="5" r="3" />
+                                <circle cx="6" cy="12" r="3" />
+                                <circle cx="18" cy="19" r="3" />
+                                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                void handleDeletePrint(snap.id)
+                              }}
+                              title={t('gallery.deletePrint')}
+                              className="p-1 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors cursor-pointer"
+                            >
+                              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                              </svg>
+                            </button>
+                          </div>
                         </div>
                       </figcaption>
                     </figure>
@@ -8672,6 +8983,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         snap={expandedPrint}
         onClose={() => setExpandedPrint(null)}
         onDelete={handleDeletePrint}
+        onShare={handleSharePrint}
         onContextMenu={handleSnapshotContextMenu}
         busy={busy}
       />
@@ -8797,6 +9109,19 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           })()
           : [
               {
+                id: 'share',
+                label: t('common.share'),
+                shortcut: '',
+                onClick: () => {
+                  setContextMenu(null)
+                  if (target.type === 'snapshot') {
+                    void handleSharePrint(target.snap)
+                  } else {
+                    void handleShareAlert(target.alert)
+                  }
+                }
+              },
+              {
                 id: 'copy',
                 label: t('common.copy'),
                 shortcut: 'Ctrl+C',
@@ -8828,6 +9153,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         <ExpandedAlertModal
           alert={expandedAlert}
           onClose={() => setExpandedAlert(null)}
+          onShare={handleShareAlert}
           onContextMenu={handleAlertContextMenu}
         />
       ) : null}

@@ -502,7 +502,10 @@
     "remove": "Supprimer",
     "copy": "Copier",
     "select": "Sélectionner...",
-    "pause": "Pause"
+    "pause": "Pause",
+    "share": "Partager",
+    "sharePrint": "Partager la capture",
+    "shareAlert": "Partager l'alerte"
   },
   "page": {
     "subtitle": "Vision et surveillance 100 % locales — rien ne quitte votre machine.",

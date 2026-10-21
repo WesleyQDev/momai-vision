@@ -80,5 +80,38 @@ describe('VisionPage — Galeria de Prints', () => {
       expect(screen.queryAllByText(/\bCaptura Print 1\b/).length).toBe(0)
     })
   })
+
+  it('permite compartilhar um print através do botão de compartilhamento', async () => {
+    const sdk = getSDK()
+    setupServer([
+      {
+        id: 'snap-1',
+        ts: 1600000000000,
+        description: 'Foto do portão',
+        imageDataUri: 'data:image/jpeg;base64,fakeimg'
+      }
+    ])
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openGalleryTab()
+
+    await screen.findByText('Foto do portão')
+    const shareButton = screen.getByRole('button', { name: 'Compartilhar' })
+    fireEvent.click(shareButton)
+
+    await waitFor(() => {
+      expect(sdk.share.open).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining('Foto do portão'),
+          files: expect.arrayContaining([
+            expect.objectContaining({
+              name: 'print-snap-1.jpg',
+              dataUrl: 'data:image/jpeg;base64,fakeimg'
+            })
+          ])
+        })
+      )
+    })
+  })
 })
 

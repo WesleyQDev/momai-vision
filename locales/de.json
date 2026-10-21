@@ -502,7 +502,10 @@
     "remove": "Entfernen",
     "copy": "Kopieren",
     "select": "Auswählen...",
-    "pause": "Pause"
+    "pause": "Pause",
+    "share": "Teilen",
+    "sharePrint": "Print teilen",
+    "shareAlert": "Alarm teilen"
   },
   "page": {
     "subtitle": "100 % lokale Bildverarbeitung und Überwachung — nichts verlässt Ihr Gerät.",

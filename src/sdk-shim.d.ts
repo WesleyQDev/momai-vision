@@ -43,6 +43,16 @@ export interface MomAISDK {
   notifications: {
     send(opts: { title: string; body?: string; action?: string }): Promise<void>
   }
+  share?: {
+    open(payload: {
+      title?: string
+      text?: string
+      url?: string
+      files?: Array<{ name: string; path?: string; dataUrl?: string; mimeType?: string; size?: number }>
+      [key: string]: any
+    }): Promise<{ ok: boolean; cancelled?: boolean; selectedProvider?: string; error?: string }>
+    close?(): void
+  }
   ui: {
     /**
      * Host-provided overlay container inside the main content area.

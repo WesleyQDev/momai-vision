@@ -34,6 +34,14 @@ function createSDK() {
       listRendererTypes: vi.fn(() => [])
     },
     notifications: { send: vi.fn(async () => {}) },
+    share: {
+      open: vi.fn(async () => ({ ok: true })),
+      close: vi.fn(),
+      getProviders: vi.fn(() => []),
+      registerProvider: vi.fn(() => () => {}),
+      unregisterProvider: vi.fn(),
+      subscribeProviders: vi.fn(() => () => {})
+    },
     ui: {
       // Mirrors the host contract (sdk.ui.overlayRoot): resolves the
       // overlay container when the test mounts one, null otherwise.

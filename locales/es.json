@@ -502,7 +502,10 @@
     "remove": "Quitar",
     "copy": "Copiar",
     "select": "Seleccionar...",
-    "pause": "Pausar"
+    "pause": "Pausar",
+    "share": "Compartir",
+    "sharePrint": "Compartir captura",
+    "shareAlert": "Compartir alerta"
   },
   "page": {
     "subtitle": "Visión y monitoreo 100% locales — nada sale de tu equipo.",

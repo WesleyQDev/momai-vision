@@ -502,7 +502,10 @@
     "remove": "Remove",
     "copy": "Copy",
     "select": "Select...",
-    "pause": "Pause"
+    "pause": "Pause",
+    "share": "Share",
+    "sharePrint": "Share print",
+    "shareAlert": "Share alert"
   },
   "page": {
     "subtitle": "100% local vision and monitoring — nothing leaves your machine.",

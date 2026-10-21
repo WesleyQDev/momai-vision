@@ -79,7 +79,13 @@ function setupServer(
       case 'configure':
         if (args.selectedCameras !== undefined || args.ipCameras !== undefined) {
           if (args.selectedCameras !== undefined) state.selectedCameras = [...(args.selectedCameras as string[])]
-          if (args.ipCameras !== undefined) state.ipCameras = [...(args.ipCameras as Array<{ id: string; name: string; url: string }>)]
+          if (args.ipCameras !== undefined) {
+            state.ipCameras = [...(args.ipCameras as Array<{ id: string; name: string; url: string }>)]
+            state.cameras = [
+              ...state.cameras.filter((c) => c.source !== 'ip'),
+              ...state.ipCameras.map((ip) => ({ id: ip.id, name: ip.name, source: 'ip' as const, online: true, monitors: 0 }))
+            ]
+          }
           return { ok: true, data: { ok: true } }
         }
         return {
@@ -1132,6 +1138,37 @@ describe('VisionPage — pausar e retomar vídeo da câmera', () => {
     })
   })
 
+  it('persiste a imagem de fundo através de tag img quando a câmera está pausada', async () => {
+    const CAM = {
+      id: 'ip:rtsp://192.168.0.2:554/onvif2',
+      name: 'Garagem',
+      source: 'ip',
+      online: true,
+      monitors: 0
+    } as const
+    const FAKE_FRAME = 'data:image/jpeg;base64,PAUSED_FRAME_DATA'
+    localStorage.setItem('momai-vision:config', JSON.stringify({
+      selectedCameras: [CAM.id],
+      pausedCameras: [CAM.id]
+    }))
+    localStorage.setItem('momai-vision:lastframe:' + CAM.id, FAKE_FRAME)
+    setupServer({
+      cameras: [{ ...CAM }],
+      selectedCameras: [CAM.id],
+      pausedCameras: [CAM.id],
+      ipCameras: [{ id: CAM.id, name: 'Garagem', url: 'rtsp://192.168.0.2:554/onvif2' }]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    // Verifica que o overlay de Pausada está presente
+    expect(screen.getByText('Clique para retomar o vídeo')).toBeTruthy()
+
+    // Verifica que a imagem persistente de fundo está presente com o src do frame congelado
+    const pausedImgs = document.querySelectorAll('img[src="data:image/jpeg;base64,PAUSED_FRAME_DATA"]')
+    expect(pausedImgs.length).toBeGreaterThan(0)
+  })
+
   it('exibe opção Retomar vídeo ao clicar com o botão direito em câmera pausada', async () => {
     const CAM = {
       id: 'ip:rtsp://192.168.0.2:554/onvif2',
@@ -1210,6 +1247,42 @@ describe('VisionPage — pausar e retomar vídeo da câmera', () => {
 
     const resumeItem = await screen.findByText('Retomar vídeo')
     expect(resumeItem).toBeTruthy()
+  })
+
+  it('restaura a imagem de fundo em cache ao abrir o app com câmera já pausada (sem sobrescrever com canvas preto)', async () => {
+    const CAM = {
+      id: 'ip:rtsp://192.168.0.2:554/onvif2',
+      name: 'Garagem',
+      source: 'ip',
+      online: true,
+      monitors: 0
+    } as const
+    const JPEG = 'data:image/jpeg;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'
+    localStorage.setItem(`momai-vision:lastframe:${CAM.id}`, JPEG)
+    localStorage.setItem('momai-vision:config', JSON.stringify({
+      selectedCameras: [CAM.id],
+      pausedCameras: [CAM.id]
+    }))
+    setupServer({
+      cameras: [{ ...CAM }],
+      selectedCameras: [CAM.id],
+      pausedCameras: [CAM.id],
+      ipCameras: [{ id: CAM.id, name: 'Garagem', url: 'rtsp://192.168.0.2:554/onvif2' }]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    const card = screen.getByText('Garagem').closest('.group')
+    expect(card).toBeTruthy()
+
+    // Imagem do frame persistido deve estar visível
+    const img = card!.querySelector('img[src^="data:image/jpeg"]') as HTMLImageElement | null
+    expect(img).toBeTruthy()
+    expect(img?.src).toBe(JPEG)
+
+    // O frame em cache no localStorage não deve ter sido apagado nem sobrescrito com canvas vazio
+    const cachedAfterMount = localStorage.getItem(`momai-vision:lastframe:${CAM.id}`)
+    expect(cachedAfterMount).toBe(JPEG)
   })
 })
 
