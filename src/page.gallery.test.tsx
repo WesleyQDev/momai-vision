@@ -100,7 +100,7 @@ describe('VisionPage — Galeria de Prints', () => {
     fireEvent.click(shareButton)
 
     await waitFor(() => {
-      expect(sdk.share.open).toHaveBeenCalledWith(
+      expect(sdk.share?.open).toHaveBeenCalledWith(
         expect.objectContaining({
           title: expect.stringContaining('Foto do portão'),
           files: expect.arrayContaining([

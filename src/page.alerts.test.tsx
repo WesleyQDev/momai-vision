@@ -10,6 +10,7 @@ interface ServerAlert {
   className?: string
   description?: string
   snapshotId?: string
+  imageDataUri?: string
 }
 
 // In-memory fake of the extension backend focused on the alerts feed: the
@@ -212,7 +213,7 @@ describe('VisionPage — Histórico de Alertas', () => {
     fireEvent.click(shareButton)
 
     await waitFor(() => {
-      expect(sdk.share.open).toHaveBeenCalledWith(
+      expect(sdk.share?.open).toHaveBeenCalledWith(
         expect.objectContaining({
           title: expect.stringContaining('Entrada Principal'),
           text: expect.stringContaining('Pessoa detectada'),
