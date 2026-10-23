@@ -31,14 +31,17 @@ import {
   RTSP_MID_STREAM_STALL_MS,
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
   buildRtspFfmpegArgs,
+  createRtspDecoderLogThrottle,
   decideRtspReconnect,
   isBenignRtspStderr,
+  isRtspBitstreamNoise,
   isRtspMidStreamStalled,
   nextReconnectDelayMs,
   resolveInitialTransport,
   resolvePreviewWidth,
   resolveRtspCodec,
   shouldLogRetry,
+  splitStderrLines,
   type RtspCodec,
   type RtspTransport
 } from './vision/rtsp'
@@ -1060,6 +1063,9 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
     let jpegBuf: any = Buffer.alloc(0)
     const SOI = Buffer.from([0xff, 0xd8])
     const EOI = Buffer.from([0xff, 0xd9])
+    // Shared across reconnect attempts so a corrupt stream logs once per
+    // window instead of once per lost frame.
+    const decoderLogThrottle = createRtspDecoderLogThrottle()
 
     const initialTransport = resolveInitialTransport(camera.transport)
 
@@ -1158,12 +1164,9 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
         }
       })
 
-      ffmpeg.stderr!.on('data', (data: Buffer) => {
-        const msg = data.toString()
-        stderrBuf += msg
-        if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000)
-        if (isBenignRtspStderr(msg)) return
-        const lower = msg.toLowerCase()
+      const handleStderrLine = (line: string): void => {
+        if (isBenignRtspStderr(line)) return
+        const lower = line.toLowerCase()
         if (
           lower.includes('poc') ||
           lower.includes('rps') ||
@@ -1171,7 +1174,30 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
           lower.includes('pps id') ||
           lower.includes('last message repeated')
         ) return
-        bridge?.log(`[vision] RTSP FFmpeg stderr (${camera.name}): ${msg.slice(0, 200)}`)
+        if (isRtspBitstreamNoise(line)) {
+          // A damaged bitstream repeats the same errors for every lost frame.
+          // Keep the evidence, but cap it to one line per window so a camera
+          // that keeps corrupting frames stays visible without flooding.
+          const slot = decoderLogThrottle.take()
+          if (!slot.log) return
+          const pending = slot.suppressed > 0 ? ` (${slot.suppressed} repeats suppressed)` : ''
+          bridge?.log(`[vision] RTSP FFmpeg decoder stderr for ${camera.name}${pending}: ${line.slice(0, 200)}`)
+          return
+        }
+        bridge?.log(`[vision] RTSP FFmpeg stderr (${camera.name}): ${line.slice(0, 200)}`)
+      }
+
+      // FFmpeg writes multi-line stderr in arbitrary chunks, so classify whole
+      // lines: a message split across writes ("Last message repe...") would
+      // otherwise dodge the noise filters and reach the log as an unknown error.
+      let stderrLineBuf = ''
+      ffmpeg.stderr!.on('data', (data: Buffer) => {
+        const msg = data.toString()
+        stderrBuf += msg
+        if (stderrBuf.length > 4000) stderrBuf = stderrBuf.slice(-4000)
+        const split = splitStderrLines(stderrLineBuf, msg)
+        stderrLineBuf = split.pending
+        for (const line of split.lines) handleStderrLine(line)
       })
 
       ffmpeg.on('error', (err) => {
@@ -4094,7 +4120,7 @@ async function toolReloadCamera(args: { cameraId?: string; cameraName?: string }
         await stopWebcamWatchById(args.cameraId)
       }
       await stopWebcamWatch(camera)
-      await new Promise((r) => setTimeout(r, 150))
+      await new Promise((r) => setTimeout(r, 600))
       // Reset rate limit timestamp on explicit reload command so reconnection is immediate
       if (camera.deviceId) webcamLastReconnectTs.delete(camera.deviceId)
       await ensureWebcamWatch(camera.id, 24, true)

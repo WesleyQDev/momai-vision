@@ -13,10 +13,13 @@ import {
   PREVIEW_WIDTH_OPTIONS,
   RTSP_CODEC_DEFAULT,
   RTSP_CODEC_OPTIONS,
+  RTSP_DECODER_LOG_WINDOW_MS,
   buildRtspFfmpegArgs,
+  createRtspDecoderLogThrottle,
   decideRtspReconnect,
   describeRtspIssue,
   isBenignRtspStderr,
+  isRtspBitstreamNoise,
   isRtspAuthFailure,
   isRtspMidStreamStalled,
   isRtspSocketLockError,
@@ -24,7 +27,8 @@ import {
   resolveInitialTransport,
   resolvePreviewWidth,
   resolveRtspCodec,
-  shouldLogRetry
+  shouldLogRetry,
+  splitStderrLines
 } from './rtsp'
 
 describe('rtsp connection policy', () => {
@@ -129,6 +133,51 @@ describe('rtsp connection policy', () => {
     expect(isBenignRtspStderr('    Last message repeated 1 times')).toBe(true)
     expect(isBenignRtspStderr('server returned 401 unauthorized')).toBe(false)
     expect(isBenignRtspStderr('')).toBe(false)
+  })
+
+  it('classifies damaged-bitstream noise as throttleable', () => {
+    const decoder = (message: string): string => `[h264 @ 0000025508740a40] ${message}`
+    expect(isRtspBitstreamNoise(decoder('illegal memory management control operation 11'))).toBe(true)
+    expect(isRtspBitstreamNoise(decoder('deblocking_filter_idc 10 out of range'))).toBe(true)
+    expect(isRtspBitstreamNoise(decoder('deblocking filter parameters -14 0 out of range'))).toBe(true)
+    expect(isRtspBitstreamNoise(decoder('number of reference frames (1+1) exceeds max (1; probably corrupt input), discarding one'))).toBe(true)
+    expect(isRtspBitstreamNoise(decoder('cbp too large (82) at 10 23'))).toBe(true)
+    expect(isRtspBitstreamNoise(decoder('out of range intra chroma pred mode'))).toBe(true)
+    expect(isRtspBitstreamNoise(decoder('QP 93 out of range'))).toBe(true)
+    expect(isRtspBitstreamNoise(decoder('mb_type 35 in P slice too large at 25 0'))).toBe(true)
+    expect(isRtspBitstreamNoise(decoder('no frame!'))).toBe(true)
+    expect(isRtspBitstreamNoise('[dec:h264 @ 000001f] Error submitting packet to decoder: Invalid data')).toBe(true)
+    expect(isRtspBitstreamNoise('[vist#0:0/h264 @ 000001f] top block unavailable')).toBe(true)
+    expect(isRtspBitstreamNoise('[in#0/rtsp @ 000001f] Too short data for FU-A H.264 RTP packet')).toBe(true)
+    expect(isRtspBitstreamNoise('[rtsp @ 000001f] method setup failed: 401 unauthorized')).toBe(false)
+    expect(isRtspBitstreamNoise('server returned 401 unauthorized')).toBe(false)
+    expect(isRtspBitstreamNoise('')).toBe(false)
+  })
+
+  it('rebuilds stderr lines split across chunks', () => {
+    const first = splitStderrLines('', '    Last message repe')
+    expect(first.lines).toEqual([])
+    expect(first.pending).toBe('    Last message repe')
+
+    const second = splitStderrLines(first.pending, 'ated 2 times\r\nnext line\n')
+    expect(second.lines).toEqual(['Last message repeated 2 times', 'next line'])
+    expect(second.pending).toBe('')
+  })
+
+  it('flushes a pathological stderr line that never ends', () => {
+    const split = splitStderrLines('', 'x'.repeat(2500))
+    expect(split.lines).toHaveLength(1)
+    expect(split.pending).toBe('')
+  })
+
+  it('logs decoder noise once per window and counts the suppressed repeats', () => {
+    const throttle = createRtspDecoderLogThrottle(RTSP_DECODER_LOG_WINDOW_MS)
+    expect(throttle.take(1_000)).toEqual({ log: true, suppressed: 0 })
+    expect(throttle.take(2_000).log).toBe(false)
+    expect(throttle.take(15_000).log).toBe(false)
+    expect(throttle.take(31_000)).toEqual({ log: true, suppressed: 2 })
+    expect(throttle.take(32_000).log).toBe(false)
+    expect(throttle.take(62_000)).toEqual({ log: true, suppressed: 1 })
   })
 
   it('backs off on socket lock, server errors (5xx/500/400) and port timeouts to let camera recover', () => {

@@ -192,6 +192,10 @@ migrateLegacySharedJsonOnce()
     })
   })
 
+// Frame polling calls get_frame every couple of seconds; logging every slow
+// call buries real problems. Only stalls above this threshold earn a line.
+const SLOW_EXECUTE_LOG_MS = 5000
+
 process.on('message', async (msg: unknown) => {
   if (!msg || typeof msg !== 'object') return
   const message = msg as { type?: string; requestId?: string; payload?: Record<string, unknown> }
@@ -211,7 +215,7 @@ process.on('message', async (msg: unknown) => {
         momai
       })
       const dt = Date.now() - t0
-      if (dt > 1000) {
+      if (dt > SLOW_EXECUTE_LOG_MS) {
         process.send?.({
           type: 'log',
           message: `[vision] execute ${String(payload?.toolName)} took ${dt}ms`

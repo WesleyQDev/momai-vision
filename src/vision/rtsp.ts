@@ -290,6 +290,92 @@ export function isBenignRtspStderr(msg: string): boolean {
   return lower.includes('application provided invalid') && lower.includes('muxer')
 }
 
+/**
+ * Bitstream complaints that surface when the video arrives damaged (packet
+ * loss, camera firmware or a reconnect landing mid-GOP). They repeat for every
+ * lost frame, so the runtime throttles them instead of dropping them: a camera
+ * that keeps corrupting frames must stay visible in the log.
+ *
+ * Classification is structural on purpose: libavcodec keeps inventing new
+ * error strings, but every decoder line carries its context tag
+ * (`[h264 @ ...]`, `[vist#0:0/h264 @ ...]`, `[dec:h264 @ ...]`).
+ */
+const DECODER_ERROR_TAG_RE =
+  /\[[^\]]*(?:\b(?:h264|hevc|h265|mpeg4|mpeg2video|av1|vp8|vp9)\b|dec:)[^\]]*\s@[^\]]*\]/i
+
+/** Corruption reported by the RTSP depacketizer before decoding starts. */
+const RTSP_PACKET_NOISE_PATTERNS = [
+  'too short data for',
+  'rtp: missed',
+  'circular buffer overflow',
+  'max delay reached',
+  'jitter buffer'
+]
+
+export function isRtspBitstreamNoise(msg: string): boolean {
+  if (!msg) return false
+  if (DECODER_ERROR_TAG_RE.test(msg)) return true
+  const lower = msg.toLowerCase()
+  return RTSP_PACKET_NOISE_PATTERNS.some((pattern) => lower.includes(pattern))
+}
+
+/**
+ * Rebuild whole stderr lines from arbitrarily split chunks. FFmpeg can write a
+ * message in pieces, and a half line ("Last message repe") dodges the noise
+ * filters and reaches the log as an unknown error.
+ */
+export function splitStderrLines(
+  pending: string,
+  chunk: string,
+  maxPending = 2000
+): { lines: string[]; pending: string } {
+  let buffer = pending + chunk
+  const lines: string[] = []
+  let newline = buffer.indexOf('\n')
+  while (newline !== -1) {
+    const line = buffer.slice(0, newline).replace(/\r$/, '').trim()
+    buffer = buffer.slice(newline + 1)
+    if (line) lines.push(line)
+    newline = buffer.indexOf('\n')
+  }
+  // A pathological stream without newlines must not grow forever.
+  if (buffer.length > maxPending) {
+    const line = buffer.trim()
+    buffer = ''
+    if (line) lines.push(line)
+  }
+  return { lines, pending: buffer }
+}
+
+/** At most one decoder-error line per camera per window. */
+export const RTSP_DECODER_LOG_WINDOW_MS = 30_000
+
+export type RtspDecoderLogSlot = { log: boolean; suppressed: number }
+
+/**
+ * Throttle for repeated decoder errors. `take()` reports whether the line
+ * should be logged and, when it should, how many identical bursts were
+ * suppressed since the previous logged line.
+ */
+export function createRtspDecoderLogThrottle(
+  windowMs: number = RTSP_DECODER_LOG_WINDOW_MS
+): { take(now?: number): RtspDecoderLogSlot } {
+  let lastLoggedAt = 0
+  let suppressed = 0
+  return {
+    take(now: number = Date.now()): RtspDecoderLogSlot {
+      if (lastLoggedAt > 0 && now - lastLoggedAt < windowMs) {
+        suppressed += 1
+        return { log: false, suppressed: 0 }
+      }
+      const pending = suppressed
+      suppressed = 0
+      lastLoggedAt = now
+      return { log: true, suppressed: pending }
+    }
+  }
+}
+
 export type RtspReconnectDecision =
   | { action: 'retry-same-transport'; delayMs: number }
   | { action: 'backoff-auth'; delayMs: number }
