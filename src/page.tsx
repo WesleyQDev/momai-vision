@@ -1010,6 +1010,7 @@ interface CustomSelectOption<T extends string = string> {
   icon?: React.ReactNode
   disabled?: boolean
   badge?: string
+  badgeVariant?: 'default' | 'success'
 }
 
 function CustomSelect<T extends string = string>({
@@ -1103,15 +1104,28 @@ function CustomSelect<T extends string = string>({
           {selectedOption?.icon}
           <span className="truncate">{selectedOption?.label || resolvedPlaceholder}</span>
         </span>
-        <svg
-          className={`w-3.5 h-3.5 text-text-muted shrink-0 transition-transform duration-200 ${open ? 'rotate-180 text-emerald-400' : ''}`}
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.2"
-        >
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
+        <span className="flex items-center gap-1.5 shrink-0">
+          {selectedOption?.badge && (
+            <span
+              className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                selectedOption.badgeVariant === 'success'
+                  ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+                  : 'bg-input border border-border/30 text-text-muted'
+              }`}
+            >
+              {selectedOption.badge}
+            </span>
+          )}
+          <svg
+            className={`w-3.5 h-3.5 text-text-muted shrink-0 transition-transform duration-200 ${open ? 'rotate-180 text-emerald-400' : ''}`}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </span>
       </button>
 
       {open && pos && createPortal(
@@ -1149,7 +1163,13 @@ function CustomSelect<T extends string = string>({
                 </span>
                 <span className="flex items-center gap-1.5 shrink-0">
                   {opt.badge && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-input border border-border/30 text-text-muted font-normal">
+                    <span
+                      className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                        opt.badgeVariant === 'success'
+                          ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+                          : 'bg-input border border-border/30 text-text-muted'
+                      }`}
+                    >
                       {opt.badge}
                     </span>
                   )}
@@ -3546,6 +3566,39 @@ function AddCameraModal({
     }
   }, [isOpen, isActive, activeTab, fetchDiscoveredCameras])
 
+  const isDiscoveredCameraActive = useCallback(
+    (cam: { id: string; name: string; ip: string; suggestedUrl: string }): boolean => {
+      const cleanSuggested = parseCameraAuth(cam.suggestedUrl || '').cleanUrl.trim()
+      const cleanKey = cleanSuggested ? credentialKey(cleanSuggested) : ''
+      const targetIp = cam.ip?.trim()
+      const targetName = cam.name?.trim().toLowerCase()
+
+      const activeIpCameras = allCameras.filter(
+        (c) => c.source === 'ip' && selectedCameraIds.includes(c.id)
+      )
+
+      const matchActive = (urlOrId: string | undefined, cameraName?: string): boolean => {
+        if (targetName && cameraName && cameraName.trim().toLowerCase() === targetName) {
+          return true
+        }
+        if (!urlOrId) return false
+        if (cam.id && urlOrId === cam.id) return true
+        if (cleanSuggested && (urlOrId === cleanSuggested || urlOrId === `ip:${cleanSuggested}`)) return true
+        const parsed = parseCameraAuth(urlOrId.replace(/^ip:/, '')).cleanUrl
+        if (cleanSuggested && parsed === cleanSuggested) return true
+        if (cleanKey && credentialKey(parsed) === cleanKey) return true
+        if (targetIp && (parsed.includes(`://${targetIp}:`) || parsed.includes(`://${targetIp}/`))) return true
+        return false
+      }
+
+      return (
+        activeIpCameras.some((c) => matchActive(c.id, c.name) || matchActive(c.url, c.name)) ||
+        selectedCameraIds.some((sId) => matchActive(sId))
+      )
+    },
+    [allCameras, selectedCameraIds]
+  )
+
   const handleSelectDiscoveredCamera = (url: string) => {
     if (!url) {
       setSelectedDiscoveredUrl('')
@@ -3565,6 +3618,11 @@ function AddCameraModal({
     const found = discoveredIpCameras.find((d) => d.suggestedUrl === url)
     if (found && (!ipName.trim() || ipName.trim() === t('cameras.defaultIpName'))) {
       setIpName(found.name)
+    }
+    if (found && isDiscoveredCameraActive(found)) {
+      setModalError(t('cameras.addModal.alreadyRegistered'))
+    } else {
+      setModalError(null)
     }
   }
 
@@ -3696,15 +3754,15 @@ function AddCameraModal({
     const id = `ip:${cleanUrl}`
     const cleanKey = credentialKey(cleanUrl)
     const isAlreadyActive =
-      ipCameras.some((c) => {
-        if (!c || !c.url) return c?.id === id
-        const cClean = parseCameraAuth(c.url).cleanUrl
-        return c.id === id || cClean === cleanUrl || credentialKey(cClean) === cleanKey
-      }) ||
       selectedCameraIds.some((sId) => {
         if (sId === id || sId === cleanUrl || sId === `ip:${cleanUrl}`) return true
         const parsedSId = parseCameraAuth(sId.replace(/^ip:/, '')).cleanUrl
         return parsedSId === cleanUrl || credentialKey(parsedSId) === cleanKey
+      }) ||
+      ipCameras.some((c) => {
+        if (!c || !c.url) return c?.id === id
+        const cClean = parseCameraAuth(c.url).cleanUrl
+        return c.id === id || cClean === cleanUrl || credentialKey(cClean) === cleanKey
       })
     if (isAlreadyActive) {
       setModalError(t('cameras.addModal.alreadyRegistered'))
@@ -3818,15 +3876,15 @@ function AddCameraModal({
       const id = `ip:${cleanUrl}`
       const cleanKey = credentialKey(cleanUrl)
       const isAlreadyActive =
-        ipCameras.some((c) => {
-          if (!c || !c.url) return c?.id === id
-          const cClean = parseCameraAuth(c.url).cleanUrl
-          return c.id === id || cClean === cleanUrl || credentialKey(cClean) === cleanKey
-        }) ||
         selectedCameraIds.some((sId) => {
           if (sId === id || sId === cleanUrl || sId === `ip:${cleanUrl}`) return true
           const parsedSId = parseCameraAuth(sId.replace(/^ip:/, '')).cleanUrl
           return parsedSId === cleanUrl || credentialKey(parsedSId) === cleanKey
+        }) ||
+        ipCameras.some((c) => {
+          if (!c || !c.url) return c?.id === id
+          const cClean = parseCameraAuth(c.url).cleanUrl
+          return c.id === id || cClean === cleanUrl || credentialKey(cClean) === cleanKey
         })
       if (isAlreadyActive) {
         setModalError(t('cameras.addModal.alreadyRegistered'))
@@ -3877,11 +3935,15 @@ function AddCameraModal({
     .filter((cam) => !selectedCameraIds.includes(cam.id) && !pendingWebcamIds.includes(cam.id))
     .map((cam) => ({ value: cam.id, label: formatCameraName(cam.name, cam.source, t), badge: t('cameras.addModal.available') }))
 
-  const discoveredOptions: CustomSelectOption[] = discoveredIpCameras.map((cam) => ({
-    value: cam.suggestedUrl,
-    label: `${cam.name} (${cam.ip})`,
-    badge: 'ONVIF'
-  }))
+  const discoveredOptions: CustomSelectOption[] = discoveredIpCameras.map((cam) => {
+    const isActive = isDiscoveredCameraActive(cam)
+    return {
+      value: cam.suggestedUrl,
+      label: `${cam.name} (${cam.ip})`,
+      badge: isActive ? t('cameras.addModal.activeBadge') : 'ONVIF',
+      badgeVariant: isActive ? 'success' : 'default'
+    }
+  })
 
   const modalContent = (
     <div
@@ -5608,20 +5670,21 @@ function ExpandedPrintModal({
     snap.imageDataUri ||
     `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${snap.id}.jpg`)}`
 
-  return (
+  const modalContent = (
     <div
-      className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md animate-fadeIn select-none"
+      className="absolute inset-0 z-50 bg-bg animate-fadeIn select-none"
       onContextMenu={(e) => onContextMenu?.(e, snap)}
     >
       <div className="h-full flex flex-col">
-        <div className="flex items-center justify-between px-5 py-3 border-b border-border/40 bg-card shrink-0">
-          <div>
-            <h2 className="text-sm font-bold text-text">{t('gallery.cameraPrints')}</h2>
-            <p className="text-xs text-text-muted">{formatTime(snap.ts, locale)}</p>
+        <div className="flex items-center justify-between gap-4 px-5 py-3 border-b border-border/40 bg-card shrink-0">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-text truncate">{t('gallery.printAlt')}</h2>
+            <p className="text-xs text-text-muted tabular-nums">{formatTime(snap.ts, locale)}</p>
           </div>
           <button
             onClick={onClose}
-            className="text-text-muted hover:text-text rounded-lg p-1.5 hover:bg-input transition-colors"
+            title={t('common.close')}
+            className="text-text-muted hover:text-text rounded-md p-1.5 hover:bg-input transition-colors shrink-0 cursor-pointer"
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="18" y1="6" x2="6" y2="18" />
@@ -5632,18 +5695,22 @@ function ExpandedPrintModal({
 
         <div
           onContextMenu={(e) => onContextMenu?.(e, snap)}
-          className="flex-1 min-h-0 relative bg-black flex items-center justify-center p-4 cursor-context-menu"
+          className="flex-1 min-h-0 bg-bg flex items-center justify-center p-5 cursor-context-menu"
         >
-          <img src={imgSrc} alt={snap.description || t('gallery.printAlt')} className="max-w-full max-h-full object-contain" />
+          <img
+            src={imgSrc}
+            alt={snap.description || t('gallery.printAlt')}
+            className="max-w-full max-h-full object-contain rounded-md border border-border/40"
+          />
         </div>
 
-        <div className="px-4 py-3 bg-card border-t border-border/40 flex flex-wrap items-center justify-between gap-3 shrink-0">
-          <p className="text-xs text-text-muted max-w-xl">{snap.description || t('gallery.noDescription')}</p>
+        <div className="px-5 py-3 bg-card border-t border-border/40 flex items-center justify-between gap-4 shrink-0">
+          <p className="text-xs text-text-muted min-w-0 truncate">{snap.description || t('gallery.noDescription')}</p>
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => void onShare?.(snap)}
               title={t('common.share')}
-              className="text-xs font-medium rounded-lg bg-input hover:bg-input/80 text-text border border-border/40 px-3 py-1.5 transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+              className="text-xs font-medium rounded-md bg-input hover:bg-card text-text-muted hover:text-text border border-border/40 px-3 py-1.5 transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="18" cy="5" r="3" />
@@ -5657,7 +5724,7 @@ function ExpandedPrintModal({
             <button
               disabled={busy}
               onClick={() => void onDelete(snap.id)}
-              className="text-xs font-medium rounded-lg bg-error hover:bg-error/80 disabled:opacity-50 text-text px-3 py-1.5 transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+              className="text-xs font-medium rounded-md bg-input hover:bg-card text-text-muted hover:text-error border border-border/40 px-3 py-1.5 transition-colors disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
             >
               <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -5669,6 +5736,9 @@ function ExpandedPrintModal({
       </div>
     </div>
   )
+
+  const portalTarget = sdk.ui?.overlayRoot?.()
+  return portalTarget ? createPortal(modalContent, portalTarget) : modalContent
 }
 
 // ---------------------------------------------------------------------------
@@ -5695,27 +5765,29 @@ function ExpandedAlertModal({
       ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
       : '')
 
-  return (
+  // Descrição e trigger repetem a mesma informação; mostra só uma delas.
+  const secondary = alert.description || (alert.triggeredBy ? localizedTriggerLabel(alert, t) : '')
+
+  const modalContent = (
     <div
-      className="absolute inset-0 z-50 bg-black/90 backdrop-blur-md animate-fadeIn flex flex-col select-none"
+      className="absolute inset-0 z-50 bg-bg animate-fadeIn flex flex-col select-none"
       onContextMenu={(e) => onContextMenu?.(e, alert)}
     >
-      <div className="flex items-center justify-between px-5 py-3 border-b border-border/40 bg-card shrink-0">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
-          <h2 className="text-sm font-bold text-text truncate">
+      <div className="flex items-center justify-between gap-4 px-5 py-3 border-b border-border/40 bg-card shrink-0">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold text-text truncate">
             {formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')}
-            {alert.className ? ` · ${localizedClassLabel(alert.className, t)}` : ''}
+            {alert.className ? <span className="capitalize"> · {localizedClassLabel(alert.className, t)}</span> : null}
             {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
           </h2>
-          <span className="text-xs text-text-muted shrink-0">({formatTime(alert.ts, locale)})</span>
+          <p className="text-xs text-text-muted tabular-nums">{formatTime(alert.ts, locale)}</p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           <button
             onClick={() => void onShare?.(alert)}
             title={t('common.share')}
             aria-label={t('common.share')}
-            className="text-xs font-medium rounded-lg bg-input hover:bg-input/80 text-text border border-border/40 px-2.5 py-1.5 transition-colors shrink-0 flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+            className="text-xs font-medium rounded-md bg-input hover:bg-card text-text-muted hover:text-text border border-border/40 px-2.5 py-1.5 transition-colors flex items-center gap-1.5 cursor-pointer"
           >
             <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="18" cy="5" r="3" />
@@ -5728,7 +5800,7 @@ function ExpandedAlertModal({
           </button>
           <button
             onClick={onClose}
-            className="text-text-muted hover:text-text rounded-lg p-1.5 hover:bg-input transition-colors"
+            className="text-text-muted hover:text-text rounded-md p-1.5 hover:bg-input transition-colors cursor-pointer"
             title={t('common.close')}
           >
             <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -5741,29 +5813,30 @@ function ExpandedAlertModal({
 
       <div
         onContextMenu={(e) => onContextMenu?.(e, alert)}
-        className="flex-1 min-h-0 relative bg-black flex items-center justify-center p-4 cursor-context-menu"
+        className="flex-1 min-h-0 bg-bg p-5 flex items-center justify-center cursor-context-menu"
       >
         {imgSrc ? (
           <AlertCanvasOverlay
             imageDataUri={imgSrc}
             boxes={alert.boxes}
             objectFit="object-contain"
+            className="rounded-md border border-border/40"
           />
         ) : (
           <p className="text-sm text-text-muted">{t('alerts.noImage')}</p>
         )}
       </div>
 
-      {alert.description || alert.triggeredBy ? (
-        <div className="px-5 py-3 bg-card border-t border-border/40 shrink-0 flex items-center gap-2">
-          <p className="text-xs text-text-muted">{alert.description}</p>
-          {alert.triggeredBy ? (
-            <span className="text-xs text-text-muted shrink-0">{localizedTriggerLabel(alert, t)}</span>
-          ) : null}
+      {secondary ? (
+        <div className="px-5 py-3 bg-card border-t border-border/40 shrink-0">
+          <p className="text-xs text-text-muted truncate">{secondary}</p>
         </div>
       ) : null}
     </div>
   )
+
+  const portalTarget = sdk.ui?.overlayRoot?.()
+  return portalTarget ? createPortal(modalContent, portalTarget) : modalContent
 }
 
 interface AddEditMonitorModalProps {
@@ -8180,10 +8253,137 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
   const pausedMonitors = monitors.filter((m) => m.paused)
 
   const tabClass = (tab: string) =>
-    `px-3.5 py-1.5 text-xs font-medium rounded-full transition-all ${activeTab === tab
-      ? 'bg-emerald-600 text-white shadow-md'
-      : 'bg-input text-text-muted hover:text-text hover:bg-card border border-border/30'
+    `px-3.5 py-1.5 text-xs font-medium rounded-md transition-all border ${activeTab === tab
+      ? 'bg-card text-text border-border/60 shadow-sm'
+      : 'bg-input text-text-muted border-border/30 hover:text-text hover:bg-card'
     }`
+
+  /** Nome amigável da câmera do monitor, sem vazar ids internos (`webcam:…`). */
+  const monitorCameraLabel = (m: MonitorInfo): string | null => {
+    for (const candidate of [m.cameraName, m.cameraId]) {
+      if (!candidate) continue
+      const found = cameras.find((c) => c.id === candidate || c.name === candidate)
+      if (found?.name) return formatCameraName(found.name, found.source, t)
+      if (!/^(webcam|ip):/i.test(candidate)) return formatCameraName(candidate, 'webcam', t)
+    }
+    return null
+  }
+
+  const monitorTitle = (m: MonitorInfo): string =>
+    m.label || monitorCameraLabel(m) || t('monitoring.defaultName')
+
+  const setMonitorPausedState = async (m: MonitorInfo, paused: boolean) => {
+    const prevMonitors = monitors
+    const updated = prevMonitors.map((item) => (item.id === m.id ? { ...item, paused } : item))
+    setMonitors(updated)
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
+      }
+    } catch {}
+    try {
+      await command(paused ? 'pause_monitoring' : 'resume_monitoring', { monitorId: m.id })
+      void refresh()
+    } catch (err) {
+      setMonitors(prevMonitors)
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
+        }
+      } catch {}
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const removeMonitor = async (m: MonitorInfo) => {
+    const prevMonitors = monitors
+    const updated = prevMonitors.filter((item) => item.id !== m.id)
+    setMonitors(updated)
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
+      }
+    } catch {}
+    try {
+      await command('stop_monitoring', { monitorId: m.id })
+      void refresh()
+    } catch (err) {
+      setMonitors(prevMonitors)
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
+        }
+      } catch {}
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const renderMonitorCard = (m: MonitorInfo, isPaused: boolean) => {
+    const cameraLabel = monitorCameraLabel(m)
+    const meta = [cameraLabel, m.cooldownSec ? t('monitoring.interval', { value: formatCooldown(m.cooldownSec) }) : null]
+      .filter(Boolean)
+      .join(' · ')
+
+    return (
+      <div
+        key={m.id}
+        className={`flex items-center gap-3 rounded-lg border border-border/40 px-4 py-3 transition-colors hover:border-border/60 ${
+          isPaused ? 'bg-card/60' : 'bg-card'
+        }`}
+      >
+        <span
+          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+            isPaused ? 'bg-text-muted/50' : 'bg-emerald-400'
+          }`}
+        />
+        <div className="min-w-0 flex-1">
+          <p className={`text-sm truncate ${isPaused ? 'font-medium text-text-muted' : 'font-medium text-text'}`}>
+            {monitorTitle(m)}
+          </p>
+          {meta ? (
+            <p className="text-xs text-text-muted truncate mt-0.5">{meta}</p>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            onClick={() => void setMonitorPausedState(m, !isPaused)}
+            className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-md bg-input hover:bg-card border border-border/30 transition-colors cursor-pointer"
+          >
+            {isPaused ? t('monitoring.resume') : t('common.pause')}
+          </button>
+          <button
+            onClick={() => {
+              setEditingMonitor(m)
+              setIsMonitorModalOpen(true)
+            }}
+            className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-md bg-input hover:bg-card border border-border/30 transition-colors cursor-pointer"
+          >
+            {t('common.edit')}
+          </button>
+          <button
+            onClick={() => void removeMonitor(m)}
+            title={t('monitoring.deleteMonitor')}
+            aria-label={t('monitoring.deleteMonitorName', { name: monitorTitle(m) })}
+            className="p-1.5 rounded-md text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors cursor-pointer"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const openAutomationModal = () => {
+    const evt = new CustomEvent('momai:open_automation_modal', {
+      detail: { triggerProvider: 'momai-vision' }
+    })
+    window.dispatchEvent(evt)
+    if (window.parent && window.parent !== window) {
+      window.parent.dispatchEvent(evt)
+    }
+  }
 
   return (
     <div className="relative w-full h-full min-h-screen max-h-screen overflow-y-auto p-4 md:p-6 text-text custom-scrollbar">
@@ -8193,30 +8393,21 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       <header className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-xl font-bold flex items-center gap-2 text-text">
-            <span className="text-emerald-400">
+            <span className="text-text-muted">
               <VisionIcon />
             </span>{' '}
             MomAI Vision
           </h1>
-          <p className="text-xs text-text-muted mt-0.5">
-            {t('page.subtitle')}
-          </p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-text-muted">
-            {activeMonitors.length !== 1 ? t('page.activeOther', { count: activeMonitors.length }) : t('page.activeOne', { count: activeMonitors.length })}
-            {pausedMonitors.length > 0
-              ? pausedMonitors.length !== 1 ? t('monitoring.pausedSuffixOther', { count: pausedMonitors.length }) : t('monitoring.pausedSuffixOne', { count: pausedMonitors.length })
-              : ''}
-          </span>
+        <div className="flex items-center gap-2 ml-auto">
           <button
             disabled={isRefreshing}
             onClick={() => void refresh()}
-            className="text-xs rounded-lg bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-3 py-1.5 transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-60"
+            className="text-xs rounded-md bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-3 py-1.5 transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-60"
             title={t('page.refreshCameras')}
           >
             <svg
-              className={`w-3.5 h-3.5 text-emerald-400 transition-transform ${isRefreshing ? 'animate-spin' : ''}`}
+              className={`w-3.5 h-3.5 transition-transform ${isRefreshing ? 'animate-spin' : ''}`}
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
@@ -8294,280 +8485,55 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           </div>
 
 {!expandedCamera && (
-          <div className="mt-3 pt-1">
-            <div className="flex items-center gap-2.5 mb-4">
-              <div
-                className={`w-2.5 h-2.5 rounded-full ${
-                  activeMonitors.length > 0
-                    ? 'bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(52,211,153,0.5)]'
-                    : 'bg-amber-400/80 shadow-[0_0_8px_rgba(251,191,36,0.4)]'
-                }`}
-              />
-              <h3 className="text-lg font-bold text-text tracking-tight">
+          <div className="mt-6">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-sm font-semibold text-text">
                 {activeMonitors.length > 0 ? t('monitoring.sectionActive') : t('monitoring.sectionIdle')}
               </h3>
               {monitors.length > 0 && (
-                <span className="text-xs text-text-muted font-medium">
-                  ({activeMonitors.length !== 1 ? t('page.activeOther', { count: activeMonitors.length }) : t('page.activeOne', { count: activeMonitors.length })}
-                  {pausedMonitors.length > 0 ? (pausedMonitors.length !== 1 ? t('monitoring.pausedSuffixOther', { count: pausedMonitors.length }) : t('monitoring.pausedSuffixOne', { count: pausedMonitors.length })) : ''})
-                </span>
+                <button
+                  type="button"
+                  onClick={openAutomationModal}
+                  className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-md bg-input hover:bg-card border border-border/30 transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  {t('monitoring.addMonitor')}
+                </button>
               )}
             </div>
 
             {monitors.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-border/50 bg-card p-8 flex flex-col items-center justify-center text-center gap-3 shadow-sm">
-                <div className="w-12 h-12 rounded-2xl bg-input/60 border border-border/40 flex items-center justify-center text-emerald-400">
-                  <VisionIcon className="w-6 h-6" />
-                </div>
-                <div className="space-y-1">
-                  <h4 className="text-sm font-semibold text-text">{t('monitoring.emptyConfig')}</h4>
-                  <p className="text-xs text-text-muted max-w-sm">
-                    {t('monitoring.emptyConfigHint')}
-                  </p>
-                </div>
+              <div className="rounded-lg border border-border/40 bg-card/40 px-6 py-8 text-center">
+                <p className="text-sm font-medium text-text">{t('monitoring.emptyConfig')}</p>
+                <p className="text-xs text-text-muted mt-1 max-w-md mx-auto">
+                  {t('monitoring.emptyConfigHint')}
+                </p>
                 <button
                   type="button"
-                  onClick={() => {
-                    const evt = new CustomEvent('momai:open_automation_modal', {
-                      detail: { triggerProvider: 'momai-vision' }
-                    })
-                    window.dispatchEvent(evt)
-                    if (window.parent && window.parent !== window) {
-                      window.parent.dispatchEvent(evt)
-                    }
-                  }}
-                  className="mt-2 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl px-4 py-2.5 transition-all shadow-md flex items-center gap-2 active:scale-95 cursor-pointer"
+                  onClick={openAutomationModal}
+                  className="mt-4 text-xs font-medium text-text-muted hover:text-text px-3 py-1.5 rounded-md bg-input hover:bg-card border border-border/30 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
                 >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <line x1="12" y1="5" x2="12" y2="19" />
-                    <line x1="5" y1="12" x2="19" y2="12" />
+                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <path d="M12 5v14M5 12h14" />
                   </svg>
                   <span>{t('monitoring.addMonitor')}</span>
                 </button>
               </div>
             ) : (
               <div className="space-y-4">
-                <div className="grid grid-cols-1 gap-3">
-                  {activeMonitors.map((m) => {
-                    return (
-                      <div
-                        key={m.id}
-                        className="flex items-center justify-between p-4 gap-4 rounded-xl bg-card border border-border/40 shadow-sm hover:border-border transition-all overflow-hidden"
-                      >
-                        <div className="min-w-0 flex-1 overflow-hidden">
-                          <div className="flex items-center gap-2 flex-wrap min-w-0">
-                            <span className="text-sm font-semibold text-text truncate max-w-full block">
-                              {m.label || m.cameraName || m.cameraId}
-                            </span>
-                            {m.cameraName && m.label && (
-                              <span className="text-xs text-text-muted font-normal truncate max-w-full block">
-                                · {formatCameraName(m.cameraName, 'webcam', t)}
-                              </span>
-                            )}
-                            {m.cooldownSec ? (
-                              <span className="text-xs text-text-muted font-normal shrink-0">
-                                · {t('monitoring.interval', { value: formatCooldown(m.cooldownSec) })}
-                              </span>
-                            ) : null}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <button
-                            onClick={() => {
-                              setEditingMonitor(m)
-                              setIsMonitorModalOpen(true)
-                            }}
-                            className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-lg bg-input hover:bg-card border border-border/30 transition-all"
-                          >
-                            {t('common.edit')}
-                          </button>
-                          <button
-                            onClick={async () => {
-                              const prevMonitors = monitors
-                              const updated = prevMonitors.map((item) => (item.id === m.id ? { ...item, paused: true } : item))
-                              setMonitors(updated)
-                              try {
-                                if (typeof localStorage !== 'undefined') {
-                                  localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
-                                }
-                              } catch {}
-                              try {
-                                await command('pause_monitoring', { monitorId: m.id })
-                                void refresh()
-                              } catch (err) {
-                                setMonitors(prevMonitors)
-                                try {
-                                  if (typeof localStorage !== 'undefined') {
-                                    localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
-                                  }
-                                } catch {}
-                                setError(err instanceof Error ? err.message : String(err))
-                              }
-                            }}
-                            className="text-xs font-medium text-amber-400 hover:text-amber-300 px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 transition-all"
-                          >
-                            {t('common.pause')}
-                          </button>
-                          <button
-                            onClick={async () => {
-                              const prevMonitors = monitors
-                              const updated = prevMonitors.filter((item) => item.id !== m.id)
-                              setMonitors(updated)
-                              try {
-                                if (typeof localStorage !== 'undefined') {
-                                  localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
-                                }
-                              } catch {}
-                              try {
-                                await command('stop_monitoring', { monitorId: m.id })
-                                void refresh()
-                              } catch (err) {
-                                setMonitors(prevMonitors)
-                                try {
-                                  if (typeof localStorage !== 'undefined') {
-                                    localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
-                                  }
-                                } catch {}
-                                setError(err instanceof Error ? err.message : String(err))
-                              }
-                            }}
-                            title={t('monitoring.deleteMonitor')}
-                            aria-label={t('monitoring.deleteMonitorName', { name: m.label || m.cameraName || m.cameraId })}
-                            className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all cursor-pointer"
-                          >
-                            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2 2v2" />
-                            </svg>
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  })}
-
-                  {/* Card para Adicionar Monitoramento Abaixo */}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const evt = new CustomEvent('momai:open_automation_modal', {
-                        detail: { triggerProvider: 'momai-vision' }
-                      })
-                      window.dispatchEvent(evt)
-                      if (window.parent && window.parent !== window) {
-                        window.parent.dispatchEvent(evt)
-                      }
-                    }}
-                    className="group flex items-center justify-center gap-2 p-3 rounded-xl bg-input/20 hover:bg-input/50 transition-all duration-200 cursor-pointer text-text-muted hover:text-text"
-                  >
-                    <div className="w-6 h-6 rounded-lg bg-card text-emerald-400 flex items-center justify-center group-hover:scale-105 transition-transform">
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                        <path d="M12 5v14M5 12h14" />
-                      </svg>
-                    </div>
-                    <span className="text-xs font-semibold">{t('monitoring.addMonitor')}</span>
-                  </button>
+                <div className="space-y-2">
+                  {activeMonitors.map((m) => renderMonitorCard(m, false))}
                 </div>
 
                 {pausedMonitors.length > 0 && (
-                  <div className="-mt-2">
-                    <h4 className="text-xs font-semibold text-text-muted mb-1.5 uppercase tracking-wider">
+                  <div>
+                    <h4 className="text-xs font-medium text-text-muted mb-2">
                       {t('monitoring.pausedHeader', { count: pausedMonitors.length })}
                     </h4>
-                    <div className="grid grid-cols-1 gap-2.5 opacity-80">
-                      {pausedMonitors.map((m) => {
-                        return (
-                          <div
-                            key={m.id}
-                            className="flex items-center justify-between p-3.5 gap-4 rounded-xl bg-card/60 border border-border/30 overflow-hidden"
-                          >
-                            <div className="min-w-0 flex-1 overflow-hidden">
-                              <div className="flex items-center gap-2 flex-wrap min-w-0">
-                                <span className="text-sm font-medium text-text truncate max-w-full block">
-                                  {m.label || m.cameraName || m.cameraId}
-                                </span>
-                                {m.cameraName && m.label && (
-                                  <span className="text-xs text-text-muted truncate max-w-full block">
-                                    · {formatCameraName(m.cameraName, 'webcam', t)}
-                                  </span>
-                                )}
-                                {m.cooldownSec ? (
-                                  <span className="text-xs text-text-muted shrink-0">
-                                    · {t('monitoring.interval', { value: formatCooldown(m.cooldownSec) })}
-                                  </span>
-                                ) : null}
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <button
-                                onClick={async () => {
-                                  const prevMonitors = monitors
-                                  const updated = prevMonitors.map((item) => (item.id === m.id ? { ...item, paused: false } : item))
-                                  setMonitors(updated)
-                                  try {
-                                    if (typeof localStorage !== 'undefined') {
-                                      localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
-                                    }
-                                  } catch {}
-                                  try {
-                                    await command('resume_monitoring', { monitorId: m.id })
-                                    void refresh()
-                                  } catch (err) {
-                                    setMonitors(prevMonitors)
-                                    try {
-                                      if (typeof localStorage !== 'undefined') {
-                                        localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
-                                      }
-                                    } catch {}
-                                    setError(err instanceof Error ? err.message : String(err))
-                                  }
-                                }}
-                                className="text-xs font-medium text-emerald-400 hover:text-emerald-300 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-all"
-                              >
-                                {t('monitoring.resume')}
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setEditingMonitor(m)
-                                  setIsMonitorModalOpen(true)
-                                }}
-                                className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-lg bg-input hover:bg-card border border-border/30 transition-all"
-                              >
-                                {t('common.edit')}
-                              </button>
-                              <button
-                                onClick={async () => {
-                                  const prevMonitors = monitors
-                                  const updated = prevMonitors.filter((item) => item.id !== m.id)
-                                  setMonitors(updated)
-                                  try {
-                                    if (typeof localStorage !== 'undefined') {
-                                      localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
-                                    }
-                                  } catch {}
-                                  try {
-                                    await command('stop_monitoring', { monitorId: m.id })
-                                    void refresh()
-                                  } catch (err) {
-                                    setMonitors(prevMonitors)
-                                    try {
-                                      if (typeof localStorage !== 'undefined') {
-                                        localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
-                                      }
-                                    } catch {}
-                                    setError(err instanceof Error ? err.message : String(err))
-                                  }
-                                }}
-                                title={t('monitoring.deleteMonitor')}
-                                aria-label={t('monitoring.deleteMonitorName', { name: m.label || m.cameraName || m.cameraId })}
-                                className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 p-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-all cursor-pointer"
-                              >
-                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                                  <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2 2v2" />
-                                </svg>
-                              </button>
-                            </div>
-                          </div>
-                        )
-                      })}
+                    <div className="space-y-2">
+                      {pausedMonitors.map((m) => renderMonitorCard(m, true))}
                     </div>
                   </div>
                 )}
@@ -8580,30 +8546,30 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
 
       {/* Tab: Alerts Feed */}
       {activeTab === 'alerts' ? (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between mb-1">
+        <section className="space-y-2.5">
+          <div className="flex items-center justify-between gap-3 mb-3">
             <h3 className="text-sm font-semibold text-text">{t('alerts.title')}</h3>
             {alerts.length > 0 ? (
               confirmClearAlerts ? (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-red-600 dark:text-red-400 font-semibold">{t('alerts.clearPrompt')}</span>
+                  <span className="text-xs text-text-muted">{t('alerts.clearPrompt')}</span>
                   <button
                     onClick={() => void handleClearAlerts()}
-                    className="text-xs px-2.5 py-1 rounded-lg bg-error hover:bg-error/80 text-text font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
+                    className="text-xs px-2.5 py-1 rounded-md bg-error hover:bg-error/80 text-text font-medium transition-colors cursor-pointer"
                   >
                     {t('alerts.confirmYes')}
                   </button>
                   <button
                     onClick={() => setConfirmClearAlerts(false)}
-                    className="text-xs px-2.5 py-1 rounded-lg bg-card text-text-muted hover:text-text border border-border/40 transition-colors font-medium cursor-pointer"
+                    className="text-xs px-2.5 py-1 rounded-md bg-input text-text-muted hover:text-text border border-border/40 transition-colors font-medium cursor-pointer"
                   >
-                    Cancelar
+                    {t('common.cancel')}
                   </button>
                 </div>
               ) : (
                 <button
                   onClick={() => setConfirmClearAlerts(true)}
-                  className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-colors flex items-center gap-1 font-medium cursor-pointer"
+                  className="text-xs text-text-muted hover:text-text transition-colors flex items-center gap-1 font-medium cursor-pointer"
                 >
                   <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -8614,7 +8580,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             ) : null}
           </div>
           {alerts.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-border/40 bg-card/30 p-8 text-center text-sm text-text-muted">
+            <div className="rounded-lg border border-border/40 bg-card/40 px-6 py-8 text-center text-xs text-text-muted">
               {t('alerts.emptyFeed')}
             </div>
           ) : (
@@ -8627,56 +8593,59 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                     (alert.snapshotId
                       ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
                       : '')
+                  const cameraLabel = formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')
+                  const classLabel = alert.className ? localizedClassLabel(alert.className, t) : ''
+                  const confidence = alert.confidence ? `${Math.round(alert.confidence * 100)}%` : ''
+                  // Descrição e trigger repetem a mesma informação ("Detectei pessoa" /
+                  // "Pessoa"); mostra só uma delas.
+                  const secondary = alert.description || (alert.triggeredBy ? localizedTriggerLabel(alert, t) : '')
                   return (
                     <div
                       key={alertKey(alert)}
                       onContextMenu={(e) => handleAlertContextMenu(e, alert)}
-                      className="flex gap-3.5 items-center justify-between rounded-2xl border border-border/40 bg-card p-3.5 hover:border-border/80 transition-all shadow-md select-none"
+                      className="flex items-center gap-3 rounded-lg border border-border/40 bg-card p-2.5 hover:border-border/70 transition-colors select-none"
                     >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="text-sm font-semibold text-text truncate max-w-[70%]">
-                            {formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')}
-                            {alert.className ? ` · ${localizedClassLabel(alert.className, t)}` : ''}
-                            {alert.confidence ? ` ${Math.round(alert.confidence * 100)}%` : ''}
-                          </p>
-                          {alert.ts ? (
-                            <span className="text-[11px] text-text-muted font-medium shrink-0 bg-input px-2 py-0.5 rounded-md border border-border/30">
-                              {formatTime(alert.ts, locale)}
+                      {imgSrc ? (
+                        <div
+                          className="group relative w-24 h-16 rounded-md bg-black shrink-0 overflow-hidden cursor-pointer border border-border/40"
+                          onClick={() => setExpandedAlert(alert)}
+                          onContextMenu={(e) => handleAlertContextMenu(e, alert)}
+                          title={t('alerts.expandHint')}
+                        >
+                          <AlertCanvasOverlay
+                            imageDataUri={imgSrc}
+                            boxes={alert.boxes}
+                            objectFit="object-cover"
+                          />
+                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-20">
+                            <span className="p-1.5 rounded-md bg-card/90 text-text border border-border/40">
+                              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                              </svg>
                             </span>
+                          </div>
+                        </div>
+                      ) : null}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-2">
+                          <p className="text-sm font-medium text-text truncate">
+                            {cameraLabel}
+                            {classLabel ? <span className="capitalize"> · {classLabel}</span> : null}
+                          </p>
+                          {confidence ? (
+                            <span className="text-xs text-text-muted shrink-0 tabular-nums">{confidence}</span>
                           ) : null}
                         </div>
-                        {alert.description || alert.triggeredBy ? (
-                          <p className="text-xs text-text-muted mt-1">
-                            {alert.description ? `${alert.description} ` : ''}
-                            {alert.triggeredBy ? (
-                              <span className="text-text-muted/80">{localizedTriggerLabel(alert, t)}</span>
-                            ) : null}
-                          </p>
+                        {secondary ? (
+                          <p className="text-xs text-text-muted truncate mt-0.5">{secondary}</p>
                         ) : null}
                       </div>
-                      <div className="flex items-center gap-2.5 shrink-0">
-                        {imgSrc ? (
-                          <div
-                            className="group relative w-32 h-20 rounded-xl bg-black shrink-0 overflow-hidden cursor-pointer border border-border/40 hover:border-emerald-500/60 transition-all shadow-sm"
-                            onClick={() => setExpandedAlert(alert)}
-                            onContextMenu={(e) => handleAlertContextMenu(e, alert)}
-                            title={t('alerts.expandHint')}
-                          >
-                            <AlertCanvasOverlay
-                              imageDataUri={imgSrc}
-                              boxes={alert.boxes}
-                              objectFit="object-cover"
-                            />
-                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-20">
-                              <div className="w-8 h-8 rounded-full bg-black/70 text-white flex items-center justify-center backdrop-blur-sm shadow border border-white/20 group-hover:scale-110 transition-transform">
-                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-                                </svg>
-                              </div>
-                            </div>
-                          </div>
-                        ) : null}
+                      {alert.ts ? (
+                        <span className="text-xs text-text-muted shrink-0 tabular-nums">
+                          {formatTime(alert.ts, locale)}
+                        </span>
+                      ) : null}
+                      <div className="flex items-center gap-0.5 shrink-0">
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
@@ -8684,7 +8653,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                           }}
                           title={t('common.share')}
                           aria-label={t('common.share')}
-                          className="p-1.5 text-text-muted hover:text-text hover:bg-input rounded-lg transition-colors shrink-0 cursor-pointer"
+                          className="p-1.5 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
                         >
                           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <circle cx="18" cy="5" r="3" />
@@ -8700,7 +8669,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                             void handleDeleteAlert(alert)
                           }}
                           title={t('alerts.deleteOne')}
-                          className="p-1.5 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors shrink-0 cursor-pointer"
+                          className="p-1.5 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
                         >
                           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                             <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -8723,34 +8692,37 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
 
       {/* Tab: Prints Gallery */}
       {activeTab === 'gallery' ? (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between mb-3">
+        <section className="space-y-2.5">
+          <div className="flex items-center justify-between gap-3 mb-3">
             <h3 className="text-sm font-semibold text-text">{t('gallery.cameraPrints')}</h3>
-            <div className="flex items-center gap-3">
-              <button onClick={() => void refreshGallery()} className="text-xs text-text-muted hover:text-text transition-colors">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void refreshGallery()}
+                className="text-xs text-text-muted hover:text-text transition-colors cursor-pointer"
+              >
                 {t('gallery.refreshLink')}
               </button>
               {snapshots.length > 0 ? (
                 confirmClearPrints ? (
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-red-600 dark:text-red-400 font-semibold">{t('gallery.deleteAllPrompt')}</span>
+                    <span className="text-xs text-text-muted">{t('gallery.deleteAllPrompt')}</span>
                     <button
                       onClick={() => void handleClearAllPrints()}
-                      className="text-xs px-2.5 py-1 rounded-lg bg-error hover:bg-error/80 text-text font-medium transition-all shadow-sm active:scale-95 cursor-pointer"
+                      className="text-xs px-2.5 py-1 rounded-md bg-error hover:bg-error/80 text-text font-medium transition-colors cursor-pointer"
                     >
                       {t('gallery.confirmDeleteYes')}
                     </button>
                     <button
                       onClick={() => setConfirmClearPrints(false)}
-                      className="text-xs px-2.5 py-1 rounded-lg bg-card text-text-muted hover:text-text border border-border/40 transition-colors font-medium cursor-pointer"
+                      className="text-xs px-2.5 py-1 rounded-md bg-input text-text-muted hover:text-text border border-border/40 transition-colors font-medium cursor-pointer"
                     >
-                      Cancelar
+                      {t('common.cancel')}
                     </button>
                   </div>
                 ) : (
                   <button
                     onClick={() => setConfirmClearPrints(true)}
-                    className="text-xs text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 transition-colors flex items-center gap-1 font-medium cursor-pointer"
+                    className="text-xs text-text-muted hover:text-text transition-colors flex items-center gap-1 font-medium cursor-pointer"
                   >
                     <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -8762,7 +8734,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             </div>
           </div>
           {snapshots.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-border/40 bg-card/30 p-8 text-center text-sm text-text-muted">
+            <div className="rounded-lg border border-border/40 bg-card/40 px-6 py-8 text-center text-xs text-text-muted">
               {t('gallery.emptyHint')}
             </div>
           ) : (
@@ -8775,9 +8747,9 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                       key={snap.id}
                       onClick={() => setExpandedPrint(snap)}
                       onContextMenu={(e) => handleSnapshotContextMenu(e, snap)}
-                      className="group rounded-xl overflow-hidden border border-border/40 bg-card cursor-pointer hover:border-emerald-500/50 transition-all shadow-md flex flex-col h-full select-none"
+                      className="group rounded-lg overflow-hidden border border-border/40 bg-card cursor-pointer hover:border-border/70 transition-colors flex flex-col h-full select-none"
                     >
-                      <div className="relative w-full aspect-video bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
+                      <div className="relative w-full bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
                         <img
                           src={
                             snap.imageDataUri ||
@@ -8785,49 +8757,53 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                           }
                           alt={snap.description || t('gallery.printAlt')}
                           loading="lazy"
-                          className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
+                          className="absolute inset-0 w-full h-full object-cover"
                         />
                         <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                          <span className="text-xs font-medium text-white bg-black/60 px-2 py-1 rounded-md backdrop-blur-sm">
+                          <span className="text-xs font-medium text-text bg-card/90 border border-border/40 px-2 py-1 rounded-md backdrop-blur-sm">
                             {t('gallery.enlargePrint')}
                           </span>
                         </div>
                       </div>
-                      <figcaption className="px-2.5 py-2 flex-1 flex flex-col justify-between">
-                        <p className="text-[11px] text-text font-medium truncate">{snap.description || formatTime(snap.ts, locale)}</p>
-                        <div className="flex items-center justify-between mt-1 pt-1 border-t border-border/20">
-                          <span className="text-[10px] text-text-muted">{formatTime(snap.ts, locale)}</span>
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                void handleSharePrint(snap)
-                              }}
-                              title={t('common.share')}
-                              aria-label={t('common.share')}
-                              className="p-1 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
-                            >
-                              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <circle cx="18" cy="5" r="3" />
-                                <circle cx="6" cy="12" r="3" />
-                                <circle cx="18" cy="19" r="3" />
-                                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-                                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-                              </svg>
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                void handleDeletePrint(snap.id)
-                              }}
-                              title={t('gallery.deletePrint')}
-                              className="p-1 text-text-muted hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors cursor-pointer"
-                            >
-                              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                              </svg>
-                            </button>
-                          </div>
+                      <figcaption className="px-3 py-2 flex items-center justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          {snap.description ? (
+                            <p className="text-[11px] text-text truncate">{snap.description}</p>
+                          ) : null}
+                          <p className="text-[10px] text-text-muted truncate tabular-nums">
+                            {formatTime(snap.ts, locale)}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-0.5 shrink-0">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void handleSharePrint(snap)
+                            }}
+                            title={t('common.share')}
+                            aria-label={t('common.share')}
+                            className="p-1 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
+                          >
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <circle cx="18" cy="5" r="3" />
+                              <circle cx="6" cy="12" r="3" />
+                              <circle cx="18" cy="19" r="3" />
+                              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                              <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              void handleDeletePrint(snap.id)
+                            }}
+                            title={t('gallery.deletePrint')}
+                            className="p-1 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
+                          >
+                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </button>
                         </div>
                       </figcaption>
                     </figure>
@@ -8844,57 +8820,54 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         </section>
       ) : null}
 
-      {/* Tab: Settings (Centered & Glassmorphic) */}
+      {/* Tab: Settings */}
       {activeTab === 'settings' ? (
-        <section className="space-y-6 max-w-2xl mx-auto pb-12 animate-fadeIn">
-          <div className="text-center mb-6">
-            <h2 className="text-lg font-bold text-text flex items-center justify-center gap-2">
-              <svg className="w-5 h-5 text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
+        <section className="w-full pb-12 animate-fadeIn">
+          <div className="mb-4">
+            <h2 className="text-sm font-semibold text-text">
               {t('settings.title')}
             </h2>
-            <p className="text-xs text-text-muted mt-1">
+            <p className="text-xs text-text-muted mt-0.5">
               {t('settings.subtitle')}
             </p>
           </div>
 
-          <div className="rounded-2xl border border-border/40 bg-card backdrop-blur-md p-6 shadow-xl space-y-4">
+          <div className="w-full rounded-lg border border-border/40 bg-card px-6 py-5">
             <div>
-              <h3 className="text-sm font-semibold text-text flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+              <h3 className="text-sm font-semibold text-text">
                 {t('settings.retention')}
               </h3>
               <p className="text-xs text-text-muted mt-0.5">
                 {t('settings.retentionDesc')}
               </p>
             </div>
-            <div className="space-y-3">
-              <label className="flex items-center justify-between text-xs text-text bg-input/50 p-3 rounded-xl border border-border/30">
-                <span>{t('settings.daysLabel')}</span>
+
+            <div className="mt-5 space-y-4">
+              <div className="flex items-center justify-between gap-6">
+                <span className="text-xs text-text">{t('settings.daysLabel')}</span>
                 <input
                   type="number"
                   min={1}
                   max={90}
                   value={config.retentionDays ?? 7}
                   onChange={(e) => void saveSettings({ retentionDays: Number(e.target.value) || 7 })}
-                  className="w-20 bg-input border border-border/40 rounded-lg px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-emerald-500"
+                  className="w-24 bg-input border border-border/50 rounded-md px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-text-muted/60"
                 />
-              </label>
-              <label className="flex items-center justify-between text-xs text-text bg-input/50 p-3 rounded-xl border border-border/30">
-                <span>{t('settings.maxFilesLabel')}</span>
+              </div>
+              <div className="flex items-center justify-between gap-6">
+                <span className="text-xs text-text">{t('settings.maxFilesLabel')}</span>
                 <input
                   type="number"
                   min={20}
                   max={1000}
                   value={config.maxSnapshots ?? 200}
                   onChange={(e) => void saveSettings({ maxSnapshots: Number(e.target.value) || 200 })}
-                  className="w-20 bg-input border border-border/40 rounded-lg px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-emerald-500"
+                  className="w-24 bg-input border border-border/50 rounded-md px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-text-muted/60"
                 />
-              </label>
+              </div>
             </div>
-            <p className="text-[11px] text-text-muted">
+
+            <p className="mt-5 text-[11px] text-text-muted">
               {t('settings.localNote')}
             </p>
           </div>

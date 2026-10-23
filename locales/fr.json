@@ -146,6 +146,7 @@
       "cameraOther": "caméras",
       "confirmOnce": "confirmation unique",
       "available": "Disponible",
+      "activeBadge": "Active",
       "removeFromSelection": "Retirer {name} de la sélection",
       "alreadyRegistered": "Cette caméra IP est déjà enregistrée.",
       "alreadyStaged": "Cette caméra IP est déjà dans la liste de sélection.",
@@ -508,7 +509,6 @@
     "shareAlert": "Partager l'alerte"
   },
   "page": {
-    "subtitle": "Vision et surveillance 100 % locales — rien ne quitte votre machine.",
     "printsTab": "Photos",
     "refreshing": "Actualisation...",
     "refreshCameras": "Actualiser la liste des caméras et les connexions",

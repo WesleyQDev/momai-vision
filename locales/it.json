@@ -146,6 +146,7 @@
       "cameraOther": "telecamere",
       "confirmOnce": "conferma singola",
       "available": "Disponibile",
+      "activeBadge": "Attiva",
       "removeFromSelection": "Rimuovi {name} dalla selezione",
       "alreadyRegistered": "Questa telecamera IP è già registrata.",
       "alreadyStaged": "Questa telecamera IP è già nella lista di selezione.",
@@ -508,7 +509,6 @@
     "shareAlert": "Condividi avviso"
   },
   "page": {
-    "subtitle": "Visione e monitoraggio 100% locali — nulla lascia il tuo computer.",
     "printsTab": "Foto",
     "refreshing": "Aggiornamento...",
     "refreshCameras": "Aggiorna elenco telecamere e connessioni",
