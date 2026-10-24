@@ -27,7 +27,7 @@ MomAI Vision conecta la webcam y las cámaras de seguridad al asistente. Ve lo q
 
 ## Privacidad
 
-El procesamiento de las imágenes ocurre en tu computador. Las fotos se guardan localmente y la descripción usa el modelo de visión local de MomAI. Las imágenes no se envían a servidores de MomAI.
+El procesamiento de las imágenes ocurre en tu computador. Las fotos se guardan localmente y la descripción usa el modelo de visión local de MomAI. Las imágenes no se envían a servidores de MomAI. Al mover una cámara PTZ por pasos, se puede adjuntar un fotograma reducido al modelo de visión activo para que el asistente vea el resultado; no se guarda en la galería ni se muestra en el chat.
 
 ## Permisos
 

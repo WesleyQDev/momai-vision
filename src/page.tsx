@@ -54,6 +54,7 @@ import visionIconPng from '../icon.png'
 import ContextMenu, { type ContextMenuOption } from './components/ContextMenu'
 import EditCameraModal, { type EditingCameraTarget } from './components/EditCameraModal'
 import { Pagination } from './components/Pagination'
+import { PtzControlCard, getContainingBlockRect } from './components/PtzControlCard'
 import { useWindowMaximized } from './hooks/useWindowMaximized'
 import { readCachedFrame, storeCachedFrame, shouldCaptureFrameCache, clearCachedFrame, captureOptimizedSnapshot } from './vision/frame-cache'
 import {
@@ -77,6 +78,187 @@ export function isSameCameraId(a: string, b: string): boolean {
 export function isCameraPaused(cameraId: string, pausedList?: string[]): boolean {
   if (!pausedList || pausedList.length === 0) return false
   return pausedList.some((id) => isSameCameraId(id, cameraId))
+}
+
+/**
+ * Calcula a posição padrão do overlay PTZ:
+ * - Em modo ampliado / tela cheia: centralizado na viewport.
+ * - Em modo grid: quando a câmera está à direita, centraliza no card da câmera da esquerda;
+ *   quando está à esquerda, centraliza no card da câmera da direita;
+ *   se não houver outra câmera adjacente (nenhuma câmera ativa ao lado), abre no
+ *   slot vazio do grid: o mesmo lugar onde o card de outra câmera ficaria.
+ */
+export function getPtzDefaultPosition(cameraId: string, isExpanded = false): { x: number; y: number; compact?: boolean } {
+  if (typeof window === 'undefined') {
+    return { x: 100, y: 100, compact: false }
+  }
+
+  const margin = 16
+
+  // Busca todos os cards pelo atributo data-camera-card-id de forma resiliente a caracteres especiais (colons, URLs)
+  const allCards = Array.from(document.querySelectorAll<HTMLElement>('[data-camera-card-id]'))
+    .filter((el) => el.getAttribute('data-testid') !== 'expanded-camera' && !el.closest('[data-testid="expanded-camera"]'))
+
+  const currentEl = allCards.find((el) => {
+    const id = el.getAttribute('data-camera-card-id')
+    return id && (id === cameraId || isSameCameraId(id, cameraId))
+  }) || null
+
+  const containerRect = getContainingBlockRect(currentEl)
+
+  if (isExpanded) {
+    const cardWidth = 192
+    const cardHeight = 205
+    const x = Math.max(margin, Math.round((containerRect.width - cardWidth) / 2))
+    const y = Math.max(margin, Math.round((containerRect.height - cardHeight) / 2))
+    return { x, y, compact: false }
+  }
+
+  if (!currentEl) {
+    const isCompact = containerRect.width < 1200
+    const cardWidth = isCompact ? 144 : 192
+    const cardHeight = isCompact ? 152 : 205
+    const x = Math.max(margin, Math.round((containerRect.width - cardWidth) / 2))
+    const y = Math.max(margin, Math.round((containerRect.height - cardHeight) / 2))
+    return { x, y, compact: isCompact }
+  }
+
+  // Pega o retângulo do vídeo da câmera atual (.aspect-video) para centralizar com precisão no frame
+  const currentVideoEl = (currentEl.querySelector('.aspect-video') || currentEl) as HTMLElement
+  const currentRect = currentVideoEl.getBoundingClientRect()
+  const currentCenterX = currentRect.left + currentRect.width / 2
+
+  // Procura todos os outros cards de câmera visíveis no grid (excluindo modal ampliado e a própria câmera)
+  const otherCards = allCards.filter((el) => {
+    const id = el.getAttribute('data-camera-card-id')
+    return el !== currentEl && (!id || !isSameCameraId(id, cameraId))
+  })
+
+  // Para cada card, mede a caixa do vídeo (.aspect-video)
+  const otherCardEntries = otherCards
+    .map((el) => {
+      const videoEl = (el.querySelector('.aspect-video') || el) as HTMLElement
+      return { el, videoEl, rect: videoEl.getBoundingClientRect() }
+    })
+    .filter(({ rect }) => rect.width > 50 && rect.height > 50)
+
+  // Cards à esquerda na mesma linha ou próximos horizontalmente
+  const leftCards = otherCardEntries
+    .filter(({ rect }) => {
+      const centerX = rect.left + rect.width / 2
+      const isSameRowOrNearby = Math.abs(rect.top - currentRect.top) < Math.max(rect.height, currentRect.height) * 0.85
+      return centerX < currentCenterX - 20 && isSameRowOrNearby
+    })
+    .sort((a, b) => b.rect.right - a.rect.right)
+
+  // Cards à direita na mesma linha ou próximos horizontalmente
+  const rightCards = otherCardEntries
+    .filter(({ rect }) => {
+      const centerX = rect.left + rect.width / 2
+      const isSameRowOrNearby = Math.abs(rect.top - currentRect.top) < Math.max(rect.height, currentRect.height) * 0.85
+      return centerX > currentCenterX + 20 && isSameRowOrNearby
+    })
+    .sort((a, b) => a.rect.left - b.rect.left)
+
+  let targetRect: RectLike = currentRect
+  let hasAdjacentCard = false
+  if (leftCards.length > 0) {
+    targetRect = leftCards[0].rect
+    hasAdjacentCard = true
+  } else if (rightCards.length > 0) {
+    targetRect = rightCards[0].rect
+    hasAdjacentCard = true
+  }
+
+  // Sem outra câmera na mesma linha: usa o slot vazio do grid, que é o lugar
+  // onde o card de outra câmera ficaria, para não cobrir o vídeo da câmera ativa.
+  if (!hasAdjacentCard) {
+    const emptySlot = getEmptyGridSlotRect(currentEl, currentRect, containerRect)
+    if (emptySlot) targetRect = emptySlot
+  }
+
+  // Responsividade de escala: em modo janela ou cards com largura < 550px / altura < 320px,
+  // ativa o modo compacto (144x152) para não ficar gigante nem cobrir botões
+  const isCompact = !isExpanded && (targetRect.width < 550 || targetRect.height < 320 || containerRect.width < 1200)
+  const cardWidth = isCompact ? 144 : 192
+  const cardHeight = isCompact ? 152 : 205
+
+  const targetCenterX = targetRect.left + targetRect.width / 2
+  const targetCenterY = targetRect.top + targetRect.height / 2
+
+  // Converte de coordenadas da viewport (getBoundingClientRect) para coordenadas relativas ao bloco de contenção
+  const relativeCenterX = targetCenterX - containerRect.left
+  const relativeCenterY = targetCenterY - containerRect.top
+
+  const x = Math.max(margin, Math.min(Math.round(relativeCenterX - cardWidth / 2), Math.round(containerRect.width - cardWidth - margin)))
+  const y = Math.max(margin, Math.min(Math.round(relativeCenterY - cardHeight / 2), Math.round(containerRect.height - cardHeight - margin)))
+
+  return { x, y, compact: isCompact }
+}
+
+interface RectLike {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+/**
+ * Procura o slot vazio do grid ao lado (ou abaixo) do card atual: é exatamente
+ * onde o card de outra câmera ficaria se houvesse uma ativa ali. Devolve null
+ * quando não há espaço útil, para o overlay cair no card da própria câmera.
+ */
+function getEmptyGridSlotRect(currentEl: HTMLElement, currentRect: RectLike, containerRect: RectLike): RectLike | null {
+  const parent = currentEl.parentElement
+  let columnGap = 24
+  let rowGap = 24
+
+  if (parent && typeof window !== 'undefined') {
+    const style = window.getComputedStyle(parent)
+    const parsedColumnGap = parseFloat(style.columnGap || '')
+    const parsedRowGap = parseFloat(style.rowGap || '')
+    if (Number.isFinite(parsedColumnGap) && parsedColumnGap >= 0) columnGap = parsedColumnGap
+    if (Number.isFinite(parsedRowGap) && parsedRowGap >= 0) rowGap = parsedRowGap
+  }
+
+  const slotWidth = currentRect.width
+  const slotHeight = currentRect.height
+  // Largura mínima para o overlay compacto (144) caber sem encostar no vídeo
+  const minUsableSpace = 160
+  const containerRight = containerRect.left + containerRect.width
+  const containerBottom = containerRect.top + containerRect.height
+
+  // Slot à direita
+  if (containerRight - (currentRect.left + slotWidth + columnGap) >= minUsableSpace) {
+    return {
+      left: currentRect.left + slotWidth + columnGap,
+      top: currentRect.top,
+      width: slotWidth,
+      height: slotHeight
+    }
+  }
+
+  // Slot à esquerda
+  if (currentRect.left - columnGap - slotWidth - containerRect.left >= minUsableSpace) {
+    return {
+      left: currentRect.left - columnGap - slotWidth,
+      top: currentRect.top,
+      width: slotWidth,
+      height: slotHeight
+    }
+  }
+
+  // Slot abaixo
+  if (containerBottom - (currentRect.top + slotHeight + rowGap) >= minUsableSpace) {
+    return {
+      left: currentRect.left,
+      top: currentRect.top + slotHeight + rowGap,
+      width: slotWidth,
+      height: slotHeight
+    }
+  }
+
+  return null
 }
 
 interface CameraInfo {
@@ -2052,7 +2234,9 @@ export const CameraCard = memo(function CameraCard({
   reconnecting = false,
   suppressPump = false,
   isPaused = false,
-  onTogglePause
+  onTogglePause,
+  onTogglePtz,
+  isPtzOpen = false
 }: {
   camera: CameraInfo
   boxes?: Detection[]
@@ -2090,6 +2274,8 @@ export const CameraCard = memo(function CameraCard({
   suppressPump?: boolean
   isPaused?: boolean
   onTogglePause?: () => void
+  onTogglePtz?: (camera: CameraInfo) => void
+  isPtzOpen?: boolean
 }): JSX.Element {
   const { t, locale } = useI18n()
   const cardRef = useRef<HTMLDivElement | null>(null)
@@ -2158,7 +2344,7 @@ export const CameraCard = memo(function CameraCard({
   // Fase de conexão lenta/indisponível: se demorar demais sem frame, mostra feedback amigável
   const [isSlow, setIsSlow] = useState(false)
   const [isUnavailable, setIsUnavailable] = useState(false)
-  const framesRef = useRef(0)
+    const framesRef = useRef(0)
   const fpsTsRef = useRef(0)
   const frameDimsRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 })
 
@@ -3068,6 +3254,7 @@ export const CameraCard = memo(function CameraCard({
   return (
     <div
       ref={cardRef}
+      data-camera-card-id={camera.id}
       draggable={!isEditingZone}
       onContextMenu={(e) => {
         if (!isEditingZone && onContextMenu) {
@@ -3098,14 +3285,14 @@ export const CameraCard = memo(function CameraCard({
       </div>
 
       <div
-        className={`flex flex-col h-full rounded-2xl bg-card border overflow-hidden shadow-md transition-all ${isDragging
+        className={`relative flex flex-col h-full rounded-2xl bg-card border overflow-hidden shadow-md transition-all ${isDragging
           ? 'opacity-40 scale-95 border-emerald-500/50'
           : isDragOver
             ? 'border-2 border-emerald-400 bg-emerald-500/10 shadow-emerald-500/20 scale-[1.02]'
             : 'border-border/30 hover:border-border/60'
           }`}
       >
-        <div
+                <div
           className="relative w-full aspect-video bg-input/40 rounded-t-2xl overflow-hidden shrink-0 cursor-pointer select-none"
           style={{ aspectRatio: '16 / 9' }}
           onDoubleClick={(e) => {
@@ -3396,6 +3583,37 @@ export const CameraCard = memo(function CameraCard({
           </span>
 
           <div className="flex items-center gap-1.5 shrink-0">
+            {/* PTZ: controle de giro e posição para câmeras IP */}
+            {camera.source !== 'webcam' && onTogglePtz && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onTogglePtz(camera)
+                }}
+                className={`w-7 h-7 rounded-lg border transition-all flex items-center justify-center shadow-md active:scale-95 cursor-pointer ${
+                  isPtzOpen
+                    ? 'bg-card text-text border-border shadow-sm'
+                    : 'bg-input hover:bg-card border-border/40 text-text-muted hover:text-text'
+                }`}
+                title={t('cameras.ptzControl')}
+                aria-label={t('cameras.ptzControl')}
+              >
+                <svg
+                  className="w-3.5 h-3.5"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                >
+                  <circle cx="12" cy="12" r="9.5" strokeWidth="1.6" />
+                  <circle cx="12" cy="12" r="3.2" strokeWidth="1.2" opacity="0.6" />
+                  <circle cx="12" cy="6.2" r="1.4" fill="currentColor" stroke="none" />
+                  <circle cx="12" cy="17.8" r="1.4" fill="currentColor" stroke="none" />
+                  <circle cx="6.2" cy="12" r="1.4" fill="currentColor" stroke="none" />
+                  <circle cx="17.8" cy="12" r="1.4" fill="currentColor" stroke="none" />
+                </svg>
+              </button>
+            )}
             {/* Reload: rebuild the camera source when the feed is stuck */}
             <button
               disabled={reloading}
@@ -4604,7 +4822,9 @@ function ExpandedCameraModal({
   otherCameras = EMPTY_CAMERAS,
   onSelectCamera,
   isPaused = false,
-  onTogglePause
+  onTogglePause,
+  onTogglePtz,
+  isPtzOpen = false
 }: {
   camera: CameraInfo | null
   detections: Record<string, Detection[]>
@@ -4632,6 +4852,8 @@ function ExpandedCameraModal({
   onSelectCamera?: (camera: CameraInfo) => void
   isPaused?: boolean
   onTogglePause?: () => void
+  onTogglePtz?: () => void
+  isPtzOpen?: boolean
 }): JSX.Element | null {
   const { t, locale } = useI18n()
   const frameCanvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -5168,7 +5390,7 @@ function ExpandedCameraModal({
   }
 
   return (
-    <div data-testid="expanded-camera" className="absolute inset-0 z-50 bg-bg overflow-hidden flex flex-col animate-fadeIn">
+    <div data-testid="expanded-camera" data-camera-card-id={camera?.id} className="absolute inset-0 z-50 bg-bg overflow-hidden flex flex-col animate-fadeIn">
       <div className="h-full flex flex-col min-h-0">
         <div ref={headerRef} data-testid="expanded-header" className="relative z-40 flex flex-wrap items-center gap-x-3 gap-y-2 px-3 sm:px-6 py-3 border-b border-border/40 bg-card/85 backdrop-blur-md shrink-0">
           <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -5186,6 +5408,35 @@ function ExpandedCameraModal({
               </span>
             ) : null}
           </div>
+          {/* Botão PTZ ao lado esquerdo de VER */}
+          {camera.source !== 'webcam' && onTogglePtz && (
+            <button
+              type="button"
+              onClick={onTogglePtz}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all shadow-sm active:scale-95 cursor-pointer ${
+                isPtzOpen
+                  ? 'bg-card text-text border-border shadow-sm'
+                  : 'bg-input/80 hover:bg-card border-border/40 text-text-muted hover:text-text'
+              }`}
+              title={t('cameras.ptzControl')}
+              aria-label={t('cameras.ptzControl')}
+            >
+              <svg
+                className="w-3.5 h-3.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+              >
+                <circle cx="12" cy="12" r="9.5" strokeWidth="1.6" />
+                <circle cx="12" cy="12" r="3.2" strokeWidth="1.2" opacity="0.6" />
+                <circle cx="12" cy="6.2" r="1.4" fill="currentColor" stroke="none" />
+                <circle cx="12" cy="17.8" r="1.4" fill="currentColor" stroke="none" />
+                <circle cx="6.2" cy="12" r="1.4" fill="currentColor" stroke="none" />
+                <circle cx="17.8" cy="12" r="1.4" fill="currentColor" stroke="none" />
+              </svg>
+              <span>PTZ</span>
+            </button>
+          )}
           <ToolbarDropdown
             group="view"
             label={t('cameras.viewGroup')}
@@ -7028,6 +7279,69 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
   // Cameras being watched after "Limpar Cache e Conexões": the reload icon
   // spins until the next poll reports the camera online again.
   const [reconnectingCameraIds, setReconnectingCameraIds] = useState<Set<string>>(() => new Set())
+  const isWindowMaximized = useWindowMaximized()
+  const [ptzCamera, setPtzCamera] = useState<CameraInfo | null>(null)
+  const [ptzInitialPos, setPtzInitialPos] = useState<{ x: number; y: number; compact?: boolean } | undefined>(undefined)
+
+  // Responsividade do controle PTZ:
+  // Quando a janela mudar de tamanho (redimensionar, maximizar, restaurar para modo janela):
+  // se o controle estiver aberto, recalcula automaticamente a posição centralizada.
+  useEffect(() => {
+    if (!ptzCamera) return
+
+    let animId: number
+    const updatePosition = () => {
+      cancelAnimationFrame(animId)
+      animId = requestAnimationFrame(() => {
+        const isExp = Boolean(expandedCamera && expandedCamera.id === ptzCamera.id)
+        const nextPos = getPtzDefaultPosition(ptzCamera.id, isExp)
+        setPtzInitialPos(nextPos)
+      })
+    }
+
+    // Atualiza imediatamente e com pequeno atraso para aguardar reflow do grid
+    updatePosition()
+    const timer = setTimeout(updatePosition, 100)
+
+    window.addEventListener('resize', updatePosition)
+    return () => {
+      clearTimeout(timer)
+      cancelAnimationFrame(animId)
+      window.removeEventListener('resize', updatePosition)
+    }
+  }, [ptzCamera, expandedCamera, isWindowMaximized])
+
+  const handleTogglePtz = useCallback((cam: CameraInfo) => {
+    setPtzCamera((prev) => {
+      if (prev?.id === cam.id) {
+        return null
+      }
+      const isExp = Boolean(expandedCamera && expandedCamera.id === cam.id)
+      const pos = getPtzDefaultPosition(cam.id, isExp)
+      setPtzInitialPos(pos)
+      void command('control_ptz', { cameraId: cam.id, action: 'warmup' }).catch(() => {})
+      return cam
+    })
+  }, [expandedCamera])
+
+  // Fecha o controle PTZ se mudar de aba interna (alerts, gallery, settings)
+  // ou se o usuário mudar de aba externa no MomAI (isActive = false).
+  // Ao retornar para a aba momai vision, o controle continuará fechado.
+  useEffect(() => {
+    if (!isActive || activeTab !== 'cameras') {
+      setPtzCamera(null)
+    }
+  }, [isActive, activeTab])
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.hidden) {
+        setPtzCamera(null)
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [])
 
   const handleCameraContextMenu = useCallback((e: React.MouseEvent, camera: CameraInfo) => {
     e.preventDefault()
@@ -7837,14 +8151,28 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
 
   const handleExpandCamera = useCallback((cam: CameraInfo) => {
     setExpandedCamera(cam)
-  }, [])
+    if (ptzCamera) {
+      if (ptzCamera.id === cam.id && cam.source === 'ip') {
+        setPtzInitialPos(getPtzDefaultPosition(cam.id, true))
+      } else {
+        setPtzCamera(null)
+      }
+    }
+  }, [ptzCamera])
 
   const handleSelectExpandedCamera = useCallback((cam: CameraInfo) => {
     // Trocar de câmera na lateral cancela qualquer edição de área em andamento:
     // o estado de edição é por câmera e não deve vazar para a próxima.
     setEditingZoneCameraId(null)
     setExpandedCamera(cam)
-  }, [])
+    if (ptzCamera) {
+      if (cam.source === 'ip' && ptzCamera.id === cam.id) {
+        setPtzInitialPos(getPtzDefaultPosition(cam.id, true))
+      } else {
+        setPtzCamera(null)
+      }
+    }
+  }, [ptzCamera])
 
   const handleReloadCamera = useCallback(() => {
     void poll()
@@ -8463,6 +8791,8 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                 onRemove={handleRemoveCamera}
                 onExpand={handleExpandCamera}
                 onReload={handleReloadCamera}
+                onTogglePtz={handleTogglePtz}
+                isPtzOpen={ptzCamera?.id === camera.id}
                 onContextMenu={handleCameraContextMenu}
                 reconnecting={reconnectingCameraIds.has(camera.id)}
                 refreshKey={refreshKey}
@@ -8919,6 +9249,11 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         onClose={() => {
           setExpandedCamera(null)
           setEditingZoneCameraId(null)
+          if (ptzCamera) {
+            setTimeout(() => {
+              setPtzInitialPos(getPtzDefaultPosition(ptzCamera.id, false))
+            }, 50)
+          }
         }}
         onSnapshot={takeSnapshot}
         zone={expandedCamera ? config.detectionZones?.[expandedCamera.id] : null}
@@ -8933,6 +9268,8 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         onEdit={expandedCamera ? () => void handleEditCamera(expandedCamera) : undefined}
         onCopyUrl={expandedCamera ? () => void handleCopyCameraUrl(expandedCamera) : undefined}
         onReload={expandedCamera ? () => handleReloadCamera() : undefined}
+        onTogglePtz={expandedCamera ? () => handleTogglePtz(expandedCamera) : undefined}
+        isPtzOpen={Boolean(ptzCamera && expandedCamera && ptzCamera.id === expandedCamera.id)}
         onCreateMonitor={expandedCamera ? () => {
           setEditingMonitor({
             id: '',
@@ -9130,6 +9467,19 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           onContextMenu={handleAlertContextMenu}
         />
       ) : null}
+
+      {/* Draggable PTZ Floating Overlay */}
+      {ptzCamera && (
+        <PtzControlCard
+          cameraId={ptzCamera.id}
+          cameraName={ptzCamera.name}
+          initialPosition={ptzInitialPos}
+          compact={ptzInitialPos?.compact}
+          onClose={() => setPtzCamera(null)}
+          t={t}
+          sendCommand={command}
+        />
+      )}
 
       {/* Windows Style Notification Pill */}
       {copyToast ? (

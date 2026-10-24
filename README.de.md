@@ -27,7 +27,7 @@ MomAI Vision verbindet Ihre Webcam und Ihre Überwachungskameras mit dem Assiste
 
 ## Datenschutz
 
-Die Bildverarbeitung findet auf Ihrem Computer statt. Fotos werden lokal gespeichert, und die Beschreibung nutzt das lokale Bildmodell von MomAI. Bilder werden nicht an MomAI-Server gesendet.
+Die Bildverarbeitung findet auf Ihrem Computer statt. Fotos werden lokal gespeichert, und die Beschreibung nutzt das lokale Bildmodell von MomAI. Bilder werden nicht an MomAI-Server gesendet. Beim schrittweisen Bewegen einer PTZ-Kamera kann ein verkleinertes Bild an das aktive Bildmodell angehängt werden, damit der Assistent das Ergebnis sieht; es wird nicht in der Galerie gespeichert und nicht im Chat angezeigt.
 
 ## Berechtigungen
 

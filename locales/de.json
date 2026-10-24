@@ -162,7 +162,13 @@
       "clearCacheHelp": "Beendet hängende Windows-Prozesse und gibt RTSP-Sitzungen frei, ohne die Kamera neu starten zu müssen."
     },
     "printSaved": "Foto gespeichert!",
-    "capturing": "Wird aufgenommen..."
+    "capturing": "Wird aufgenommen...",
+    "ptzControl": "PTZ-Steuerung",
+    "ptzReset": "PTZ zurücksetzen",
+    "ptzPresets": "Positionen",
+    "ptzNoPresets": "Keine Positionen gespeichert",
+    "ptzClose": "PTZ schließen",
+    "ptzMoving": "Kamera bewegt sich..."
   },
   "monitoring": {
     "title": "Überwachungsregeln",
@@ -318,6 +324,7 @@
       "listDevices": "Geräte auflisten",
       "queryDevice": "Gerät abfragen",
       "captureSnapshot": "Foto aufnehmen",
+      "showSnapshot": "Foto anzeigen",
       "startMonitoring": "Überwachung starten",
       "setActions": "Aktionen konfigurieren",
       "getActions": "Aktionen ansehen"
@@ -339,7 +346,8 @@
       "cameraId": "Kamera",
       "camera": "Kamera",
       "monitorId": "Monitor",
-      "label": "Bezeichnung"
+      "label": "Bezeichnung",
+      "durationMs": "Dauer (ms)"
     },
     "resume": "Fortsetzen",
     "pausedHeader": "Pausiert ({count})"

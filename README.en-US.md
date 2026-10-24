@@ -27,7 +27,7 @@ MomAI Vision connects your webcam and security cameras to the assistant. It sees
 
 ## Privacy
 
-Image processing happens on your computer. Photos are saved locally, and descriptions use MomAI's local vision model. Images are not sent to MomAI servers.
+Image processing happens on your computer. Photos are saved locally, and descriptions use MomAI's local vision model. Images are not sent to MomAI servers. When moving a PTZ camera in steps, a reduced frame may be attached to the active vision model so the assistant can see the result; it is not saved to the gallery or shown in the chat.
 
 ## Permissions
 

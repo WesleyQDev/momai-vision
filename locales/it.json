@@ -162,7 +162,13 @@
       "clearCacheHelp": "Termina i processi bloccati su Windows e rilascia le sessioni RTSP senza dover riavviare la telecamera."
     },
     "printSaved": "Foto salvata!",
-    "capturing": "Acquisizione..."
+    "capturing": "Acquisizione...",
+    "ptzControl": "Controllo PTZ",
+    "ptzReset": "Ripristino PTZ",
+    "ptzPresets": "Posizioni",
+    "ptzNoPresets": "Nessuna posizione salvata",
+    "ptzClose": "Chiudi PTZ",
+    "ptzMoving": "Spostamento telecamera..."
   },
   "monitoring": {
     "title": "Regole di monitoraggio",
@@ -318,6 +324,7 @@
       "listDevices": "Elenca dispositivi",
       "queryDevice": "Interroga dispositivo",
       "captureSnapshot": "Scatta foto",
+      "showSnapshot": "Mostra foto",
       "startMonitoring": "Avvia monitoraggio",
       "setActions": "Configura azioni",
       "getActions": "Vedi azioni"
@@ -339,7 +346,8 @@
       "cameraId": "Telecamera",
       "camera": "Telecamera",
       "monitorId": "Monitoraggio",
-      "label": "Etichetta"
+      "label": "Etichetta",
+      "durationMs": "Durata (ms)"
     },
     "resume": "Riprendi",
     "pausedHeader": "In pausa ({count})"

@@ -39,7 +39,7 @@ O MomAI Vision é o motor de percepção visual local do assistente. Ele analisa
 
 1. **Ação Padrão vs Outros Canais**:
    - Por padrão, vincule o disparo à ação **`momai-vision.show_overlay`**.
-   - Se o usuário pedir expressamente canais adicionais (ex.: "me avise no WhatsApp e mostre o alerta"), adicione múltiplas ações na lista: `momai-vision.show_overlay` E `momai-whatsapp.send_message`.
+   - Se o usuário pedir expressamente canais adicionais (ex.: "me avise no WhatsApp e mostre o alerta"), adicione múltiplas ações na lista, combinando `momai-vision.show_overlay` com a ação do canal que o usuário escolher — sem presumir IDs de outras extensões.
    - Se o usuário pedir apenas um canal externo específico (ex.: "apenas envie foto no WhatsApp se alguém aparecer"), use a ação daquele canal.
 
 2. **Criação Direta em 1 Passo**:

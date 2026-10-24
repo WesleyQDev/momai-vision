@@ -17,18 +17,18 @@ async function postCommand(toolName: string, args: Record<string, unknown> = {})
 }
 
 export async function captureWidgetFrame(cameraId: string): Promise<{ image: string; cameraName: string }> {
-  const data = await postCommand('capture_snapshot', { cameraId })
+  // Widget warmup needs the latest frame, not a gallery entry: get_frame is the
+  // lightweight primitive (capture_snapshot saves a print and is model-facing).
+  const data = await postCommand('get_frame', { cameraId })
   if (data && (data as any).ok === false) {
     throw new Error(String((data as any).error || 'Capture failed.'))
   }
-  // The backend returns the frame inside structuredResponse.data; top-level
-  // fields are kept as a forward-compatible fallback.
-  const nested = (data as any)?.structuredResponse?.data ?? {}
+  const jpeg = String((data as any)?.jpegBase64 ?? '')
+  const list = await postCommand('list_cameras', {}).catch(() => null)
+  const found = ((list as any)?.cameras ?? []).find((entry: any) => entry?.id === cameraId)
   return {
-    image: String(
-      data?.imageDataUri ?? data?.annotatedImageDataUri ?? nested.imageDataUri ?? nested.annotatedImageDataUri ?? ''
-    ),
-    cameraName: String(data?.cameraName ?? nested.cameraName ?? '')
+    image: jpeg ? `data:image/jpeg;base64,${jpeg}` : '',
+    cameraName: String(found?.name ?? cameraId ?? '')
   }
 }
 

@@ -194,6 +194,7 @@ const TOOL_LABEL_KEYS: Record<string, string> = {
   list_devices: 'monitoring.tools.listDevices',
   query_device: 'monitoring.tools.queryDevice',
   capture_snapshot: 'monitoring.tools.captureSnapshot',
+  show_snapshot: 'monitoring.tools.showSnapshot',
   start_monitoring: 'monitoring.tools.startMonitoring',
   set_actions: 'monitoring.tools.setActions',
   get_actions: 'monitoring.tools.getActions'
@@ -216,6 +217,7 @@ const TOOL_LABEL_FALLBACK: Record<string, string> = {
   list_devices: 'Listar dispositivos',
   query_device: 'Consultar dispositivo',
   capture_snapshot: 'Capturar print',
+  show_snapshot: 'Mostrar print',
   start_monitoring: 'Iniciar monitoramento',
   set_actions: 'Configurar ações',
   get_actions: 'Ver ações'
@@ -238,7 +240,8 @@ const PARAM_LABEL_KEYS: Record<string, string> = {
   cameraId: 'monitoring.params.cameraId',
   camera: 'monitoring.params.camera',
   monitorId: 'monitoring.params.monitorId',
-  label: 'monitoring.params.label'
+  label: 'monitoring.params.label',
+  durationMs: 'monitoring.params.durationMs'
 }
 
 const PARAM_LABELS: Record<string, string> = {
@@ -258,7 +261,8 @@ const PARAM_LABELS: Record<string, string> = {
   cameraId: 'Câmera',
   camera: 'Câmera',
   monitorId: 'Monitor',
-  label: 'Rótulo'
+  label: 'Rótulo',
+  durationMs: 'Duração (ms)'
 }
 
 export function humanizeKey(key: string): string {

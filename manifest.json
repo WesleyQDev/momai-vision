@@ -316,16 +316,73 @@
       "method": "POST",
       "path": "/configure",
       "tool": "configure"
+    },
+    {
+      "method": "POST",
+      "path": "/ptz",
+      "tool": "control_ptz"
     }
   ],
   "tools": [
+    {
+      "name": "control_ptz",
+      "description": "Controla câmeras IP motorizadas (PTZ). Use action \"step\" para mover uma quantidade controlada (a câmera para sozinha no fim), \"status\" para ler a posição atual (pan/tilt/zoom), \"preset\" para ir a uma posição salva, \"home\" para recentralizar e \"stop\" para interromper. Após um step, um frame reduzido é anexado ao seu contexto quando o modelo suporta visão. Depois de mover, não capture nem exiba prints por conta própria: o usuário está vendo o vídeo ao vivo.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "cameraId": {
+            "type": "string",
+            "description": "ID exato ou nome da câmera a controlar."
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "step",
+              "status",
+              "stop",
+              "home",
+              "preset"
+            ],
+            "description": "Ação a executar: step (passo com parada automática), status (posição atual), stop, home ou preset."
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right",
+              "zoom_in",
+              "zoom_out"
+            ],
+            "description": "Direção do movimento (obrigatória para step)."
+          },
+          "durationMs": {
+            "type": "number",
+            "description": "Duração do passo em milissegundos (100 a 5000; padrão 500). Use valores maiores para movimentos longos e menores para ajustes finos."
+          },
+          "speed": {
+            "type": "number",
+            "description": "Velocidade do movimento de 0.1 a 1.0 (padrão 0.5)."
+          },
+          "presetToken": {
+            "type": "string",
+            "description": "Token da posição pré-gravada (para action=preset)."
+          }
+        },
+        "required": [
+          "cameraId",
+          "action"
+        ]
+      }
+    },
     {
       "name": "list_cameras",
       "description": "Lista as câmeras disponíveis (webcam e IP/MJPEG) com status online e monitors ativos."
     },
     {
       "name": "capture_snapshot",
-      "description": "Tira uma foto de uma CÂMERA (webcam ou IP), nunca da tela do computador: salva na galeria e mostra a imagem no chat. Quando o usuário nomear uma câmera, SEMPRE passe o cameraId exato retornado por list_cameras (ou o nome dela, ex.: 'caza'). Se o usuário não especificar, pode omitir o argumento para usar a câmera padrão.",
+      "description": "Tira uma foto de uma CÂMERA (webcam ou IP), nunca da tela do computador, e salva na galeria. Não exibe nada no chat. Só chame show_snapshot depois se o usuário pedir para ver a foto. Quando o usuário nomear uma câmera, SEMPRE passe o cameraId exato retornado por list_cameras (ou o nome dela, ex.: 'caza'). Se o usuário não especificar, pode omitir o argumento para usar a câmera padrão.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -340,6 +397,27 @@
           "name": {
             "type": "string",
             "description": "Alias de cameraId"
+          }
+        }
+      }
+    },
+    {
+      "name": "show_snapshot",
+      "description": "Mostra AO USUÁRIO, no chat, um print já capturado. Use somente quando o usuário pedir para ver a câmera/uma foto ou para entregar o resultado final de uma captura — no máximo uma vez por pedido. Não use como feedback interno, progresso ou verificação de movimento: a ferramenta não descreve a imagem para você. Sem snapshotId, mostra o print mais recente da câmera indicada ou o mais recente da galeria.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "snapshotId": {
+            "type": "string",
+            "description": "ID do print retornado por capture_snapshot ou list_snapshots."
+          },
+          "cameraId": {
+            "type": "string",
+            "description": "ID exato ou nome da câmera cujo print mais recente deve ser exibido (usado quando snapshotId não é informado)."
+          },
+          "description": {
+            "type": "string",
+            "description": "Legenda opcional exibida no cartão do print."
           }
         }
       }

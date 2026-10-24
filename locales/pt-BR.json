@@ -162,7 +162,13 @@
       "clearCacheHelp": "Encerra processos travados no Windows e libera as conexões RTSP da câmera sem precisar reiniciá-la."
     },
     "printSaved": "Print salvo!",
-    "capturing": "Capturando..."
+    "capturing": "Capturando...",
+    "ptzControl": "Controle PTZ",
+    "ptzReset": "Reposição do PTZ",
+    "ptzPresets": "Locais",
+    "ptzNoPresets": "Nenhum local salvo",
+    "ptzClose": "Fechar PTZ",
+    "ptzMoving": "Movendo câmera..."
   },
   "monitoring": {
     "title": "Regras de Monitoramento",
@@ -318,6 +324,7 @@
       "listDevices": "Listar dispositivos",
       "queryDevice": "Consultar dispositivo",
       "captureSnapshot": "Capturar print",
+      "showSnapshot": "Mostrar print",
       "startMonitoring": "Iniciar monitoramento",
       "setActions": "Configurar ações",
       "getActions": "Ver ações"
@@ -339,7 +346,8 @@
       "cameraId": "Câmera",
       "camera": "Câmera",
       "monitorId": "Monitor",
-      "label": "Rótulo"
+      "label": "Rótulo",
+      "durationMs": "Duração (ms)"
     },
     "resume": "Retomar",
     "pausedHeader": "Pausados ({count})"

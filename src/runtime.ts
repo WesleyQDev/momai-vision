@@ -25,6 +25,14 @@ import {
   type DiscoveredIpCamera
 } from './vision/discovery'
 import {
+  dispatchPtzCommand,
+  fetchPtzPresets,
+  resolveOrProbePtzEndpoint,
+  setPtzCachedEndpoint,
+  type PtzDirection,
+  type CachedEndpoint
+} from './vision/onvif-ptz'
+import {
   RTSP_FIRST_FRAME_WATCHDOG_MS,
   RTSP_FRESH_ATTEMPT_GRACE_MS,
   RTSP_MID_STREAM_CHECK_MS,
@@ -402,6 +410,14 @@ async function syncIpCameras(): Promise<void> {
     }
   }
   restartStreamsOnPreviewWidthChange()
+
+  // Preaquece o endpoint ONVIF PTZ de câmeras IP em background para que o primeiro clique responda instantaneamente
+  for (const cam of ipCameras) {
+    const host = extractRtspHost(cam.url || cam.id)
+    if (host) {
+      void resolveOrProbePtzEndpoint(host, cam.username, cam.password).catch(() => {})
+    }
+  }
 }
 
 /**
@@ -1767,7 +1783,7 @@ export { resizeJpegBase64 }
 // Snapshots
 // ---------------------------------------------------------------------------
 
-interface SnapshotMeta {
+export interface SnapshotMeta {
   id: string
   cameraId: string
   ts: number
@@ -1776,6 +1792,70 @@ interface SnapshotMeta {
 }
 
 const MAX_SNAPSHOTS = 200
+
+/**
+ * Picks the snapshot a `show_snapshot` call refers to: an explicit id, the
+ * newest snapshot of a camera, or the newest snapshot overall. Pure so the
+ * selection rules stay unit-testable without booting the worker.
+ */
+export function resolveSnapshotForShow(
+  snapshots: SnapshotMeta[],
+  query: { snapshotId?: string; cameraId?: string }
+): SnapshotMeta | null {
+  const list = Array.isArray(snapshots) ? snapshots.filter(Boolean) : []
+  if (list.length === 0) return null
+  const wantedId = typeof query.snapshotId === 'string' ? query.snapshotId.trim() : ''
+  if (wantedId) {
+    return list.find((entry) => entry.id === wantedId) || null
+  }
+  const newestFirst = [...list].sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0))
+  const wantedCamera = typeof query.cameraId === 'string' ? query.cameraId.trim() : ''
+  if (wantedCamera) {
+    return newestFirst.find((entry) => entry.cameraId === wantedCamera) || null
+  }
+  return newestFirst[0] || null
+}
+
+export interface SnapshotCard {
+  type: 'vision_alert'
+  data: {
+    cameraId: string
+    cameraName: string
+    triggeredBy: 'snapshot'
+    snapshotId: string
+    ts: number
+    description?: string
+    imageDataUri?: string
+  }
+}
+
+/**
+ * Chat card for a saved snapshot. A print is not an alert: `triggeredBy`
+ * tells the panel to render the print layout, and the card deliberately has
+ * no `monitorId` — there is no monitor behind a manual capture, so the panel
+ * must not offer a pause action for it.
+ */
+export function buildSnapshotCard(input: {
+  snapshotId: string
+  cameraId: string
+  cameraName?: string
+  ts: number
+  description?: string
+  imageDataUri?: string | null
+}): SnapshotCard {
+  return {
+    type: 'vision_alert',
+    data: {
+      cameraId: input.cameraId,
+      cameraName: input.cameraName || input.cameraId,
+      triggeredBy: 'snapshot',
+      snapshotId: input.snapshotId,
+      ts: input.ts,
+      ...(input.description ? { description: input.description } : {}),
+      ...(input.imageDataUri ? { imageDataUri: input.imageDataUri } : {})
+    }
+  }
+}
 
 async function loadIndex(): Promise<SnapshotMeta[]> {
   return loadSnapshots(bridge!, 1000)
@@ -1798,26 +1878,45 @@ async function saveSnapshot(jpegBase64: string, meta: Omit<SnapshotMeta, 'id' | 
   return entry
 }
 
+// O saveFile do worker resolve DENTRO de skillPath (process.argv[3] = caminho
+// do skill passado pelo host no spawn; ver src/worker.ts). Calcular via
+// MOMAI_DATA_DIR divergia no layout dev (junction no repositório) e os arquivos
+// de snapshot vazavam. O fallback antigo permanece para segurança.
+function resolveSnapshotsDir(): string {
+  const skillPath = process.argv[3]
+  const modeStorageDir = process.env.MOMAI_EXTENSION_STORAGE_DIR
+  return skillPath
+    ? path.join(skillPath, 'snapshots')
+    : modeStorageDir
+      ? path.join(modeStorageDir, 'snapshots')
+      : path.join(process.env.MOMAI_DATA_DIR || '', 'extensions', SKILL_ID, 'snapshots')
+}
+
 async function deleteSnapshotFiles(ids: string[]): Promise<void> {
   try {
     const fs = await import('node:fs/promises')
-    // O saveFile do worker resolve DENTRO de skillPath (process.argv[3] =
-    // caminho do skill passado pelo host no spawn; ver src/worker.ts). Calcular
-    // via MOMAI_DATA_DIR divergia no layout dev (junction no repositório) e os
-    // arquivos de snapshot vazavam. Fallback antigo preservado para segurança.
-    const skillPath = process.argv[3]
-    const modeStorageDir = process.env.MOMAI_EXTENSION_STORAGE_DIR
-    const snapshotsDir = skillPath
-      ? path.join(skillPath, 'snapshots')
-      : modeStorageDir
-        ? path.join(modeStorageDir, 'snapshots')
-        : path.join(process.env.MOMAI_DATA_DIR || '', 'extensions', SKILL_ID, 'snapshots')
+    const snapshotsDir = resolveSnapshotsDir()
     for (const id of ids) {
       try {
         await fs.unlink(path.join(snapshotsDir, `${id}.jpg`))
       } catch {}
     }
   } catch {}
+}
+
+/**
+ * Reads a saved snapshot JPEG back as base64. The id comes from tool arguments,
+ * so reject anything that is not a plain file name before touching the disk.
+ */
+async function readSnapshotFile(id: string): Promise<string | null> {
+  if (!/^[A-Za-z0-9._-]+$/.test(id)) return null
+  try {
+    const fs = await import('node:fs/promises')
+    const bytes = await fs.readFile(path.join(resolveSnapshotsDir(), `${id}.jpg`))
+    return bytes.toString('base64')
+  } catch {
+    return null
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3238,29 +3337,89 @@ async function toolCaptureSnapshot(args: { cameraId?: string; camera?: string; n
   }
   if (!frame) return { ok: false, error: 'no frame available' }
   const snapshot = await saveSnapshot(frame.jpegBase64, { cameraId: camera.id })
-  const description = ''
-  const imageDataUri = toEmbeddedDataUri(frame.jpegBase64)
-  const structuredResponse = {
-    type: 'vision_alert',
-    data: {
-      cameraId,
-      cameraName: camera.name,
-      monitorId: 'snapshot',
-      triggeredBy: 'snapshot',
-      snapshotId: snapshot.id,
-      ts: snapshot.ts,
-      description,
-      ...(imageDataUri ? { imageDataUri } : {})
-    }
-  }
-  bridge?.sendStructuredResponse(structuredResponse)
+  // Capture only saves to the gallery. Showing the frame is a separate tool
+  // (`show_snapshot`): a capture must not emit a card or end the turn, so the
+  // model keeps its reply flowing after the photo is taken.
   return {
     ok: true,
     snapshotId: snapshot.id,
-    description,
-    cameraId,
+    cameraId: camera.id,
     cameraName: camera.name,
-    directResponse: `Print capturado (${camera.name}).`,
+    ts: snapshot.ts,
+    instruction: JSON.stringify({
+      ok: true,
+      snapshotId: snapshot.id,
+      cameraId: camera.id,
+      cameraName: camera.name,
+      ts: snapshot.ts,
+      next: 'Call show_snapshot with this snapshotId only if the user asked to see the capture.'
+    })
+  }
+}
+
+interface ShowSnapshotArgs {
+  snapshotId?: string
+  cameraId?: string
+  description?: string
+}
+
+async function toolShowSnapshot(args: ShowSnapshotArgs): Promise<unknown> {
+  const rawCamera = args.cameraId
+  let cameraId = rawCamera
+  if (rawCamera) {
+    // cameraId accepts a name (same contract as the other camera tools). The
+    // snapshot index stores the resolved id, never the display name.
+    let camera = findCamera(rawCamera)
+    if (!camera) {
+      await refreshWebcams().catch(() => {})
+      camera = findCamera(rawCamera)
+    }
+    if (camera) cameraId = camera.id
+  }
+
+  const index = await loadIndex()
+  const target = resolveSnapshotForShow(index, { snapshotId: args.snapshotId, cameraId })
+  if (!target) {
+    return {
+      ok: false,
+      error: args.snapshotId
+        ? `snapshot not found: ${args.snapshotId}`
+        : rawCamera
+          ? `no snapshots for camera: ${rawCamera}`
+          : 'no snapshots available'
+    }
+  }
+
+  const jpegBase64 = await readSnapshotFile(target.id)
+  if (!jpegBase64) return { ok: false, error: `snapshot file not found: ${target.id}` }
+
+  const cameraName = findCamera(target.cameraId)?.name || target.cameraId
+  const description = (args.description || target.description || '').trim()
+  const structuredResponse = buildSnapshotCard({
+    snapshotId: target.id,
+    cameraId: target.cameraId,
+    cameraName,
+    ts: target.ts,
+    description,
+    imageDataUri: toEmbeddedDataUri(jpegBase64)
+  })
+
+  return {
+    ok: true,
+    snapshotId: target.id,
+    cameraId: target.cameraId,
+    cameraName,
+    ts: target.ts,
+    // Keep the card payload out of the model context: the instruction is the
+    // JSON result the model reads, while the card itself renders in the chat.
+    instruction: JSON.stringify({
+      ok: true,
+      snapshotId: target.id,
+      cameraId: target.cameraId,
+      cameraName,
+      ts: target.ts,
+      displayed: true
+    }),
     structuredResponse
   }
 }
@@ -4600,15 +4759,21 @@ function describePlan(camera: CameraEntry, triggers: Trigger[]): string {
   return `Vou monitorar "${camera.name}" para: ${parts.join('; ')}. Alertas com snapshot.`
 }
 
-const SEND_TARGET_NAMES: Record<string, string> = {
-  whatsapp: 'WhatsApp',
-  momaismarthome: 'casa inteligente',
-  'momai-vision': 'MomAI Vision'
+/**
+ * Human label for an automation target without hardcoding extension ids. The
+ * host owns target discovery; the extension only renders what the user picked.
+ */
+function describeTargetName(target?: string): string {
+  const raw = String(target || '').trim()
+  if (!raw) return 'o canal configurado'
+  const clean = raw.replace(/^momai-/, '').replace(/[-_]+/g, ' ').trim()
+  if (!clean) return 'o canal configurado'
+  return clean.charAt(0).toUpperCase() + clean.slice(1)
 }
 
 function describeSendAction(a: MonitorAction): string {
   const args = (a.args || {}) as Record<string, unknown>
-  const targetName = SEND_TARGET_NAMES[a.target] || a.target
+  const targetName = describeTargetName(a.target)
   const contact = typeof args.contact === 'string' && args.contact.trim() ? args.contact.trim() : null
   const device = typeof args.device_name === 'string' && args.device_name.trim() ? args.device_name.trim() : null
   const action = typeof args.action === 'string' ? args.action : null
@@ -4837,10 +5002,188 @@ async function toolDiscoverCameras(args?: { timeoutMs?: number }): Promise<unkno
   }
 }
 
+async function resolveCameraForPtz(cameraIdOrName?: string): Promise<{
+  host: string
+  username?: string
+  password?: string
+  cameraName?: string
+  camera: CameraEntry
+} | null> {
+  if (!cameraIdOrName) return null
+  const config = await loadConfig()
+  const cams = Array.isArray(config.ipCameras) ? config.ipCameras : []
+  const cleanTarget = cameraIdOrName.replace(/^ip:/, '')
+  const cam = cams.find(
+    (c) =>
+      c.id === cameraIdOrName ||
+      c.id === cleanTarget ||
+      c.id === `ip:${cleanTarget}` ||
+      c.name === cameraIdOrName ||
+      c.name === cleanTarget ||
+      c.url === cameraIdOrName ||
+      c.url === cleanTarget ||
+      c.url === `ip:${cleanTarget}` ||
+      (c.url && parseCameraAuth(c.url).cleanUrl === parseCameraAuth(cleanTarget).cleanUrl)
+  )
+  if (!cam) return null
+
+  const host = extractRtspHost(cam.url || cam.id)
+  if (!host) return null
+
+  const auth = parseCameraAuth(cam.url)
+  let username = auth.username || (cam as any).username || ''
+  let password = auth.password || (cam as any).password || ''
+
+  if (!password && bridge) {
+    try {
+      const map = await credentialStore()
+      const key = credentialKey(cam.url)
+      if (hasCredential(map, key)) {
+        const cred = await getCredential(bridge.storage, bridge.secureStorage, map, key)
+        if (cred) {
+          username = username || cred.username
+          password = cred.password
+        }
+      }
+    } catch {}
+  }
+
+  return {
+    host,
+    username,
+    password,
+    cameraName: cam.name,
+    camera: {
+      id: cam.id,
+      name: cam.name,
+      source: 'ip',
+      url: cam.url,
+      username,
+      password,
+      transport: cam.transport,
+      previewWidth: cam.previewWidth,
+      codec: cam.codec
+    }
+  }
+}
+
+const PTZ_FRAME_SETTLE_MS = 250
+const PTZ_FRAME_WAIT_TRIES = 20
+const PTZ_FRAME_WAIT_INTERVAL_MS = 250
+
+/**
+ * Grabs a transient frame after a PTZ step. It is returned to the host as a
+ * model-only frame: never saved to the gallery and never rendered in the chat.
+ * An already-running stream is read directly; a selected camera with no stream
+ * is started for the frame and stopped again afterwards.
+ */
+async function capturePtzFrame(camera: CameraEntry): Promise<{ jpegBase64: string } | null> {
+  const alreadyStreaming =
+    mjpegStreams.has(camera.id) ||
+    rtspSessions.has(camera.id) ||
+    rtspConnectingCams.has(camera.id)
+  let started = false
+  if (!alreadyStreaming) {
+    const config = await loadConfig().catch(() => ({} as StoredConfig))
+    if (!(config.selectedCameras || []).includes(camera.id)) return null
+    await startMjpeg(camera).catch(() => {})
+    started = true
+  }
+  try {
+    await new Promise((resolve) => setTimeout(resolve, PTZ_FRAME_SETTLE_MS))
+    for (let i = 0; i < PTZ_FRAME_WAIT_TRIES; i++) {
+      const frame = await getCameraFrame(camera)
+      if (frame) return frame
+      await new Promise((resolve) => setTimeout(resolve, PTZ_FRAME_WAIT_INTERVAL_MS))
+    }
+    return null
+  } finally {
+    if (started) stopMjpeg(camera.id)
+  }
+}
+
+async function toolControlPtz(args: {
+  cameraId?: string
+  camera?: string
+  name?: string
+  action?: 'move' | 'step' | 'stop' | 'home' | 'preset' | 'status' | 'warmup'
+  direction?: PtzDirection
+  speed?: number
+  durationMs?: number
+  presetToken?: string
+}): Promise<unknown> {
+  const targetId = args.cameraId || args.camera || args.name
+  const resolved = await resolveCameraForPtz(targetId)
+  if (!resolved) {
+    return { ok: false, error: `Câmera IP não encontrada ou não suporta PTZ: ${targetId || 'desconhecida'}` }
+  }
+
+  const action = args.action || 'step'
+  const result = await dispatchPtzCommand({
+    host: resolved.host,
+    action,
+    direction: args.direction || 'up',
+    speed: typeof args.speed === 'number' ? args.speed : 0.5,
+    durationMs: typeof args.durationMs === 'number' ? args.durationMs : undefined,
+    presetToken: args.presetToken,
+    username: resolved.username,
+    password: resolved.password
+  })
+
+  // Persiste endpoint descoberto para acessos futuros instantâneos
+  if (result.ok && result.serviceUrl && bridge) {
+    const discoveredUrl = result.serviceUrl
+    void (async () => {
+      try {
+        const stored = ((await bridge.storage.get('ptz_endpoints')) || {}) as Record<string, CachedEndpoint>
+        if (!stored[resolved.host] || stored[resolved.host].serviceUrl !== discoveredUrl) {
+          stored[resolved.host] = {
+            serviceUrl: discoveredUrl,
+            profileToken: result.profileToken || 'IPCProfilesToken0'
+          }
+          await bridge.storage.set('ptz_endpoints', stored)
+        }
+      } catch {}
+    })()
+  }
+
+  // A bounded step is the one movement where visual feedback helps: hand the
+  // host one transient frame so a vision-capable model can decide whether to
+  // continue. No snapshot is saved and nothing is shown in the chat.
+  if (result.ok && action === 'step') {
+    const frame = await capturePtzFrame(resolved.camera).catch(() => null)
+    const dataUrl = frame ? toEmbeddedDataUri(frame.jpegBase64) : null
+    if (dataUrl) {
+      return {
+        ...result,
+        frames: [
+          {
+            dataUrl,
+            caption: `Camera frame after moving ${args.direction || 'up'} for ${result.durationMs ?? 0} ms.`
+          }
+        ]
+      }
+    }
+  }
+
+  return result
+}
+
+async function toolGetPtzPresets(args: { cameraId?: string; camera?: string; name?: string }): Promise<unknown> {
+  const targetId = args.cameraId || args.camera || args.name
+  const resolved = await resolveCameraForPtz(targetId)
+  if (!resolved) {
+    return { ok: false, error: `Câmera IP não encontrada: ${targetId || 'desconhecida'}`, presets: [] }
+  }
+
+  return fetchPtzPresets(resolved.host, resolved.username, resolved.password)
+}
+
 const tools: Record<string, (args: any) => Promise<unknown>> = {
   list_cameras: toolListCameras,
   discover_cameras: toolDiscoverCameras,
   capture_snapshot: toolCaptureSnapshot,
+  show_snapshot: toolShowSnapshot,
   delete_snapshot: toolDeleteSnapshot,
   clear_snapshots: toolClearSnapshots,
   start_monitoring: toolStartMonitoring,
@@ -4860,7 +5203,9 @@ const tools: Record<string, (args: any) => Promise<unknown>> = {
   frame_pump: toolFramePump,
   configure: toolConfigure,
   warm_webcam: toolWarmWebcam,
-  show_overlay: toolShowOverlay
+  show_overlay: toolShowOverlay,
+  control_ptz: toolControlPtz,
+  get_ptz_presets: toolGetPtzPresets
 }
 
 let initPromise: Promise<void> | null = null
@@ -4877,6 +5222,16 @@ function ensureInitialized(): Promise<void> {
     // webcam e os monitores de automação são mantidos mesmo com um restore
     // lento em background.
     void syncAutomationMonitors().catch(() => {})
+    void (async () => {
+      try {
+        if (bridge) {
+          const stored = ((await bridge.storage.get('ptz_endpoints')) || {}) as Record<string, CachedEndpoint>
+          for (const [h, ep] of Object.entries(stored)) {
+            if (ep && ep.serviceUrl) setPtzCachedEndpoint(h, ep)
+          }
+        }
+      } catch {}
+    })()
     setInterval(() => {
       void syncWebcamWatches().catch(() => {})
       void syncAutomationMonitors().catch(() => {})
@@ -4971,6 +5326,8 @@ export async function init(momai: MomaiBridge): Promise<void> {
 const NO_YOLO_WARMUP_TOOLS = new Set([
   'frame_pump',
   'get_frame',
+  'capture_snapshot',
+  'show_snapshot',
   'list_cameras',
   'get_status',
   'list_snapshots',
@@ -4980,7 +5337,9 @@ const NO_YOLO_WARMUP_TOOLS = new Set([
   'reload_camera',
   'clear_camera_cache',
   'get_camera_credentials',
-  'discover_cameras'
+  'discover_cameras',
+  'control_ptz',
+  'get_ptz_presets'
 ])
 
 export default {

@@ -162,7 +162,13 @@
       "clearCacheHelp": "Kills stuck Windows processes and releases camera RTSP sessions without having to restart the camera."
     },
     "printSaved": "Snapshot saved!",
-    "capturing": "Capturing..."
+    "capturing": "Capturing...",
+    "ptzControl": "PTZ Control",
+    "ptzReset": "PTZ Reset",
+    "ptzPresets": "Presets",
+    "ptzNoPresets": "No presets saved",
+    "ptzClose": "Close PTZ",
+    "ptzMoving": "Moving camera..."
   },
   "monitoring": {
     "title": "Monitoring Rules",
@@ -318,6 +324,7 @@
       "listDevices": "List devices",
       "queryDevice": "Query device",
       "captureSnapshot": "Capture snapshot",
+      "showSnapshot": "Show snapshot",
       "startMonitoring": "Start monitoring",
       "setActions": "Configure actions",
       "getActions": "View actions"
@@ -339,7 +346,8 @@
       "cameraId": "Camera",
       "camera": "Camera",
       "monitorId": "Monitor",
-      "label": "Label"
+      "label": "Label",
+      "durationMs": "Duration (ms)"
     },
     "resume": "Resume",
     "pausedHeader": "Paused ({count})"
