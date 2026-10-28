@@ -547,7 +547,11 @@
       "refresh": "Atualizar",
       "liveBadge": "AO VIVO",
       "retry": "Tentar de novo",
-      "needsSetup": "Adicione novamente pela Galeria e escolha a câmera."
+      "needsSetup": "Adicione novamente pela Galeria e escolha a câmera.",
+      "doubleClickToExpand": "Dois cliques para abrir em modo ampliado",
+      "noActiveCamera": "Não possui nenhuma câmera ativa.",
+      "askActivate": "Deseja ativar uma câmera agora?",
+      "activateAction": "Ativar câmera"
     },
     "lastDetection": {
       "title": "Última detecção",

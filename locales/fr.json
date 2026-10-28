@@ -547,7 +547,11 @@
       "refresh": "Actualiser",
       "liveBadge": "EN DIRECT",
       "retry": "Réessayer",
-      "needsSetup": "Ajoutez à nouveau depuis la Galerie et choisissez une caméra."
+      "needsSetup": "Ajoutez à nouveau depuis la Galerie et choisissez une caméra.",
+      "doubleClickToExpand": "Double-cliquez pour ouvrir en mode agrandi",
+      "noActiveCamera": "Aucune caméra active.",
+      "askActivate": "Souhaitez-vous en activer une maintenant ?",
+      "activateAction": "Activer la caméra"
     },
     "lastDetection": {
       "title": "Dernière détection",

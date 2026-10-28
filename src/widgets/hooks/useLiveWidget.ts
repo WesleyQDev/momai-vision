@@ -3,17 +3,25 @@ import { extractJpegFrame, indexOfSeq } from '../../vision/mjpeg-parse'
 import {
   buildWidgetStreamUrl,
   fetchWidgetCameraName,
+  fetchWidgetCameraStatus,
   fetchWidgetFrame
 } from '../services/widgetStream'
 
 export type LiveStatus = 'idle' | 'connecting' | 'live' | 'polling' | 'error'
 
-interface LiveState {
+export function isNoActiveCameraError(error?: string): boolean {
+  if (!error) return false
+  return /unknown camera|não está selecionada|nenhuma câmera|no camera/i.test(error)
+}
+
+export interface LiveState {
   status: LiveStatus
   error: string
+  activeCameraId: string
   cameraName: string
   canvasRef: { current: HTMLCanvasElement | null }
   retry: () => void
+  isNoActiveCamera: boolean
 }
 
 const DRAW_THROTTLE_MS = 100
@@ -61,19 +69,117 @@ function decodeDataUrlToCanvas(canvas: HTMLCanvasElement | null, dataUrl: string
  * surfaces backend errors (camera not selected, paused) instead of a
  * silent empty frame.
  */
-export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
+export function useLiveWidget(requestedCameraId: string, isEditing: boolean): LiveState {
+  const [activeCameraId, setActiveCameraId] = useState<string>(requestedCameraId || '')
   const [status, setStatus] = useState<LiveStatus>('idle')
   const [error, setError] = useState('')
   const [cameraName, setCameraName] = useState('')
+  const [isNoActive, setIsNoActive] = useState(false)
   const [retryToken, setRetryToken] = useState(0)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   const retry = useCallback(() => {
+    setIsNoActive(false)
     setRetryToken((token) => token + 1)
   }, [])
 
+  const currentCameraId = activeCameraId || requestedCameraId
+
+  const refreshName = useCallback(async () => {
+    if (!currentCameraId) return
+    try {
+      const name = await fetchWidgetCameraName(currentCameraId)
+      if (name) setCameraName(name)
+    } catch {}
+  }, [currentCameraId])
+
+  // Re-check cameras when extension finishes adding a camera, when tab becomes visible, or on focus/navigation
   useEffect(() => {
-    if (!cameraId || isEditing) {
+    if (isEditing) return
+
+    const onRecheck = (e?: Event) => {
+      const detail = (e as CustomEvent)?.detail
+      if (detail?.name && !detail?.selectedCameras) {
+        return
+      }
+      setIsNoActive(false)
+      setRetryToken((t) => t + 1)
+    }
+
+    const onVisibilityChange = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        onRecheck()
+      }
+    }
+
+    window.addEventListener('momai-vision:cameras-updated', onRecheck)
+    window.addEventListener('storage', onRecheck)
+    window.addEventListener('focus', onRecheck)
+    window.addEventListener('momai_navigate', onRecheck)
+    window.addEventListener('momai:sidebar-click', onRecheck)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+
+    return () => {
+      window.removeEventListener('momai-vision:cameras-updated', onRecheck)
+      window.removeEventListener('storage', onRecheck)
+      window.removeEventListener('focus', onRecheck)
+      window.removeEventListener('momai_navigate', onRecheck)
+      window.removeEventListener('momai:sidebar-click', onRecheck)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+    }
+  }, [isEditing])
+
+  // While in no-active-camera state, poll smoothly to auto-start stream as soon as user adds/activates a camera
+  useEffect(() => {
+    if (isEditing || !isNoActive) return
+    const timer = setInterval(() => {
+      void fetchWidgetCameraStatus(requestedCameraId)
+        .then((res) => {
+          if (res.hasAnyCamera) {
+            setIsNoActive(false)
+            setRetryToken((t) => t + 1)
+          }
+        })
+        .catch(() => {})
+    }, 2500)
+    return () => clearInterval(timer)
+  }, [isEditing, isNoActive, requestedCameraId])
+
+  useEffect(() => {
+    if (!currentCameraId || isEditing) return
+
+    const isTargetCamera = (targetId?: string) => {
+      if (!targetId) return false
+      const normTarget = targetId.toLowerCase().replace(/^ip:/, '').replace(/\/+$/, '')
+      const normCam = currentCameraId.toLowerCase().replace(/^ip:/, '').replace(/\/+$/, '')
+      return normTarget === normCam || normTarget.includes(normCam) || normCam.includes(normTarget)
+    }
+
+    const onUpdate = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail
+      if (!detail) {
+        void refreshName()
+        return
+      }
+      if (isTargetCamera(detail.cameraId) || isTargetCamera(detail.oldId)) {
+        if (detail.name && typeof detail.name === 'string') {
+          setCameraName(detail.name.trim())
+        } else {
+          void refreshName()
+        }
+      }
+    }
+
+    window.addEventListener('momai-vision:cameras-updated', onUpdate)
+    window.addEventListener('storage', onUpdate)
+    return () => {
+      window.removeEventListener('momai-vision:cameras-updated', onUpdate)
+      window.removeEventListener('storage', onUpdate)
+    }
+  }, [currentCameraId, isEditing, refreshName])
+
+  useEffect(() => {
+    if (isEditing) {
       setStatus('idle')
       return
     }
@@ -86,14 +192,51 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
     async function run(): Promise<void> {
       setStatus('connecting')
       setError('')
+      setIsNoActive(false)
+
+      let targetId = requestedCameraId
 
       try {
-        const name = await fetchWidgetCameraName(cameraId)
-        if (!cancelled && name) setCameraName(name)
+        const camStatus = await fetchWidgetCameraStatus(targetId)
+        if (cancelled) return
+
+        if (!camStatus.hasAnyCamera) {
+          setIsNoActive(true)
+          setActiveCameraId('')
+          setError('Nenhuma câmera ativa.')
+          setStatus('error')
+          return
+        }
+
+        if (camStatus.name) {
+          setCameraName(camStatus.name)
+        }
+
+        // If the requested camera is active, keep it.
+        // Otherwise (empty or missing/unknown), fall back to the first active camera.
+        if (camStatus.isActive && targetId) {
+          setActiveCameraId(targetId)
+        } else if (camStatus.firstCameraId) {
+          targetId = camStatus.firstCameraId
+          setActiveCameraId(targetId)
+        }
       } catch {
-        if (!cancelled) setCameraName(cameraId)
+        if (!targetId) {
+          setIsNoActive(true)
+          setActiveCameraId('')
+          setError('Nenhuma câmera ativa.')
+          setStatus('error')
+          return
+        }
       }
-      if (cancelled) return
+
+      if (!targetId) {
+        setIsNoActive(true)
+        setActiveCameraId('')
+        setError('Nenhuma câmera ativa.')
+        setStatus('error')
+        return
+      }
 
       // Warmup validates the camera (selected, not paused) and paints the
       // first frame immediately while the stream connects.
@@ -101,14 +244,23 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
       for (let i = 1; i <= maxWarmupTries; i++) {
         if (cancelled) return
         try {
-          const first = await fetchWidgetFrame(cameraId)
+          const first = await fetchWidgetFrame(targetId)
           if (cancelled) return
           await decodeDataUrlToCanvas(canvasRef.current, first.image)
           break
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
-          if (msg.includes('não está selecionada') || msg.includes('paused')) {
+          if (
+            msg.includes('não está selecionada') ||
+            msg.includes('paused') ||
+            msg.includes('unknown camera') ||
+            msg.includes('Nenhuma câmera') ||
+            msg.includes('no camera')
+          ) {
             if (!cancelled) {
+              if (isNoActiveCameraError(msg)) {
+                setIsNoActive(true)
+              }
               setError(msg)
               setStatus('error')
             }
@@ -125,9 +277,9 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
       }
       if (cancelled) return
 
-      const url = buildWidgetStreamUrl(cameraId, Date.now())
+      const url = buildWidgetStreamUrl(targetId, Date.now())
       if (!url) {
-        startPolling()
+        startPolling(targetId)
         return
       }
 
@@ -188,7 +340,7 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
       }
 
       const watchdog = setTimeout(() => {
-        if (!cancelled && !gotFrame) startPolling()
+        if (!cancelled && !gotFrame) startPolling(targetId)
       }, STREAM_WATCHDOG_MS)
       onCancel(() => clearTimeout(watchdog))
 
@@ -224,11 +376,11 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
       } catch (err) {
         if (cancelled) return
         if ((err as Error)?.name === 'AbortError') return
-        startPolling()
+        startPolling(targetId)
       }
     }
 
-    function startPolling(): void {
+    function startPolling(pollTargetId: string): void {
       if (cancelled) return
       setStatus('polling')
       let failures = 0
@@ -239,7 +391,7 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
       const poll = async (): Promise<void> => {
         if (cancelled) return
         try {
-          const { image } = await fetchWidgetFrame(cameraId)
+          const { image } = await fetchWidgetFrame(pollTargetId)
           if (cancelled) return
           failures = 0
           setError('')
@@ -247,9 +399,15 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
           await decodeDataUrlToCanvas(canvasRef.current, image)
         } catch (err) {
           failures += 1
-          if (failures >= MAX_POLL_FAILURES && !cancelled) {
-            setError(err instanceof Error ? err.message : 'Capture failed.')
-            setStatus('error')
+          const msg = err instanceof Error ? err.message : 'Capture failed.'
+          if (isNoActiveCameraError(msg) || failures >= MAX_POLL_FAILURES) {
+            if (!cancelled) {
+              if (isNoActiveCameraError(msg)) {
+                setIsNoActive(true)
+              }
+              setError(msg)
+              setStatus('error')
+            }
             return
           }
         }
@@ -267,7 +425,15 @@ export function useLiveWidget(cameraId: string, isEditing: boolean): LiveState {
         } catch {}
       }
     }
-  }, [cameraId, isEditing, retryToken])
+  }, [requestedCameraId, isEditing, retryToken])
 
-  return { status, error, cameraName, canvasRef, retry }
+  return {
+    status,
+    error,
+    activeCameraId,
+    cameraName,
+    canvasRef,
+    retry,
+    isNoActiveCamera: isNoActive || (!activeCameraId && !requestedCameraId && status === 'error') || isNoActiveCameraError(error)
+  }
 }

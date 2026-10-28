@@ -20,6 +20,7 @@ interface ServerState {
   selectedCameras: string[]
   ipCameras: Array<{ id: string; name: string; url: string }>
   pausedCameras?: string[]
+  discoveredCameras?: any[]
 }
 
 // In-memory fake of the extension backend: list_cameras/get_status configure
@@ -72,6 +73,8 @@ function setupServer(
             )
           }
         }
+      case 'discover_cameras':
+        return { ok: true, data: { ok: true, cameras: state.discoveredCameras || [] } }
       case 'list_alerts':
         return { ok: true, data: { alerts: [] } }
       case 'list_snapshots':
@@ -284,7 +287,7 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
     const registeredIp = { id: 'ip:http://10.0.0.1:8080/video', name: 'Portão', url: 'http://10.0.0.1:8080/video' }
     setupServer({
       cameras: [WEB_A, WEB_B, { id: registeredIp.id, name: 'Portão', source: 'ip', online: true, monitors: 0 }],
-      selectedCameras: ['webcam:a'],
+      selectedCameras: ['webcam:a', registeredIp.id],
       ipCameras: [registeredIp]
     })
     render(<VisionPage />)
@@ -336,6 +339,53 @@ describe('VisionPage — Adicionar Câmeras (seleção + confirmação)', () => 
     await openCameraModal()
     await stageIp('Portão Novo', 'http://10.0.0.1:8080/video')
 
+    expect(screen.queryByText('Esta câmera IP já está cadastrada.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Adicionar 1 câmera' })).toBeTruthy()
+  })
+
+  it('câmera descoberta na rede não continua como ativa após remoção e pode ser readicionada', async () => {
+    const registeredIp = { id: 'ip:http://10.0.0.1:8080/video', name: 'Portão', url: 'http://10.0.0.1:8080/video' }
+    const discovered = [{ id: 'disc-1', name: 'Portão', ip: '10.0.0.1', suggestedUrl: 'http://10.0.0.1:8080/video' }]
+    const { state } = setupServer({
+      cameras: [{ id: registeredIp.id, name: 'Portão', source: 'ip', online: true, monitors: 0 }],
+      selectedCameras: [registeredIp.id],
+      ipCameras: [registeredIp],
+      discoveredCameras: discovered
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await screen.findByText('Portão')
+
+    // Remover a câmera IP existente através do botão de remoção no card
+    fireEvent.click(await screen.findByTitle('Remover câmera IP (cadastro e exibição)'))
+    await screen.findByText('Fechar câmera?')
+    fireEvent.click(screen.getByRole('button', { name: 'Sim' }))
+
+    // Aguardar atualização do estado (removida do ipCameras)
+    await waitFor(() => {
+      expect(state.ipCameras).toHaveLength(0)
+    })
+
+    // Abrir modal de adicionar câmera e mudar para a aba Câmeras IP
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/i }))
+
+    // Abrir o dropdown de câmeras detectadas
+    await screen.findByText('Selecione uma câmera detectada...')
+    fireEvent.click(screen.getByText('Selecione uma câmera detectada...'))
+
+    // A opção deve ser exibida com a badge ONVIF (e NÃO "Ativa")
+    await screen.findByText(/Portão \(10\.0\.0\.1\)/)
+    expect(screen.queryByText('Ativa')).toBeNull()
+
+    // Clicar na câmera detectada
+    fireEvent.click(screen.getByText(/Portão \(10\.0\.0\.1\)/))
+
+    // Não deve acusar erro de já cadastrada
+    expect(screen.queryByText('Esta câmera IP já está cadastrada.')).toBeNull()
+
+    // Clicar em Adicionar à seleção
+    fireEvent.click(screen.getByText('Adicionar à seleção'))
     expect(screen.queryByText('Esta câmera IP já está cadastrada.')).toBeNull()
     expect(screen.getByRole('button', { name: 'Adicionar 1 câmera' })).toBeTruthy()
   })
@@ -576,16 +626,17 @@ describe('VisionPage — lembrar credenciais e preferências da câmera IP', () 
     fireEvent.click(screen.getByRole('checkbox', { name: 'Lembrar credenciais e preferências' }))
     fireEvent.click(screen.getByText('Adicionar à seleção'))
 
-    // The password never reaches localStorage; the URL is stored clean.
+    // The password and clean URL are stored in camera-defaults
     expect(JSON.parse(localStorage.getItem('momai-vision:camera-defaults') || '{}')).toEqual({
       username: 'admin',
+      password: 'pass123',
       url: 'rtsp://192.168.0.4:554/onvif2',
       transport: 'tcp',
       previewWidth: 640,
       codec: 'h264',
       remember: true
     })
-    expect(localStorage.getItem('momai-vision:camera-defaults')).not.toContain('pass123')
+    expect(localStorage.getItem('momai-vision:camera-defaults')).toContain('pass123')
 
     first.unmount()
     render(<VisionPage />)
@@ -658,6 +709,57 @@ describe('VisionPage — lembrar credenciais e preferências da câmera IP', () 
           previewWidth: 640
         }
       ])
+    })
+  })
+
+  it('cada vez que seleciona uma câmera IP exibe a senha correspondente sem vazar para a outra', async () => {
+    setupServer({
+      cameras: [],
+      discoveredCameras: [
+        { id: 'cam-a', name: 'Câmera A', ip: '192.168.0.10', suggestedUrl: 'rtsp://192.168.0.10:554/onvif1' },
+        { id: 'cam-b', name: 'Câmera B', ip: '192.168.0.20', suggestedUrl: 'rtsp://192.168.0.20:554/onvif1' }
+      ]
+    })
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+    await openCameraModal()
+    fireEvent.click(screen.getByRole('tab', { name: /Câmeras IP/ }))
+
+    // Seleciona Câmera A
+    fireEvent.click(await screen.findByText('Selecione uma câmera detectada...'))
+    fireEvent.click(await screen.findByText('Câmera A (192.168.0.10)'))
+
+    // Digita senha da Câmera A e marca lembrar
+    fireEvent.change(screen.getByPlaceholderText('Senha da câmera (se houver)'), { target: { value: 'senhaA' } })
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Lembrar credenciais e preferências' }))
+    fireEvent.click(screen.getByText('Adicionar à seleção'))
+
+    // Após adicionar Câmera A, o campo de senha fica limpo
+    expect((screen.getByPlaceholderText('Senha da câmera (se houver)') as HTMLInputElement).value).toBe('')
+
+    // Agora seleciona Câmera B (que ainda não tem senha memorizada)
+    fireEvent.click(await screen.findByText('Selecione uma câmera detectada...'))
+    fireEvent.click(await screen.findByText('Câmera B (192.168.0.20)'))
+
+    // Câmera B NÃO deve herdar a senha da Câmera A
+    expect((screen.getByPlaceholderText('Senha da câmera (se houver)') as HTMLInputElement).value).toBe('')
+
+    // Digita senha da Câmera B e adiciona
+    fireEvent.change(screen.getByPlaceholderText('Senha da câmera (se houver)'), { target: { value: 'senhaB' } })
+    fireEvent.click(screen.getByText('Adicionar à seleção'))
+
+    // Seleciona Câmera A novamente — deve carregar senhaA correspondente a ela
+    fireEvent.click(await screen.findByText('Selecione uma câmera detectada...'))
+    fireEvent.click(await screen.findByText('Câmera A (192.168.0.10)'))
+    await waitFor(() => {
+      expect((screen.getByPlaceholderText('Senha da câmera (se houver)') as HTMLInputElement).value).toBe('senhaA')
+    })
+
+    // Seleciona Câmera B novamente — deve carregar senhaB correspondente a ela
+    fireEvent.click(screen.getByText('Câmera A (192.168.0.10)'))
+    fireEvent.click(await screen.findByText('Câmera B (192.168.0.20)'))
+    await waitFor(() => {
+      expect((screen.getByPlaceholderText('Senha da câmera (se houver)') as HTMLInputElement).value).toBe('senhaB')
     })
   })
 })
@@ -1284,6 +1386,44 @@ describe('VisionPage — pausar e retomar vídeo da câmera', () => {
     const cachedAfterMount = localStorage.getItem(`momai-vision:lastframe:${CAM.id}`)
     expect(cachedAfterMount).toBe(JPEG)
   })
+
+  it('salva o nome da câmera no backend, no localStorage aliases e exibe imediatamente no card', async () => {
+    const { calls } = setupServer({
+      cameras: [],
+      selectedCameras: [],
+      ipCameras: []
+    })
+
+    render(<VisionPage />)
+    await screen.findByText('MomAI Vision')
+
+    await openCameraModal()
+    await stageIp('Câmera do Quintal', 'rtsp://192.168.1.100:554/stream')
+
+    const confirmBtn = screen.getByRole('button', { name: /Adicionar 1 câmera/i })
+    fireEvent.click(confirmBtn)
+
+    // O card com o nome configurado deve aparecer na tela
+    await screen.findByText('Câmera do Quintal')
+
+    // Deve salvar no localStorage momai-vision:camera-names
+    await waitFor(() => {
+      const raw = localStorage.getItem('momai-vision:camera-names')
+      expect(raw).toBeTruthy()
+      const aliases = JSON.parse(raw!)
+      expect(aliases['ip:rtsp://192.168.1.100:554/stream']).toBe('Câmera do Quintal')
+    })
+
+    // Deve enviar configure com o nome da câmera para o backend
+    await waitFor(() => {
+      const configureCalls = calls.filter((c) => c.toolName === 'configure' && c.args.ipCameras)
+      expect(configureCalls.length).toBeGreaterThan(0)
+      const last = configureCalls[configureCalls.length - 1]
+      const ipCams = last.args.ipCameras as Array<{ id: string; name: string }>
+      expect(ipCams.some((c) => c.name === 'Câmera do Quintal')).toBe(true)
+    })
+  })
 })
+
 
 

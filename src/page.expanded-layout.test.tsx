@@ -134,3 +134,30 @@ describe('VisionPage — fundo da câmera ampliada segue o tema', () => {
     expect(placeholder.className).not.toContain('text-white')
   })
 })
+
+describe('VisionPage — auto-expand from widget', () => {
+  it('opens expanded camera automatically when momai-vision:auto-expand is in localStorage', async () => {
+    localStorage.setItem('momai-vision:auto-expand', 'webcam:a')
+    setupServer()
+    render(<VisionPage isActive={true} />)
+    await screen.findByText('MomAI Vision')
+
+    const expanded = await screen.findByTestId('expanded-camera')
+    expect(expanded).toBeTruthy()
+    expect(localStorage.getItem('momai-vision:auto-expand')).toBeNull()
+  })
+
+  it('opens expanded camera on momai-vision:expand-camera event', async () => {
+    setupServer()
+    render(<VisionPage isActive={true} />)
+    await screen.findByText('Webcam A')
+
+    expect(screen.queryByTestId('expanded-camera')).toBeNull()
+    window.dispatchEvent(
+      new CustomEvent('momai-vision:expand-camera', { detail: { cameraId: 'webcam:a' } })
+    )
+
+    const expanded = await screen.findByTestId('expanded-camera')
+    expect(expanded).toBeTruthy()
+  })
+})

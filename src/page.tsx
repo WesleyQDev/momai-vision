@@ -57,6 +57,7 @@ import { Pagination } from './components/Pagination'
 import { PtzControlCard, getContainingBlockRect } from './components/PtzControlCard'
 import { useWindowMaximized } from './hooks/useWindowMaximized'
 import { readCachedFrame, storeCachedFrame, shouldCaptureFrameCache, clearCachedFrame, captureOptimizedSnapshot } from './vision/frame-cache'
+import { extractRtspHost } from './vision/freeze-recovery'
 import {
   BACKGROUND_WARMUP_INTERVAL_MS,
   pollIntervalMs,
@@ -70,9 +71,17 @@ const EXT_ID = 'momai-vision'
 
 export function isSameCameraId(a: string, b: string): boolean {
   if (a === b) return true
-  const cleanA = a.replace(/:\/\/[^@]+@/, '://')
-  const cleanB = b.replace(/:\/\/[^@]+@/, '://')
-  return cleanA === cleanB
+  if (!a || !b) return false
+  const stripPrefix = (s: string) => s.replace(/^(ip|webcam):/, '')
+  const cleanA = stripPrefix(a).replace(/:\/\/[^@]+@/, '://').trim()
+  const cleanB = stripPrefix(b).replace(/:\/\/[^@]+@/, '://').trim()
+  if (cleanA === cleanB) return true
+  try {
+    const keyA = credentialKey(cleanA)
+    const keyB = credentialKey(cleanB)
+    if (keyA && keyB && keyA === keyB) return true
+  } catch {}
+  return false
 }
 
 export function isCameraPaused(cameraId: string, pausedList?: string[]): boolean {
@@ -428,7 +437,8 @@ function applyCameraNameAliases(cams: CameraInfo[]): CameraInfo[] {
     const aliases = JSON.parse(raw) as Record<string, string>
     if (!aliases || typeof aliases !== 'object') return cams
     return cams.map((c) => {
-      const alias = aliases[c.id]
+      const cleanUrl = c.id.replace(/^ip:/, '').trim()
+      const alias = aliases[c.id] || aliases[cleanUrl] || aliases[`ip:${cleanUrl}`]
       return typeof alias === 'string' && alias.trim() ? { ...c, name: alias } : c
     })
   } catch {
@@ -3285,7 +3295,7 @@ export const CameraCard = memo(function CameraCard({
       </div>
 
       <div
-        className={`relative flex flex-col h-full rounded-2xl bg-card border overflow-hidden shadow-md transition-all ${isDragging
+        className={`relative flex flex-col h-full rounded-lg bg-card border overflow-hidden shadow-md transition-all ${isDragging
           ? 'opacity-40 scale-95 border-emerald-500/50'
           : isDragOver
             ? 'border-2 border-emerald-400 bg-emerald-500/10 shadow-emerald-500/20 scale-[1.02]'
@@ -3293,7 +3303,7 @@ export const CameraCard = memo(function CameraCard({
           }`}
       >
                 <div
-          className="relative w-full aspect-video bg-input/40 rounded-t-2xl overflow-hidden shrink-0 cursor-pointer select-none"
+          className="relative w-full aspect-video bg-input/40 rounded-t-lg overflow-hidden shrink-0 cursor-pointer select-none"
           style={{ aspectRatio: '16 / 9' }}
           onDoubleClick={(e) => {
             if (!isEditingZone && onExpand) {
@@ -3687,22 +3697,34 @@ function AddCameraCard({ onClick }: { onClick: () => void }): JSX.Element {
   const { t } = useI18n()
   return (
     <div className="flex flex-col min-w-0 h-full">
-      <div className="h-[21px] mb-1.5" />
+      {/* Header com a mesma altura e margem do CameraCard para alinhamento vertical perfeito */}
+      <div className="flex items-center justify-between gap-2 px-1 mb-1.5 min-w-0 invisible select-none pointer-events-none" aria-hidden="true">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-xs font-semibold truncate">&nbsp;</span>
+        </div>
+      </div>
       <button
         onClick={onClick}
         type="button"
-        className="group relative rounded-2xl border border-dashed border-border/50 hover:border-border bg-input/40 hover:bg-input/80 transition-all duration-200 flex flex-col items-center justify-center p-6 text-center overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/30 h-full min-h-[220px] cursor-pointer min-w-0 flex-1"
+        className="group relative rounded-lg border border-dashed border-border/50 hover:border-border bg-input/40 hover:bg-input/80 transition-all duration-200 flex flex-col items-center justify-center text-center overflow-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/30 h-full cursor-pointer min-w-0 flex-1"
       >
-        <div className="w-9 h-9 rounded-xl bg-card border border-border/40 text-text-muted group-hover:text-text flex items-center justify-center mb-3 transition-all duration-200">
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-        </div>
-        <span className="text-[13px] font-semibold text-text tracking-tight">
-          {t('cameras.add')}
-        </span>
-        <span className="text-[11px] text-text-muted mt-1 leading-snug">
-          {t('cameras.addCardSubtitle')}
+        {/* Spacer invisível com o mesmo aspect-ratio 16:9 + altura da barra inferior do CameraCard */}
+        <span className="block w-full aspect-video shrink-0 invisible pointer-events-none select-none" style={{ aspectRatio: '16 / 9' }} aria-hidden="true" />
+        <span className="block h-[47px] shrink-0 invisible pointer-events-none select-none" aria-hidden="true" />
+
+        {/* Conteúdo centralizado ocupando todo o card */}
+        <span className="absolute inset-0 flex flex-col items-center justify-center p-6">
+          <span className="w-9 h-9 rounded-lg bg-card border border-border/40 text-text-muted group-hover:text-text flex items-center justify-center mb-3 transition-all duration-200">
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </span>
+          <span className="text-[13px] font-semibold text-text tracking-tight">
+            {t('cameras.add')}
+          </span>
+          <span className="text-[11px] text-text-muted mt-1 leading-snug">
+            {t('cameras.addCardSubtitle')}
+          </span>
         </span>
       </button>
     </div>
@@ -3719,13 +3741,62 @@ interface IpCameraDraft {
   codec?: RtspCodec
 }
 
+interface StoredCameraCredential {
+  username?: string
+  password?: string
+}
+
+function getStoredCameraCredentialsMap(): Record<string, StoredCameraCredential> {
+  try {
+    if (typeof localStorage === 'undefined') return {}
+    const raw = localStorage.getItem(`${EXT_ID}:camera-credentials-map`)
+    return raw ? (JSON.parse(raw) as Record<string, StoredCameraCredential>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveStoredCameraCredential(url: string, cred: StoredCameraCredential): void {
+  try {
+    if (typeof localStorage === 'undefined' || !url) return
+    const clean = parseCameraAuth(url).cleanUrl.trim()
+    const host = extractRtspHost(clean)
+    const map = getStoredCameraCredentialsMap()
+    if (clean) map[clean] = cred
+    if (host) map[host] = cred
+    localStorage.setItem(`${EXT_ID}:camera-credentials-map`, JSON.stringify(map))
+  } catch {}
+}
+
+function findStoredCameraCredential(url: string): StoredCameraCredential | null {
+  try {
+    if (!url) return null
+    const clean = parseCameraAuth(url).cleanUrl.trim()
+    const host = extractRtspHost(clean)
+    const map = getStoredCameraCredentialsMap()
+    if (clean && map[clean]) return map[clean]
+    if (host && map[host]) return map[host]
+    if (host) {
+      for (const [k, v] of Object.entries(map)) {
+        if (k.includes(`://${host}:`) || k.includes(`://${host}/`) || k === host) {
+          return v
+        }
+      }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 function AddCameraModal({
   isOpen,
   isActive = true,
   onClose,
   allCameras,
   selectedCameraIds,
-  onConfirm
+  onConfirm,
+  initialTab = 'webcam'
 }: {
   isOpen: boolean
   isActive?: boolean
@@ -3733,10 +3804,17 @@ function AddCameraModal({
   allCameras: CameraInfo[]
   selectedCameraIds: string[]
   onConfirm: (webcamIds: string[], ipDrafts: IpCameraDraft[]) => Promise<void>
+  initialTab?: 'webcam' | 'ip'
 }): JSX.Element | null {
   const { t } = useI18n()
   const isMaximized = useWindowMaximized()
-  const [activeTab, setActiveTab] = useState<'webcam' | 'ip'>('webcam')
+  const [activeTab, setActiveTab] = useState<'webcam' | 'ip'>(initialTab || 'webcam')
+
+  useEffect(() => {
+    if (isOpen) {
+      setActiveTab(initialTab || 'webcam')
+    }
+  }, [isOpen, initialTab])
   const [selectedWebcamId, setSelectedWebcamId] = useState<string>('')
   const [pendingWebcamIds, setPendingWebcamIds] = useState<string[]>([])
   const [pendingIpDrafts, setPendingIpDrafts] = useState<IpCameraDraft[]>([])
@@ -3789,19 +3867,11 @@ function AddCameraModal({
       const cleanSuggested = parseCameraAuth(cam.suggestedUrl || '').cleanUrl.trim()
       const cleanKey = cleanSuggested ? credentialKey(cleanSuggested) : ''
       const targetIp = cam.ip?.trim()
-      const targetName = cam.name?.trim().toLowerCase()
 
-      const activeIpCameras = allCameras.filter(
-        (c) => c.source === 'ip' && selectedCameraIds.includes(c.id)
-      )
-
-      const matchActive = (urlOrId: string | undefined, cameraName?: string): boolean => {
-        if (targetName && cameraName && cameraName.trim().toLowerCase() === targetName) {
-          return true
-        }
+      const matchActive = (urlOrId: string | undefined): boolean => {
         if (!urlOrId) return false
-        if (cam.id && urlOrId === cam.id) return true
-        if (cleanSuggested && (urlOrId === cleanSuggested || urlOrId === `ip:${cleanSuggested}`)) return true
+        if (cam.id && (urlOrId === cam.id || isSameCameraId(urlOrId, cam.id))) return true
+        if (cleanSuggested && (urlOrId === cleanSuggested || urlOrId === `ip:${cleanSuggested}` || isSameCameraId(urlOrId, cleanSuggested))) return true
         const parsed = parseCameraAuth(urlOrId.replace(/^ip:/, '')).cleanUrl
         if (cleanSuggested && parsed === cleanSuggested) return true
         if (cleanKey && credentialKey(parsed) === cleanKey) return true
@@ -3809,32 +3879,42 @@ function AddCameraModal({
         return false
       }
 
-      return (
-        activeIpCameras.some((c) => matchActive(c.id, c.name) || matchActive(c.url, c.name)) ||
-        selectedCameraIds.some((sId) => matchActive(sId))
-      )
+      return selectedCameraIds.some((sId) => matchActive(sId))
     },
-    [allCameras, selectedCameraIds]
+    [selectedCameraIds]
   )
 
-  const handleSelectDiscoveredCamera = (url: string) => {
+  const handleSelectDiscoveredCamera = async (url: string) => {
     if (!url) {
       setSelectedDiscoveredUrl('')
       return
     }
     setSelectedDiscoveredUrl(url)
     const parsed = parseCameraAuth(url)
-    setIpUrl(parsed.cleanUrl)
-    if (parsed.username) {
-      setIpUsername(parsed.username)
-    } else if (!ipUsername.trim()) {
-      setIpUsername('admin')
-    }
-    if (parsed.password) {
-      setIpPassword(parsed.password)
-    }
+    const cleanUrl = parsed.cleanUrl
+    setIpUrl(cleanUrl)
+
     const found = discoveredIpCameras.find((d) => d.suggestedUrl === url)
-    if (found && (!ipName.trim() || ipName.trim() === t('cameras.defaultIpName'))) {
+    const cleanId = `ip:${cleanUrl}`
+    let existingName = ''
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem(`${EXT_ID}:camera-names`)
+        if (raw) {
+          const aliases = JSON.parse(raw) as Record<string, string>
+          existingName = aliases[cleanId] || aliases[cleanUrl] || aliases[url] || ''
+        }
+      }
+    } catch {}
+    if (!existingName) {
+      const matchCam = allCameras.find((c) => isSameCameraId(c.id, cleanId) || isSameCameraId(c.id, cleanUrl) || isSameCameraId(c.id, url))
+      if (matchCam && matchCam.name && matchCam.name !== t('cameras.defaultIpName') && matchCam.name !== t('cameras.fallbackName')) {
+        existingName = matchCam.name
+      }
+    }
+    if (existingName) {
+      setIpName(existingName)
+    } else if (found && (!ipName.trim() || ipName.trim() === t('cameras.defaultIpName'))) {
       setIpName(found.name)
     }
     if (found && isDiscoveredCameraActive(found)) {
@@ -3842,6 +3922,43 @@ function AddCameraModal({
     } else {
       setModalError(null)
     }
+
+    if (parsed.username) {
+      setIpUsername(parsed.username)
+    } else if (!ipUsername.trim()) {
+      setIpUsername('admin')
+    }
+
+    if (parsed.password) {
+      setIpPassword(parsed.password)
+      return
+    }
+
+    if (rememberCredentials) {
+      // 1. Check local per-camera credentials map
+      const localCred = findStoredCameraCredential(url) || findStoredCameraCredential(cleanUrl)
+      if (localCred && (localCred.password !== undefined || localCred.username)) {
+        if (localCred.username) setIpUsername(localCred.username)
+        setIpPassword(localCred.password || '')
+        return
+      }
+
+      // 2. Query backend credential vault for this specific camera
+      try {
+        const res = await command<{ ok?: boolean; username?: string; password?: string }>('get_camera_credentials', {
+          url: cleanUrl
+        })
+        if (res?.ok) {
+          if (res.username) setIpUsername(res.username)
+          setIpPassword(res.password || '')
+          return
+        }
+      } catch {}
+    }
+
+    // 3. This camera does not have its own remembered credentials: clear password
+    // so it never inherits the password of another camera
+    setIpPassword('')
   }
 
   // Reset the pending selection every time the modal (re)opens, so a
@@ -3865,12 +3982,14 @@ function AddCameraModal({
     try {
       localStorage.removeItem(`${EXT_ID}:ip-draft`)
       const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:camera-defaults`) : null
-      const saved = raw ? (JSON.parse(raw) as { username?: unknown; url?: unknown; transport?: unknown; previewWidth?: unknown; codec?: unknown; remember?: unknown }) : null
+      const saved = raw ? (JSON.parse(raw) as { username?: unknown; password?: unknown; url?: unknown; transport?: unknown; previewWidth?: unknown; codec?: unknown; remember?: unknown }) : null
       if (saved && saved.remember) {
         setIpUsername(typeof saved.username === 'string' && saved.username.trim() ? saved.username.trim() : 'admin')
-        // Passwords are never stored in localStorage; recover it from the
-        // encrypted credential store when the host has one on file.
-        setIpPassword('')
+        if (typeof saved.password === 'string') {
+          setIpPassword(saved.password)
+        } else {
+          setIpPassword('')
+        }
         setIpTransport(saved.transport === 'tcp' ? 'tcp' : 'udp')
         setIpPreviewWidth(resolvePreviewWidth(saved.previewWidth))
         setIpCodec(resolveRtspCodec(saved.codec))
@@ -3933,11 +4052,7 @@ function AddCameraModal({
     try {
       if (typeof localStorage === 'undefined') return
       if (defaults && defaults.remember) {
-        // Never persist the password in localStorage: only the encrypted
-        // credential store keeps it.
-        const { password: _password, ...safe } = defaults
-        void _password
-        localStorage.setItem(`${EXT_ID}:camera-defaults`, JSON.stringify(safe))
+        localStorage.setItem(`${EXT_ID}:camera-defaults`, JSON.stringify(defaults))
       } else {
         localStorage.removeItem(`${EXT_ID}:camera-defaults`)
       }
@@ -3947,17 +4062,72 @@ function AddCameraModal({
 
   const handleToggleRememberCredentials = (checked: boolean) => {
     setRememberCredentials(checked)
-    persistCameraDefaults(
-      checked
-        ? {
-            username: ipUsername,
-            transport: ipTransport,
-            previewWidth: ipPreviewWidth,
-            codec: ipCodec,
-            remember: true
-          }
-        : null
-    )
+    if (checked) {
+      if (ipUrl.trim()) {
+        saveStoredCameraCredential(ipUrl.trim(), {
+          username: ipUsername,
+          password: ipPassword
+        })
+      }
+      persistCameraDefaults({
+        username: ipUsername,
+        password: ipPassword,
+        url: ipUrl.trim() ? parseCameraAuth(ipUrl.trim()).cleanUrl : undefined,
+        transport: ipTransport,
+        previewWidth: ipPreviewWidth,
+        codec: ipCodec,
+        remember: true
+      })
+    } else {
+      persistCameraDefaults(null)
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.removeItem(`${EXT_ID}:camera-credentials-map`)
+        }
+      } catch {}
+    }
+  }
+
+  const handleUsernameChange = (val: string) => {
+    setIpUsername(val)
+    if (rememberCredentials) {
+      if (ipUrl.trim()) {
+        saveStoredCameraCredential(ipUrl.trim(), {
+          username: val,
+          password: ipPassword
+        })
+      }
+      persistCameraDefaults({
+        username: val,
+        password: ipPassword,
+        url: ipUrl.trim() ? parseCameraAuth(ipUrl.trim()).cleanUrl : undefined,
+        transport: ipTransport,
+        previewWidth: ipPreviewWidth,
+        codec: ipCodec,
+        remember: true
+      })
+    }
+  }
+
+  const handlePasswordChange = (val: string) => {
+    setIpPassword(val)
+    if (rememberCredentials) {
+      if (ipUrl.trim()) {
+        saveStoredCameraCredential(ipUrl.trim(), {
+          username: ipUsername,
+          password: val
+        })
+      }
+      persistCameraDefaults({
+        username: ipUsername,
+        password: val,
+        url: ipUrl.trim() ? parseCameraAuth(ipUrl.trim()).cleanUrl : undefined,
+        transport: ipTransport,
+        previewWidth: ipPreviewWidth,
+        codec: ipCodec,
+        remember: true
+      })
+    }
   }
 
   const handleStageIp = () => {
@@ -3971,17 +4141,12 @@ function AddCameraModal({
     const password = ipPassword || parsed.password
     const id = `ip:${cleanUrl}`
     const cleanKey = credentialKey(cleanUrl)
-    const isAlreadyActive =
-      selectedCameraIds.some((sId) => {
-        if (sId === id || sId === cleanUrl || sId === `ip:${cleanUrl}`) return true
-        const parsedSId = parseCameraAuth(sId.replace(/^ip:/, '')).cleanUrl
-        return parsedSId === cleanUrl || credentialKey(parsedSId) === cleanKey
-      }) ||
-      ipCameras.some((c) => {
-        if (!c || !c.url) return c?.id === id
-        const cClean = parseCameraAuth(c.url).cleanUrl
-        return c.id === id || cClean === cleanUrl || credentialKey(cClean) === cleanKey
-      })
+    const isAlreadyActive = selectedCameraIds.some((sId) => {
+      if (sId === id || sId === cleanUrl || sId === `ip:${cleanUrl}`) return true
+      if (isSameCameraId(sId, id) || isSameCameraId(sId, cleanUrl)) return true
+      const parsedSId = parseCameraAuth(sId.replace(/^ip:/, '')).cleanUrl
+      return isSameCameraId(parsedSId, cleanUrl) || (cleanKey && credentialKey(parsedSId) === cleanKey)
+    })
     if (isAlreadyActive) {
       setModalError(t('cameras.addModal.alreadyRegistered'))
       return
@@ -4005,8 +4170,13 @@ function AddCameraModal({
       ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
     }
     if (rememberCredentials) {
+      saveStoredCameraCredential(cleanUrl, {
+        username,
+        password: password || ipPassword
+      })
       persistCameraDefaults({
         username,
+        password: password || ipPassword,
         url: cleanUrl,
         transport: ipTransport,
         previewWidth: ipPreviewWidth,
@@ -4018,9 +4188,7 @@ function AddCameraModal({
     setIpUrl('')
     setIpName('')
     setSelectedDiscoveredUrl('')
-    if (!rememberCredentials) {
-      setIpPassword('')
-    }
+    setIpPassword('')
     setModalError(null)
   }
 
@@ -4093,17 +4261,12 @@ function AddCameraModal({
       const password = ipPassword || parsed.password
       const id = `ip:${cleanUrl}`
       const cleanKey = credentialKey(cleanUrl)
-      const isAlreadyActive =
-        selectedCameraIds.some((sId) => {
-          if (sId === id || sId === cleanUrl || sId === `ip:${cleanUrl}`) return true
-          const parsedSId = parseCameraAuth(sId.replace(/^ip:/, '')).cleanUrl
-          return parsedSId === cleanUrl || credentialKey(parsedSId) === cleanKey
-        }) ||
-        ipCameras.some((c) => {
-          if (!c || !c.url) return c?.id === id
-          const cClean = parseCameraAuth(c.url).cleanUrl
-          return c.id === id || cClean === cleanUrl || credentialKey(cClean) === cleanKey
-        })
+      const isAlreadyActive = selectedCameraIds.some((sId) => {
+        if (sId === id || sId === cleanUrl || sId === `ip:${cleanUrl}`) return true
+        if (isSameCameraId(sId, id) || isSameCameraId(sId, cleanUrl)) return true
+        const parsedSId = parseCameraAuth(sId.replace(/^ip:/, '')).cleanUrl
+        return isSameCameraId(parsedSId, cleanUrl) || (cleanKey && credentialKey(parsedSId) === cleanKey)
+      })
       if (isAlreadyActive) {
         setModalError(t('cameras.addModal.alreadyRegistered'))
         return
@@ -4126,8 +4289,13 @@ function AddCameraModal({
       }
       const nextIps = [...pendingIpDrafts, draftItem]
       if (rememberCredentials) {
+        saveStoredCameraCredential(cleanUrl, {
+          username,
+          password: password || ipPassword
+        })
         persistCameraDefaults({
           username,
+          password: password || ipPassword,
           url: cleanUrl,
           transport: ipTransport,
           previewWidth: ipPreviewWidth,
@@ -4381,6 +4549,38 @@ function AddCameraModal({
                                 handleStageIp()
                               }
                             }}
+                            onBlur={() => {
+                              if (ipUrl.trim()) {
+                                const cleanUrl = parseCameraAuth(ipUrl.trim()).cleanUrl
+                                if (rememberCredentials) {
+                                  const localCred = findStoredCameraCredential(cleanUrl)
+                                  if (localCred && (localCred.password || localCred.username)) {
+                                    if (localCred.username) setIpUsername(localCred.username)
+                                    if (localCred.password) setIpPassword(localCred.password)
+                                  }
+                                }
+                                if (!ipName.trim()) {
+                                  const cleanId = `ip:${cleanUrl}`
+                                  let existingName = ''
+                                  try {
+                                    if (typeof localStorage !== 'undefined') {
+                                      const raw = localStorage.getItem(`${EXT_ID}:camera-names`)
+                                      if (raw) {
+                                        const aliases = JSON.parse(raw) as Record<string, string>
+                                        existingName = aliases[cleanId] || aliases[cleanUrl] || ''
+                                      }
+                                    }
+                                  } catch {}
+                                  if (!existingName) {
+                                    const matchCam = allCameras.find((c) => isSameCameraId(c.id, cleanId) || isSameCameraId(c.id, cleanUrl))
+                                    if (matchCam && matchCam.name && matchCam.name !== t('cameras.defaultIpName') && matchCam.name !== t('cameras.fallbackName')) {
+                                      existingName = matchCam.name
+                                    }
+                                  }
+                                  if (existingName) setIpName(existingName)
+                                }
+                              }
+                            }}
                             placeholder={t('cameras.addModal.urlPlaceholder')}
                             className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
                           />
@@ -4396,7 +4596,7 @@ function AddCameraModal({
                           <input
                             id="vision-ip-username"
                             value={ipUsername}
-                            onChange={(e) => setIpUsername(e.target.value)}
+                            onChange={(e) => handleUsernameChange(e.target.value)}
                             placeholder={t('cameras.addModal.usernamePlaceholder')}
                             className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
                           />
@@ -4410,7 +4610,7 @@ function AddCameraModal({
                               id="vision-ip-password"
                               type={showPassword ? 'text' : 'password'}
                               value={ipPassword}
-                              onChange={(e) => setIpPassword(e.target.value)}
+                              onChange={(e) => handlePasswordChange(e.target.value)}
                               onKeyDown={(e) => {
                                 if (e.key === 'Enter' && ipUrl.trim()) {
                                   e.preventDefault()
@@ -7186,7 +7386,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
   const [cameras, setCameras] = useState<CameraInfo[]>(() => {
     try {
       const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:cameras`) : null
-      return saved ? JSON.parse(saved) : []
+      return saved ? applyCameraNameAliases(JSON.parse(saved)) : []
     } catch {
       return []
     }
@@ -7258,6 +7458,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [addCameraInitialTab, setAddCameraInitialTab] = useState<'webcam' | 'ip'>('webcam')
   const [isMonitorModalOpen, setIsMonitorModalOpen] = useState(false)
   const [editingMonitor, setEditingMonitor] = useState<MonitorInfo | null>(null)
   const [expandedCamera, setExpandedCamera] = useState<CameraInfo | null>(null)
@@ -7616,13 +7817,15 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           return next
         })
       }
-      if (Array.isArray(camRes?.availableWebcams)) {
-        setAvailableWebcams(applyCameraNameAliases(camRes.availableWebcams))
-      }
-      const fetchedCams = applyCameraNameAliases(camRes?.cameras || [])
-      setCameras(fetchedCams)
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(`${EXT_ID}:cameras`, JSON.stringify(fetchedCams))
+      const fetchedCams: CameraInfo[] = applyCameraNameAliases(camRes?.cameras || cameras)
+      if (Date.now() - lastSelectionChangeAtRef.current > 3000) {
+        if (Array.isArray(camRes?.availableWebcams)) {
+          setAvailableWebcams(applyCameraNameAliases(camRes.availableWebcams))
+        }
+        setCameras(fetchedCams)
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:cameras`, JSON.stringify(fetchedCams))
+        }
       }
 
       let combinedMonitors: MonitorInfo[] = statusRes.monitors || []
@@ -7870,7 +8073,11 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
     const handleCloseModals = () => {
       setIsModalOpen(false)
       setEditingTarget(null)
-      setExpandedCamera(null)
+      const pendingExpand =
+        typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:auto-expand`) : null
+      if (!pendingExpand) {
+        setExpandedCamera(null)
+      }
       setIsMonitorModalOpen(false)
       setExpandedAlert(null)
       setExpandedPrint(null)
@@ -7885,7 +8092,11 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
     if (!isActive) {
       setIsModalOpen(false)
       setEditingTarget(null)
-      setExpandedCamera(null)
+      const pendingExpand =
+        typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:auto-expand`) : null
+      if (!pendingExpand) {
+        setExpandedCamera(null)
+      }
       setIsMonitorModalOpen(false)
       setExpandedAlert(null)
       setExpandedPrint(null)
@@ -8032,13 +8243,30 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
   const toggleCameraSelection = useCallback(
     async (cameraId: string) => {
       lastSelectionChangeAtRef.current = Date.now()
-      const targetCam = cameras.find((c) => c.id === cameraId)
+      const targetCam = cameras.find((c) => c.id === cameraId || isSameCameraId(c.id, cameraId))
       const currentSelected = config.selectedCameras ?? []
-      const isRemoving = currentSelected.includes(cameraId)
-      const isIpCamera = cameraId.startsWith('ip:') || targetCam?.source === 'ip'
-      const nextSelected = isRemoving
-        ? currentSelected.filter((id) => id !== cameraId)
-        : [...currentSelected, cameraId]
+      const isIpCamera = cameraId.startsWith('ip:') || targetCam?.source === 'ip' || /^(rtsp|https?):\/\//i.test(cameraId.replace(/^ip:/, ''))
+      const rawUrl = (targetCam?.url || cameraId).replace(/^ip:/, '')
+      const cleanUrl = parseCameraAuth(rawUrl).cleanUrl
+      const cleanKey = cleanUrl ? credentialKey(cleanUrl) : ''
+      const targetIp = cleanUrl ? extractRtspHost(cleanUrl) : ''
+
+      const isMatch = (idOrUrl: string | undefined): boolean => {
+        if (!idOrUrl) return false
+        if (idOrUrl === cameraId || isSameCameraId(idOrUrl, cameraId)) return true
+        if (targetCam && (idOrUrl === targetCam.id || isSameCameraId(idOrUrl, targetCam.id))) return true
+        if (cleanUrl) {
+          if (idOrUrl === cleanUrl || idOrUrl === `ip:${cleanUrl}` || idOrUrl.replace(/^ip:/, '') === cleanUrl) return true
+          const parsed = parseCameraAuth(idOrUrl.replace(/^ip:/, '')).cleanUrl
+          if (parsed === cleanUrl) return true
+          if (cleanKey && credentialKey(parsed) === cleanKey) return true
+          if (targetIp && (parsed.includes(`://${targetIp}:`) || parsed.includes(`://${targetIp}/`))) return true
+        }
+        return false
+      }
+
+      // Removal: remove all matching IDs and variants from selectedCameras
+      const nextSelected = currentSelected.filter((id) => !isMatch(id))
 
       // Atualização otimista imediata na UI
       setConfig((prev) => {
@@ -8049,23 +8277,24 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         return next
       })
 
-      if (isRemoving) clearCachedFrame(cameraId)
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('momai-vision:cameras-updated', {
+            detail: { selectedCameras: nextSelected, removedCameraId: cameraId }
+          })
+        )
+      }
+
+      clearCachedFrame(cameraId)
+      if (cleanUrl) {
+        clearCachedFrame(cleanUrl)
+        clearCachedFrame(`ip:${cleanUrl}`)
+      }
 
       // Se for remoção de câmera IP, remove também da lista de câmeras da tela imediatamente
       if (isIpCamera) {
-        const rawUrl = (targetCam?.url || cameraId).replace(/^ip:/, '')
-        const cleanUrl = parseCameraAuth(rawUrl).cleanUrl
-        const cleanKey = credentialKey(cleanUrl)
-
         setCameras((prev) => {
-          const next = prev.filter((c) => {
-            if (c.id === cameraId || c.id === cleanUrl || c.id === `ip:${cleanUrl}` || c.id.replace(/^ip:/, '') === cleanUrl) return false
-            if (c.url) {
-              const itemClean = parseCameraAuth(c.url).cleanUrl
-              if (itemClean === cleanUrl || credentialKey(itemClean) === cleanKey) return false
-            }
-            return true
-          })
+          const next = prev.filter((c) => !isMatch(c.id) && (!c.url || !isMatch(c.url)))
           try {
             if (typeof localStorage !== 'undefined') {
               localStorage.setItem(`${EXT_ID}:cameras`, JSON.stringify(next))
@@ -8076,29 +8305,28 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         delete knownCamerasRef.current[cameraId]
         delete knownCamerasRef.current[cleanUrl]
         delete knownCamerasRef.current[`ip:${cleanUrl}`]
+        if (targetCam?.id) delete knownCamerasRef.current[targetCam.id]
       }
 
       // Se a câmera foi fechada/removida, pausa automaticamente os monitoramentos ativos associados a ela
-      if (isRemoving) {
-        const camName = targetCam?.name || cameraId
-        const monitorsToPause = monitors.filter(
-          (m) =>
-            !m.paused &&
-            (m.cameraId === cameraId ||
-              m.cameraName === camName ||
-              m.cameraName === cameraId ||
-              m.cameraId === camName)
-        )
+      const camName = targetCam?.name || cameraId
+      const monitorsToPause = monitors.filter(
+        (m) =>
+          !m.paused &&
+          (isMatch(m.cameraId) ||
+            m.cameraName === camName ||
+            m.cameraName === cameraId ||
+            m.cameraId === camName)
+      )
 
-        if (monitorsToPause.length > 0) {
-          setMonitors((prev) =>
-            prev.map((m) =>
-              monitorsToPause.some((p) => p.id === m.id) ? { ...m, paused: true } : m
-            )
+      if (monitorsToPause.length > 0) {
+        setMonitors((prev) =>
+          prev.map((m) =>
+            monitorsToPause.some((p) => p.id === m.id) ? { ...m, paused: true } : m
           )
-          for (const m of monitorsToPause) {
-            void command('pause_monitoring', { monitorId: m.id }).catch(() => {})
-          }
+        )
+        for (const m of monitorsToPause) {
+          void command('pause_monitoring', { monitorId: m.id }).catch(() => {})
         }
       }
 
@@ -8110,17 +8338,11 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           )
           const current = configRes.config || {}
           const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
-          const rawUrl = (targetCam?.url || cameraId).replace(/^ip:/, '')
-          const cleanUrl = parseCameraAuth(rawUrl).cleanUrl
-          const cleanKey = credentialKey(cleanUrl)
 
           const updatedIp = ipCamerasList.filter((c) => {
             if (!c || !c.url) return false
-            if (c.id && (c.id === cameraId || c.id === cleanUrl || c.id === `ip:${cleanUrl}`)) return false
-            const itemClean = parseCameraAuth(c.url).cleanUrl
-            if (itemClean === cleanUrl) return false
-            if (credentialKey(itemClean) === cleanKey) return false
-            if (`ip:${itemClean}` === cameraId) return false
+            if (c.id && isMatch(c.id)) return false
+            if (isMatch(c.url)) return false
             return true
           })
           await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
@@ -8150,6 +8372,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
   )
 
   const handleExpandCamera = useCallback((cam: CameraInfo) => {
+    setActiveTab('cameras')
     setExpandedCamera(cam)
     if (ptzCamera) {
       if (ptzCamera.id === cam.id && cam.source === 'ip') {
@@ -8159,6 +8382,139 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       }
     }
   }, [ptzCamera])
+
+  // Suporte a abrir automaticamente a câmera em modo ampliado vindo de widgets
+  useEffect(() => {
+    const tryExpandCamera = (targetId: string) => {
+      let list = cameras
+      if (list.length === 0) {
+        try {
+          const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:cameras`) : null
+          if (raw) list = JSON.parse(raw)
+        } catch {}
+      }
+
+      if (!list || list.length === 0) return false
+
+      let targetCam: CameraInfo | null = null
+      if (targetId && targetId !== 'first') {
+        targetCam = list.find((c) => c.id === targetId) || null
+        if (!targetCam) {
+          targetCam = list.find((c) => isSameCameraId(c.id, targetId)) || null
+        }
+        if (!targetCam) {
+          const cleanTarget = targetId.replace(/^(ip|webcam):/, '')
+          targetCam =
+            list.find((c) => {
+              const cleanC = c.id.replace(/^(ip|webcam):/, '')
+              return isSameCameraId(cleanC, cleanTarget) || cleanC === cleanTarget
+            }) || null
+        }
+        if (!targetCam) {
+          targetCam =
+            list.find((c) => c.name && c.name.toLowerCase() === targetId.toLowerCase()) || null
+        }
+        if (!targetCam) {
+          targetCam =
+            list.find(
+              (c) =>
+                c.id.toLowerCase().includes(targetId.toLowerCase()) ||
+                targetId.toLowerCase().includes(c.id.toLowerCase())
+            ) || null
+        }
+      }
+
+      if (!targetCam && list.length > 0) {
+        targetCam = list[0]
+      }
+
+      if (targetCam) {
+        handleExpandCamera(targetCam)
+        return true
+      }
+      return false
+    }
+
+    let t1: any
+    let t2: any
+
+    if (isActive) {
+      const checkAndExpand = () => {
+        try {
+          const savedId =
+            typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:auto-expand`) : null
+          if (savedId) {
+            const found = tryExpandCamera(savedId)
+            if (found) {
+              localStorage.removeItem(`${EXT_ID}:auto-expand`)
+            }
+          }
+        } catch {}
+      }
+
+      const checkAutoAddCamera = () => {
+        try {
+          const savedTab =
+            typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:auto-add-camera`) : null
+          if (savedTab) {
+            localStorage.removeItem(`${EXT_ID}:auto-add-camera`)
+            const tab = savedTab === 'ip' ? 'ip' : 'webcam'
+            setActiveTab('cameras')
+            setExpandedCamera(null)
+            setAddCameraInitialTab(tab)
+            setIsModalOpen(true)
+          }
+        } catch {}
+      }
+
+      checkAndExpand()
+      checkAutoAddCamera()
+      t1 = setTimeout(() => {
+        checkAndExpand()
+        checkAutoAddCamera()
+      }, 120)
+      t2 = setTimeout(() => {
+        checkAndExpand()
+        checkAutoAddCamera()
+      }, 450)
+    }
+
+    const handleOpenAddCamera = (e?: Event) => {
+      const detail = (e as CustomEvent<{ initialTab?: 'webcam' | 'ip' }>)?.detail
+      const tab = detail?.initialTab === 'ip' ? 'ip' : 'webcam'
+      setActiveTab('cameras')
+      setExpandedCamera(null)
+      setAddCameraInitialTab(tab)
+      setIsModalOpen(true)
+    }
+
+    const handleExpandEvent = (e: Event) => {
+      const detail = (e as CustomEvent<{ cameraId?: string }>)?.detail
+      const id = detail?.cameraId || 'first'
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(`${EXT_ID}:auto-expand`, id)
+        }
+      } catch {}
+      if (isActive) {
+        const found = tryExpandCamera(id)
+        if (found) {
+          try {
+            localStorage.removeItem(`${EXT_ID}:auto-expand`)
+          } catch {}
+        }
+      }
+    }
+
+    window.addEventListener('momai-vision:open-add-camera', handleOpenAddCamera)
+    window.addEventListener('momai-vision:expand-camera', handleExpandEvent)
+    return () => {
+      clearTimeout(t1)
+      clearTimeout(t2)
+      window.removeEventListener('momai-vision:open-add-camera', handleOpenAddCamera)
+      window.removeEventListener('momai-vision:expand-camera', handleExpandEvent)
+    }
+  }, [isActive, cameras, handleExpandCamera])
 
   const handleSelectExpandedCamera = useCallback((cam: CameraInfo) => {
     // Trocar de câmera na lateral cancela qualquer edição de área em andamento:
@@ -8308,6 +8664,19 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         // Alias is a display-only nicety; a storage failure must not block the save.
       }
       setCameras((prev) => prev.map((c) => (c.id === oldId ? { ...c, name: alias } : c)))
+      if (ptzCamera && ptzCamera.id === oldId) {
+        setPtzCamera((prev) => (prev ? { ...prev, name: alias } : null))
+      }
+      if (expandedCamera && expandedCamera.id === oldId) {
+        setExpandedCamera((prev) => (prev ? { ...prev, name: alias } : null))
+      }
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('momai-vision:cameras-updated', {
+            detail: { cameraId: oldId, oldId, name: alias }
+          })
+        )
+      }
       return
     }
     const nextUrl = payload.url.trim()
@@ -8352,6 +8721,28 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
     }
     await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected, detectionZones: nextZones })
     setCameras((prev) => prev.map((c) => (c.id === oldId ? { ...c, id: nextId, name: nextEntry.name } : c)))
+    if (ptzCamera && (ptzCamera.id === oldId || ptzCamera.id === nextId)) {
+      setPtzCamera((prev) => (prev ? { ...prev, id: nextId, name: nextEntry.name } : null))
+    }
+    if (expandedCamera && (expandedCamera.id === oldId || expandedCamera.id === nextId)) {
+      setExpandedCamera((prev) => (prev ? { ...prev, id: nextId, name: nextEntry.name } : null))
+    }
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const raw = localStorage.getItem(`${EXT_ID}:camera-names`)
+        const parsed = raw ? (JSON.parse(raw) as Record<string, string>) : {}
+        parsed[oldId] = nextEntry.name
+        parsed[nextId] = nextEntry.name
+        localStorage.setItem(`${EXT_ID}:camera-names`, JSON.stringify(parsed))
+      }
+    } catch {}
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('momai-vision:cameras-updated', {
+          detail: { cameraId: nextId, oldId, name: nextEntry.name }
+        })
+      )
+    }
     setConfig((prev) => {
       const next = { ...prev, selectedCameras: nextSelected, detectionZones: nextZones }
       try {
@@ -8401,6 +8792,38 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       const ipIds = ipDrafts.map((d) => `ip:${d.url}`)
       const nextSelected = [...new Set([...currentSelected, ...webcamIds, ...ipIds])]
 
+      // Persistir nomes no armazenamento de apelidos local (usado pelo widget e applyCameraNameAliases)
+      try {
+        if (typeof localStorage !== 'undefined') {
+          const raw = localStorage.getItem(`${EXT_ID}:camera-names`)
+          const parsed = raw ? (JSON.parse(raw) as Record<string, string>) : {}
+          for (const draft of ipDrafts) {
+            const cleanUrl = draft.url.replace(/^ip:/, '').trim()
+            const id = `ip:${cleanUrl}`
+            const nameToSave = draft.name?.trim() || t('cameras.defaultIpName')
+            parsed[id] = nameToSave
+            parsed[cleanUrl] = nameToSave
+          }
+          localStorage.setItem(`${EXT_ID}:camera-names`, JSON.stringify(parsed))
+        }
+      } catch {}
+
+      // Atualiza knownCamerasRef imediatamente para evitar fallback de nome na grade
+      for (const draft of ipDrafts) {
+        const cleanUrl = draft.url.replace(/^ip:/, '').trim()
+        const id = `ip:${cleanUrl}`
+        const nameToSave = draft.name?.trim() || t('cameras.defaultIpName')
+        const camEntry: CameraInfo = {
+          id,
+          name: nameToSave,
+          source: 'ip',
+          online: false,
+          monitors: 0
+        }
+        knownCamerasRef.current[id] = camEntry
+        knownCamerasRef.current[cleanUrl] = camEntry
+      }
+
       setConfig((prev) => {
         const next = { ...prev, selectedCameras: nextSelected }
         if (typeof localStorage !== 'undefined') {
@@ -8408,12 +8831,51 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         }
         return next
       })
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('momai-vision:cameras-updated', {
+            detail: { selectedCameras: nextSelected, addedCameraIds: [...webcamIds, ...ipIds] }
+          })
+        )
+        for (const draft of ipDrafts) {
+          const cleanUrl = draft.url.replace(/^ip:/, '').trim()
+          const id = `ip:${cleanUrl}`
+          const nameToSave = draft.name?.trim() || t('cameras.defaultIpName')
+          window.dispatchEvent(
+            new CustomEvent('momai-vision:cameras-updated', {
+              detail: { cameraId: id, oldId: id, name: nameToSave, selectedCameras: nextSelected }
+            })
+          )
+        }
+      }
+
       setCameras((prev) => {
-        const existing = new Set(prev.map((c) => c.id))
-        const toAdd = webcamIds
-          .filter((id) => !existing.has(id))
-          .map(
-            (id) =>
+        const map = new Map<string, CameraInfo>()
+        for (const c of prev) {
+          map.set(c.id, c)
+        }
+        for (const draft of ipDrafts) {
+          const cleanUrl = draft.url.replace(/^ip:/, '').trim()
+          const id = `ip:${cleanUrl}`
+          const nameToSet = draft.name?.trim() || t('cameras.defaultIpName')
+          const existing = map.get(id) || map.get(cleanUrl)
+          if (existing) {
+            map.set(id, { ...existing, id, name: nameToSet })
+          } else {
+            map.set(id, {
+              id,
+              name: nameToSet,
+              source: 'ip',
+              online: false,
+              monitors: 0
+            })
+          }
+        }
+        for (const id of webcamIds) {
+          if (!map.has(id)) {
+            map.set(
+              id,
               knownCamerasRef.current[id] ?? {
                 id,
                 name: id.replace(/^webcam:/, '') || 'Webcam',
@@ -8421,8 +8883,10 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                 online: false,
                 monitors: 0
               }
-          )
-        return toAdd.length ? [...prev, ...toAdd] : prev
+            )
+          }
+        }
+        return Array.from(map.values())
       })
 
       // 2) Persistência em background; erros vão para o banner (não travam a UI).
@@ -8433,27 +8897,34 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             {}
           )
           const current = configRes.config || {}
-          const ipCamerasList = Array.isArray(current.ipCameras) ? current.ipCameras : []
-          const existingIpIds = new Set(ipCamerasList.map((c) => c.id))
+          const ipCamerasList = Array.isArray(current.ipCameras) ? [...current.ipCameras] : []
 
-          const newIpCameras: Array<{ id: string; name: string; url: string; username?: string; password?: string; transport: 'tcp' | 'udp'; previewWidth: number; codec?: RtspCodec }> = []
+          const updatedIp = [...ipCamerasList]
           for (const draft of ipDrafts) {
-            const id = `ip:${draft.url}`
-            if (existingIpIds.has(id)) continue
-            existingIpIds.add(id)
-            newIpCameras.push({
+            const cleanUrl = draft.url.replace(/^ip:/, '').trim()
+            const id = `ip:${cleanUrl}`
+            const name = draft.name?.trim() || t('cameras.defaultIpName')
+            const nextEntry = {
               id,
-              name: draft.name || t('cameras.defaultIpName'),
-              url: draft.url,
+              name,
+              url: cleanUrl,
               ...(draft.username ? { username: draft.username } : {}),
               ...(draft.password ? { password: draft.password } : {}),
               transport: draft.transport,
               previewWidth: resolvePreviewWidth(draft.previewWidth),
               ...(draft.codec && draft.codec !== 'h264' ? { codec: draft.codec } : {})
-            })
+            }
+            const existingIndex = updatedIp.findIndex((c) => c.id === id || c.url === cleanUrl || c.url === draft.url)
+            if (existingIndex >= 0) {
+              updatedIp[existingIndex] = {
+                ...updatedIp[existingIndex],
+                ...nextEntry
+              }
+            } else {
+              updatedIp.push(nextEntry)
+            }
           }
 
-          const updatedIp = [...ipCamerasList, ...newIpCameras]
           await command('configure', { ipCameras: updatedIp, selectedCameras: nextSelected })
           void (async () => {
             try {
@@ -8469,6 +8940,13 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                 }).catch(() => {})
               }
               await refreshP
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(
+                  new CustomEvent('momai-vision:cameras-updated', {
+                    detail: { selectedCameras: nextSelected }
+                  })
+                )
+              }
             } catch {}
           })()
         } catch (err) {
@@ -8478,7 +8956,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         }
       })()
     },
-    [config.selectedCameras, refresh]
+    [command, config.selectedCameras, refresh, t]
   )
 
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
@@ -9228,6 +9706,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       <AddCameraModal
         isOpen={isModalOpen && isActive}
         isActive={isActive}
+        initialTab={addCameraInitialTab}
         onClose={() => setIsModalOpen(false)}
         allCameras={allCamerasForModal}
         selectedCameraIds={activeSelectedIds}

@@ -44,9 +44,9 @@ describe('fetchWidgetCameraName', () => {
     )
   })
 
-  it('falls back to the id when unknown', async () => {
+  it('returns empty when unknown so callers avoid showing an id/ip', async () => {
     postMock.mockResolvedValue({ data: { cameras: [] } })
-    await expect(fetchWidgetCameraName('cam-9')).resolves.toBe('cam-9')
+    await expect(fetchWidgetCameraName('cam-9')).resolves.toBe('')
   })
 })
 

@@ -110,4 +110,135 @@ describe('VisionLiveWidget live stream', () => {
     await renderWidget()
     expect(container.textContent).toContain('camera paused')
   })
+
+  it('dispatches navigation and expand event on double click', async () => {
+    fetchMock.mockResolvedValue({ ok: true, body: multipartBody() })
+    await renderWidget()
+
+    const navListener = vi.fn()
+    const expandListener = vi.fn()
+    window.addEventListener('momai_navigate', navListener)
+    window.addEventListener('momai-vision:expand-camera', expandListener)
+
+    const widgetDiv = container.firstElementChild as HTMLElement
+    await act(async () => {
+      widgetDiv.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    })
+
+    expect(localStorage.getItem('momai-vision:auto-expand')).toBe('cam-1')
+    expect(navListener).toHaveBeenCalled()
+    expect(expandListener).toHaveBeenCalled()
+
+    window.removeEventListener('momai_navigate', navListener)
+    window.removeEventListener('momai-vision:expand-camera', expandListener)
+  })
+
+  it('does not navigate on single click', async () => {
+    fetchMock.mockResolvedValue({ ok: true, body: multipartBody() })
+    await renderWidget()
+
+    const navListener = vi.fn()
+    window.addEventListener('momai_navigate', navListener)
+
+    const widgetDiv = container.firstElementChild as HTMLElement
+    await act(async () => {
+      widgetDiv.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+
+    expect(navListener).not.toHaveBeenCalled()
+    window.removeEventListener('momai_navigate', navListener)
+  })
+  it('updates camera name immediately when momai-vision:cameras-updated is dispatched', async () => {
+    fetchMock.mockResolvedValue({ ok: true, body: multipartBody() })
+    await renderWidget()
+
+    expect(container.textContent).toContain('USB2.0 PC CAMERA')
+
+    // Dispatches rename event
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('momai-vision:cameras-updated', {
+          detail: { cameraId: 'cam-1', name: 'Portão de Entrada' }
+        })
+      )
+    })
+
+    expect(container.textContent).toContain('Portão de Entrada')
+  })
+
+  it('renders no active camera state when cameraId is empty and navigates on activate click', async () => {
+    const navListener = vi.fn()
+    const openAddListener = vi.fn()
+    window.addEventListener('momai_navigate', navListener)
+    window.addEventListener('momai-vision:open-add-camera', openAddListener)
+
+    postMock.mockImplementation((_path: string, body: any) => {
+      if (body?.toolName === 'list_cameras') {
+        return Promise.resolve({ data: { cameras: [] } })
+      }
+      return Promise.resolve(mockPost(body?.toolName, body))
+    })
+
+    await act(async () => {
+      root.render(<VisionLiveWidget config={{ cameraId: '' }} />)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+
+    expect(container.textContent).toContain('Não possui nenhuma câmera ativa')
+    expect(container.textContent).toContain('Deseja ativar uma câmera agora?')
+    expect(container.textContent).toContain('Ativar câmera')
+    expect(container.textContent).not.toContain('Tentar de novo')
+
+    const activateBtn = container.querySelector('button') as HTMLButtonElement
+    expect(activateBtn).toBeTruthy()
+    await act(async () => {
+      activateBtn.click()
+    })
+
+    expect(navListener).toHaveBeenCalled()
+    expect(openAddListener).toHaveBeenCalled()
+    expect(localStorage.getItem('momai-vision:auto-add-camera')).toBe('webcam')
+
+    window.removeEventListener('momai_navigate', navListener)
+    window.removeEventListener('momai-vision:open-add-camera', openAddListener)
+  })
+
+  it('renders no active camera state when configured camera is unknown and targets ip tab', async () => {
+    postMock.mockImplementation((_path: string, body: any) => {
+      if (body?.toolName === 'list_cameras') {
+        return Promise.resolve({ data: { cameras: [] } })
+      }
+      return Promise.resolve({ data: { ok: false, error: 'unknown camera: ip:rtsp://192.168.0.4:554/onvif1' } })
+    })
+
+    const navListener = vi.fn()
+    const openAddListener = vi.fn()
+    window.addEventListener('momai_navigate', navListener)
+    window.addEventListener('momai-vision:open-add-camera', openAddListener)
+
+    await act(async () => {
+      root.render(<VisionLiveWidget config={{ cameraId: 'ip:rtsp://192.168.0.4:554/onvif1' }} />)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    })
+
+    expect(container.textContent).toContain('Não possui nenhuma câmera ativa')
+    expect(container.textContent).toContain('Deseja ativar uma câmera agora?')
+    expect(container.textContent).toContain('Ativar câmera')
+    expect(container.textContent).not.toContain('Tentar de novo')
+
+    const buttons = container.querySelectorAll('button')
+    const activateBtn = Array.from(buttons).find((b) => b.textContent?.includes('Ativar câmera'))
+    expect(activateBtn).toBeTruthy()
+
+    await act(async () => {
+      activateBtn!.click()
+    })
+
+    expect(navListener).toHaveBeenCalled()
+    expect(openAddListener).toHaveBeenCalled()
+    expect(localStorage.getItem('momai-vision:auto-add-camera')).toBe('ip')
+
+    window.removeEventListener('momai_navigate', navListener)
+    window.removeEventListener('momai-vision:open-add-camera', openAddListener)
+  })
 })

@@ -1,6 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import type { PtzDirection } from '../vision/onvif-ptz'
 
+export const PTZ_CARD_DIMENSIONS = {
+  compact: { width: 144, height: 152 },
+  default: { width: 192, height: 205 },
+} as const
+
 interface PtzControlCardProps {
   cameraId: string
   cameraName: string
@@ -16,6 +21,7 @@ interface PtzControlCardProps {
 // `text-*` (text-xs, text-text, text-[11px]...) contém o trecho "ext-" e fazia
 // o closest casar com um elemento interno qualquer, com área útil minúscula.
 const EXTENSION_ROOT_SELECTOR = '[class~="ext-momai-vision"]'
+const EXTENSION_OVERLAY_ROOT_SELECTOR = '#momai-extension-overlay-root'
 
 /** Área visível em coordenadas de tela (client). */
 export function getViewportBounds(): { left: number; top: number; right: number; bottom: number } {
@@ -50,6 +56,10 @@ function isContainingBlockElement(el: HTMLElement): boolean {
 export function findContainingBlockElement(el?: HTMLElement | null): HTMLElement | null {
   if (typeof window === 'undefined' || typeof document === 'undefined') return null
 
+  // 1. Bloco raiz de overlay do host (usado por portais de widgets)
+  const overlayRoot = el?.closest<HTMLElement>(EXTENSION_OVERLAY_ROOT_SELECTOR)
+  if (overlayRoot) return overlayRoot
+
   let curr = el?.parentElement ?? null
   while (curr && curr !== document.body && curr !== document.documentElement) {
     if (isContainingBlockElement(curr)) return curr
@@ -59,6 +69,7 @@ export function findContainingBlockElement(el?: HTMLElement | null): HTMLElement
   return (
     el?.closest<HTMLElement>(EXTENSION_ROOT_SELECTOR) ||
     document.querySelector<HTMLElement>(EXTENSION_ROOT_SELECTOR) ||
+    document.querySelector<HTMLElement>(EXTENSION_OVERLAY_ROOT_SELECTOR) ||
     null
   )
 }
@@ -142,8 +153,8 @@ export const PtzControlCard: React.FC<PtzControlCardProps> = ({
 
   // Modo compacto responsivo para modo janela / telas menores
   const isCompact = compact || Boolean(initialPosition?.compact)
-  const cardWidth = isCompact ? 144 : 192
-  const cardHeight = isCompact ? 152 : 205
+  const cardWidth = isCompact ? PTZ_CARD_DIMENSIONS.compact.width : PTZ_CARD_DIMENSIONS.default.width
+  const cardHeight = isCompact ? PTZ_CARD_DIMENSIONS.compact.height : PTZ_CARD_DIMENSIONS.default.height
   const hasUserDraggedRef = useRef(false)
   const [position, setPosition] = useState<{ x: number; y: number }>(() => {
     if (initialPosition) return initialPosition
@@ -222,8 +233,9 @@ export const PtzControlCard: React.FC<PtzControlCardProps> = ({
       const container = findContainingBlockElement(card)
       if (container) {
         const cRect = container.getBoundingClientRect()
+        const isAncestor = container.contains(card)
         const matchesOrigin =
-          Math.abs(cRect.left - originLeft) <= 2 && Math.abs(cRect.top - originTop) <= 2
+          isAncestor || (Math.abs(cRect.left - originLeft) <= 2 && Math.abs(cRect.top - originTop) <= 2)
         if (matchesOrigin && cRect.width > 0 && cRect.height > 0) {
           boundsLeft = Math.max(boundsLeft, cRect.left)
           boundsTop = Math.max(boundsTop, cRect.top)
@@ -488,7 +500,7 @@ export const PtzControlCard: React.FC<PtzControlCardProps> = ({
         zIndex: 9999,
         touchAction: 'none'
       }}
-      className={`fixed flex flex-col items-center justify-between ${
+      className={`absolute pointer-events-auto flex flex-col items-center justify-between ${
         isCompact ? 'p-2 w-36 rounded-xl' : 'p-3 w-48 rounded-2xl'
       } bg-card border border-border shadow-2xl select-none text-text ${
         isDragging ? 'cursor-grabbing' : 'cursor-grab'
@@ -496,16 +508,13 @@ export const PtzControlCard: React.FC<PtzControlCardProps> = ({
       onPointerDown={handleCardPointerDown}
       onClick={(e) => e.stopPropagation()}
     >
-      {/* Header com Nome da Câmera e Botão Fechar */}
+      {/* Header com Nome da Câmera à esquerda e Botão Fechar à direita na parte superior */}
       <div
-        className={`w-full grid grid-cols-[1fr_minmax(0,auto)_1fr] items-center ${
+        className={`w-full flex items-center justify-between gap-1.5 ${
           isCompact ? 'pb-1' : 'pb-1.5'
         } border-b border-border/40`}
       >
-        {/* Coluna-espaçador invisível: mantém o nome realmente centralizado */}
-        <span aria-hidden="true" />
-
-        <div className="flex items-center justify-center gap-1.5 min-w-0" data-ptz-title="true">
+        <div className="flex items-center justify-start gap-1.5 min-w-0 flex-1 pl-0.5" data-ptz-title="true">
           <svg className={`${isCompact ? 'w-3 h-3' : 'w-3.5 h-3.5'} text-text-muted/70 shrink-0`} viewBox="0 0 24 24" fill="currentColor">
             <circle cx="9" cy="8" r="1.5" />
             <circle cx="15" cy="8" r="1.5" />
@@ -515,7 +524,7 @@ export const PtzControlCard: React.FC<PtzControlCardProps> = ({
             <circle cx="15" cy="16" r="1.5" />
           </svg>
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shrink-0" />
-          <span className={`font-semibold text-text truncate ${isCompact ? 'text-[11px] max-w-[66px]' : 'text-xs max-w-[90px]'}`} title={cameraName}>
+          <span className={`font-semibold text-text truncate ${isCompact ? 'text-[11px] max-w-[95px]' : 'text-xs max-w-[130px]'}`} title={cameraName}>
             {cameraName}
           </span>
         </div>
@@ -527,12 +536,12 @@ export const PtzControlCard: React.FC<PtzControlCardProps> = ({
             onClose()
           }}
           className={`${
-            isCompact ? 'w-4 h-4' : 'w-5 h-5'
-          } rounded-md bg-input hover:bg-card border border-border/50 text-text-muted hover:text-text transition-all flex items-center justify-center active:scale-95 cursor-pointer justify-self-end`}
+            isCompact ? 'w-6 h-6' : 'w-7 h-7'
+          } shrink-0 ml-auto rounded-md bg-input/80 hover:bg-input hover:text-text border border-border/50 text-text-muted transition-all flex items-center justify-center active:scale-95 cursor-pointer`}
           title={t('cameras.ptzClose')}
           aria-label={t('cameras.ptzClose')}
         >
-          <svg className={`${isCompact ? 'w-2.5 h-2.5' : 'w-3 h-3'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <svg className={`${isCompact ? 'w-3.5 h-3.5' : 'w-4 h-4'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <line x1="18" y1="6" x2="6" y2="18" />
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>
