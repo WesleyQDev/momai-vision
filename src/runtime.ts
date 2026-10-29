@@ -2357,7 +2357,7 @@ async function syncAutomationMonitors(): Promise<ActiveMonitor[]> {
         (c: any) => c.field?.toLowerCase().includes('camera') || c.field?.toLowerCase().includes('câmera')
       )
       const rawCam = String(
-        trig.trigger_config?.camera || trig.params?.camera || trig.camera || camCond?.value || ''
+        trig.trigger_config?.camera || trig.trigger_config?.cameraName || trig.trigger_config?.cameraId || trig.params?.camera || trig.params?.cameraName || trig.params?.cameraId || trig.camera || trig.cameraName || trig.cameraId || camCond?.value || ''
       ).trim()
 
       let cam = rawCam
@@ -4048,7 +4048,7 @@ async function toolGetStatus(): Promise<unknown> {
       autoMonitors = activeTriggers.map((auto) => {
         const trig = auto.trigger || {}
         const camCond = (auto.global_conditions || []).find((c: any) => c.field?.toLowerCase().includes('camera'))
-        const rawCam = trig.trigger_config?.camera || trig.params?.camera || trig.camera || camCond?.value || ''
+        const rawCam = trig.trigger_config?.camera || trig.trigger_config?.cameraName || trig.trigger_config?.cameraId || trig.params?.camera || trig.params?.cameraName || trig.params?.cameraId || trig.camera || trig.cameraName || trig.cameraId || camCond?.value || ''
         const allCams = [...webcamCache, ...ipCameras]
         const cam = rawCam
           ? allCams.find(
