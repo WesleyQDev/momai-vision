@@ -45,6 +45,8 @@ export interface MonitorConfig {
   id: string
   cameraId: string
   cameraName?: string
+  /** Preserves the raw trigger.params.cameraId from Automation Hub when it was saved as a camera name. */
+  rawTriggerCameraId?: string
   triggers: Trigger[]
   schedule?: Schedule
   cooldownSec?: number

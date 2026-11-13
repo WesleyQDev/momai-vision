@@ -6831,9 +6831,17 @@ function AddEditMonitorModal({
       const existingWorkflow = initialMonitor?.automationWorkflow || null
       const automationName = (label.trim() || initialMonitor?.label || '').replace(/^⚡\s*/, '').trim() || t('monitoring.defaultName')
 
-      if (isAuto || autoBaseId || existingWorkflow?.id) {
+      if (!initialMonitor?.id || isAuto || autoBaseId || existingWorkflow?.id) {
         // === Automation Hub path ===
         const normalizedTriggerType = triggerType === 'person' ? 'object' : triggerType === 'animal' ? 'object' : triggerType
+        const resolvedObjectClass =
+          triggerType === 'person'
+            ? 'person'
+            : triggerType === 'animal'
+              ? animalClass
+              : objectClass
+        const resolvedTargetClass =
+          normalizedTriggerType === 'object' ? resolvedObjectClass : presenceTargetClass
         const camera = cameras.find((c) => c.id === cameraId)
         const camName = camera?.name || initialMonitor?.cameraName || cameraId
         const automationTriggerParams: Record<string, unknown> = {
@@ -6841,7 +6849,7 @@ function AddEditMonitorModal({
           cameraId,
           cameraName: camName,
           ...(normalizedTriggerType === 'motion' ? { triggeredBy: 'motion', sensitivity } : {}),
-          ...(normalizedTriggerType === 'object' ? { triggeredBy: 'object', className: objectClass, present: objectPresent } : {}),
+          ...(normalizedTriggerType === 'object' ? { triggeredBy: 'object', className: resolvedObjectClass, present: objectPresent } : {}),
           ...(normalizedTriggerType === 'presence' ? { triggeredBy: 'presence', className: presenceTargetClass, event: presenceEvent, windowSec: Number(windowSec) || 10 } : {}),
           ...(normalizedTriggerType === 'absence' ? { triggeredBy: 'absence', className: presenceTargetClass, event: presenceEvent, windowSec: Number(windowSec) || 10 } : {})
         }
@@ -6858,7 +6866,7 @@ function AddEditMonitorModal({
             kind: 'trigger_field',
             field: 'trigger.payload.className',
             operator: 'equals',
-            value: normalizedTriggerType === 'person' ? 'person' : normalizedTriggerType === 'animal' ? animalClass : normalizedTriggerType === 'object' ? objectClass : presenceTargetClass
+            value: resolvedTargetClass
           })
         }
 
