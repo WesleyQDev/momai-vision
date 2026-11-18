@@ -1,35 +1,37 @@
 # MomAI Vision
 
-A MomAI Vision conecta a webcam e as câmeras de segurança ao assistente. Ele vê o que está acontecendo, descreve a cena e avisa quando encontra movimento ou uma pessoa.
+**English** · [Português](README.pt-BR.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Deutsch](README.de.md)
 
-## O que você pode fazer
+MomAI Vision connects your webcam and security cameras to the assistant. It sees what is happening, describes the scene, and alerts you when it finds motion or a person.
 
-- Pedir uma descrição do que a câmera está vendo.
-- Receber alertas quando alguém aparecer na área monitorada.
-- Criar perguntas automáticas, como avisar se o portão ficou aberto.
-- Acompanhar as câmeras ao vivo e ver as fotos capturadas.
-- Pausar e retomar o monitoramento quando quiser.
+## What you can do
 
-## Exemplos
+- Ask for a description of what the camera sees.
+- Get alerts when someone appears in the monitored area.
+- Set up automatic questions, such as warning you if the gate stays open.
+- Watch the cameras live and review captured photos.
+- Pause and resume monitoring whenever you want.
 
-- "O que você está vendo agora?"
-- "Tire uma foto da câmera da garagem."
-- "Me avise quando alguém chegar na entrada."
-- "Avise se houver movimento na porta dos fundos."
-- "Pause o monitoramento da garagem."
+## Examples
 
-## Como usar
+- "What are you seeing right now?"
+- "Take a photo from the garage camera."
+- "Tell me when someone arrives at the entrance."
+- "Let me know if there is motion at the back door."
+- "Pause garage monitoring."
 
-1. Abra o MomAI e clique no ícone de Câmeras.
-2. Escolha a webcam ou informe o endereço da câmera de segurança.
-3. Ative as câmeras que quer acompanhar.
-4. Peça fotos, descrições ou monitoramento no chat.
+## How to use
 
-## Privacidade
+1. Open MomAI and click the Cameras icon.
+2. Choose the webcam or enter the security camera address.
+3. Turn on the cameras you want to follow.
+4. Ask for photos, descriptions, or monitoring in chat.
 
-O processamento das imagens acontece no seu computador. As fotos ficam salvas localmente e a descrição usa o modelo de visão local do MomAI. As imagens não são enviadas para servidores da MomAI. Ao mover uma câmera PTZ em passos, um frame reduzido pode ser anexado ao modelo de visão ativo para o assistente ver o resultado; ele não é salvo na galeria nem exibido no chat.
+## Privacy
 
-## Permissões
+Image processing happens on your computer. Photos are saved locally, and descriptions use MomAI's local vision model. Images are not sent to MomAI servers. When moving a PTZ camera in steps, a reduced frame may be attached to the active vision model so the assistant can see the result; it is not saved to the gallery or shown in the chat.
 
-- **Câmera:** para acessar a webcam.
-- **Rede:** para acessar as câmeras IP na sua rede local.
+## Permissions
+
+- **Camera:** to access the webcam.
+- **Network:** to access IP cameras on your local network.
