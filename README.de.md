@@ -1,7 +1,5 @@
 # MomAI Vision
 
-[English](README.md) · [Português](README.pt-BR.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · **Deutsch**
-
 MomAI Vision verbindet Ihre Webcam und Ihre Überwachungskameras mit dem Assistenten. Er sieht, was passiert, beschreibt die Szene und meldet Bewegung oder eine Person.
 
 ## Was Sie damit machen können

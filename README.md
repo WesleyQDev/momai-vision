@@ -1,7 +1,5 @@
 # MomAI Vision
 
-**English** · [Português](README.pt-BR.md) · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Deutsch](README.de.md)
-
 MomAI Vision connects your webcam and security cameras to the assistant. It sees what is happening, describes the scene, and alerts you when it finds motion or a person.
 
 ## What you can do

@@ -1,7 +1,5 @@
 # MomAI Vision
 
-[English](README.md) · **Português** · [Español](README.es.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Deutsch](README.de.md)
-
 A MomAI Vision conecta a webcam e as câmeras de segurança ao assistente. Ele vê o que está acontecendo, descreve a cena e avisa quando encontra movimento ou uma pessoa.
 
 ## O que você pode fazer
