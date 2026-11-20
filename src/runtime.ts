@@ -38,8 +38,10 @@ import {
   RTSP_MID_STREAM_CHECK_MS,
   RTSP_MID_STREAM_STALL_MS,
   RTSP_PREFERRED_TRANSPORT_DEFAULT,
+  RTSP_PROFILE_SWITCH_DELAY_MS,
   buildRtspFfmpegArgs,
   createRtspDecoderLogThrottle,
+  decideRtspProfileTransition,
   decideRtspReconnect,
   isBenignRtspStderr,
   isRtspBitstreamNoise,
@@ -48,9 +50,12 @@ import {
   resolveInitialTransport,
   resolvePreviewWidth,
   resolveRtspCodec,
+  resolveEconomyMode,
+  resolveRtspStreamProfile,
   shouldLogRetry,
   splitStderrLines,
   type RtspCodec,
+  type RtspStreamProfile,
   type RtspTransport
 } from './vision/rtsp'
 import {
@@ -199,6 +204,8 @@ interface CameraEntry {
   previewWidth?: number
   /** Video codec protocol for RTSP cameras ('h264' default or 'h265'). */
   codec?: RtspCodec
+  /** Economy mode: throttle background FPS when no viewer is attached (false default). */
+  economyMode?: boolean
   /** ONVIF endpoint reference URN or unique hardware ID */
   urn?: string
   /** Network MAC address if discovered */
@@ -219,6 +226,7 @@ interface StoredConfig {
     transport?: RtspTransport
     previewWidth?: number
     codec?: RtspCodec
+    economyMode?: boolean
     urn?: string
     macAddress?: string
   }>
@@ -404,6 +412,7 @@ async function syncIpCameras(): Promise<void> {
         transport,
         previewWidth: resolvePreviewWidth(cam.previewWidth),
         codec: resolveRtspCodec(cam.codec),
+        economyMode: resolveEconomyMode(cam.economyMode),
         urn: cam.urn,
         macAddress: cam.macAddress
       })
@@ -428,6 +437,11 @@ function restartStreamsOnPreviewWidthChange(): void {
   for (const cam of ipCameras) {
     const entry = mjpegStreams.get(cam.id)
     if (!entry) continue
+    const nextEconomyMode = resolveEconomyMode(cam.economyMode)
+    if (entry.economyMode !== nextEconomyMode) {
+      entry.economyMode = nextEconomyMode
+      evaluateRtspProfile(cam.id)
+    }
     const widthMatches = entry.previewWidth === resolvePreviewWidth(cam.previewWidth)
     const codecMatches = entry.codec === resolveRtspCodec(cam.codec)
     if (widthMatches && codecMatches) continue
@@ -582,6 +596,14 @@ interface StreamEntry {
   previewWidth: number
   /** Video codec this session was spawned with (restart on change). */
   codec: RtspCodec
+  /** Whether background FPS throttling (Economy Mode) is enabled for this camera. */
+  economyMode: boolean
+  /** Active RTSP stream profile ('live' | 'monitor' | 'standby'). */
+  profile: RtspStreamProfile
+  /** Timestamp of the last time subscribers > 0 was observed. */
+  lastLiveAt: number
+  /** Switch FFmpeg profile in-place without clearing latest cached frame. */
+  switchProfile?: (nextProfile: RtspStreamProfile) => void
 }
 const mjpegStreams = new Map<string, StreamEntry>()
 function parseCameraUrl(rawUrl: string): { urlsToTry: string[]; headers: Record<string, string> } {
@@ -650,6 +672,10 @@ function framePushQueueFor(cameraId: string): FramePushQueue {
             const entry = mjpegStreams.get(cameraId)
             if (entry && payload && typeof payload.subscribers === 'number') {
               entry.subscribers = payload.subscribers
+              if (payload.subscribers > 0) {
+                entry.lastLiveAt = Date.now()
+              }
+              evaluateRtspProfile(cameraId)
             }
           }
         } finally {
@@ -667,6 +693,27 @@ function framePushQueueFor(cameraId: string): FramePushQueue {
     framePushQueues.set(cameraId, queue)
   }
   return queue
+}
+
+function evaluateRtspProfile(cameraId: string): void {
+  const entry = mjpegStreams.get(cameraId)
+  if (!entry || !entry.switchProfile || entry.controller.signal.aborted) return
+  const hasActiveMonitor = getActiveMonitorsForCamera(cameraId).length > 0
+  const desiredProfile = resolveRtspStreamProfile({
+    subscribers: entry.subscribers,
+    hasActiveMonitor,
+    economyMode: entry.economyMode
+  })
+  const decision = decideRtspProfileTransition({
+    currentProfile: entry.profile,
+    desiredProfile,
+    lastLiveAt: entry.lastLiveAt,
+    now: Date.now()
+  })
+  if (decision.switchNow && decision.nextProfile !== entry.profile) {
+    bridge?.log(`[vision] RTSP: switching ${cameraId} profile (${entry.profile} → ${decision.nextProfile})`)
+    entry.switchProfile(decision.nextProfile)
+  }
 }
 
 function disposeFramePushQueue(cameraId: string): void {
@@ -725,7 +772,10 @@ async function startMjpeg(camera: CameraEntry): Promise<void> {
     subscribers: null,
     lastPushAt: 0,
     previewWidth: resolvePreviewWidth(camera.previewWidth),
-    codec: resolveRtspCodec(camera.codec)
+    codec: resolveRtspCodec(camera.codec),
+    economyMode: resolveEconomyMode(camera.economyMode),
+    profile: 'live',
+    lastLiveAt: 0
   }
   mjpegStreams.set(camera.id, entry)
 
@@ -1088,7 +1138,14 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       subscribers: null,
       lastPushAt: 0,
       previewWidth: resolvePreviewWidth(camera.previewWidth),
-      codec: resolveRtspCodec(camera.codec)
+      codec: resolveRtspCodec(camera.codec),
+      economyMode: resolveEconomyMode(camera.economyMode),
+      profile: resolveRtspStreamProfile({
+        subscribers: null,
+        hasActiveMonitor: getActiveMonitorsForCamera(camera.id).length > 0,
+        economyMode: resolveEconomyMode(camera.economyMode)
+      }),
+      lastLiveAt: 0
     }
     mjpegStreams.set(camera.id, entry)
 
@@ -1120,6 +1177,33 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
     const decoderLogThrottle = createRtspDecoderLogThrottle()
 
     const initialTransport = resolveInitialTransport(camera.transport)
+    let switchTimer: ReturnType<typeof setTimeout> | undefined
+
+    entry.switchProfile = (nextProfile: RtspStreamProfile) => {
+      if (entry.controller.signal.aborted) return
+      entry.profile = nextProfile
+      if (switchTimer) {
+        clearTimeout(switchTimer)
+        switchTimer = undefined
+      }
+      const activeSession = rtspSessions.get(camera.id)
+      if (activeSession) {
+        activeSession.alive = false
+        if (activeSession.retryTimer) {
+          clearTimeout(activeSession.retryTimer)
+          activeSession.retryTimer = undefined
+        }
+        try {
+          activeSession.ffmpeg?.kill()
+        } catch { }
+        rtspSessions.delete(camera.id)
+      }
+      switchTimer = setTimeout(() => {
+        switchTimer = undefined
+        if (entry.controller.signal.aborted || entry.profile !== nextProfile) return
+        void trySpawn(resolveInitialTransport(camera.transport))
+      }, RTSP_PROFILE_SWITCH_DELAY_MS)
+    }
 
     const trySpawn = async (transport: RtspTransport) => {
       const cooldown = await rtspCooldownFor(camera.id)
@@ -1127,8 +1211,9 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
         logRtspCooldownSkip(camera, cooldown)
         return
       }
-      bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) [${transport}] [${resolveRtspCodec(camera.codec)}]...`)
-      const ffmpegArgs = buildRtspFfmpegArgs(url, transport, camera.previewWidth, camera.codec)
+      const activeProfile = entry.profile
+      bridge?.log(`[vision] RTSP: connecting via FFmpeg to ${camera.name} (${redactedUrl}) [${transport}] [${resolveRtspCodec(camera.codec)}] [${activeProfile}]...`)
+      const ffmpegArgs = buildRtspFfmpegArgs(url, transport, camera.previewWidth, camera.codec, activeProfile)
       const ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
 
       const session: RtspSession = { ffmpeg, alive: true }
@@ -1270,9 +1355,9 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       ffmpeg.on('exit', (code, signal) => {
         clearTimeout(firstFrameWatchdog)
         stopMidStreamWatchdog()
-        bridge?.log(`[vision] RTSP FFmpeg exit for ${camera.name} code=${code} signal=${signal} hadFirstFrame=${hadFirstFrame} stderr=${stderrBuf.slice(-200)}`)
         if (!session.alive) return
         session.alive = false
+        bridge?.log(`[vision] RTSP FFmpeg exit for ${camera.name} code=${code} signal=${signal} hadFirstFrame=${hadFirstFrame} stderr=${stderrBuf.slice(-200)}`)
         if (entry.controller.signal.aborted) {
           bridge?.log(`[vision] RTSP: FFmpeg stopped for ${camera.name} [${transport}] code=${code}`)
           rtspSessions.delete(camera.id)
@@ -1341,6 +1426,10 @@ async function startRtspStream(camera: CameraEntry): Promise<void> {
       })
 
       entry.controller.signal.addEventListener('abort', () => {
+        if (switchTimer) {
+          clearTimeout(switchTimer)
+          switchTimer = undefined
+        }
         clearTimeout(firstFrameWatchdog)
         stopMidStreamWatchdog()
         if (session.retryTimer) {
@@ -4773,6 +4862,7 @@ async function toolConfigure(args: {
     transport?: RtspTransport
     previewWidth?: number
     codec?: RtspCodec
+    economyMode?: boolean
   }>
   selectedCameras?: string[]
   pausedCameras?: string[]
@@ -4807,6 +4897,9 @@ async function toolConfigure(args: {
       }
       if (cam.codec !== undefined) {
         cam.codec = resolveRtspCodec(cam.codec)
+      }
+      if (cam.economyMode !== undefined) {
+        cam.economyMode = resolveEconomyMode(cam.economyMode)
       }
       const validation = await assertCameraUrlSafe(cleanUrl)
       if (!validation.ok) {
@@ -5463,6 +5556,9 @@ function ensureInitialized(): Promise<void> {
     setInterval(() => {
       void syncWebcamWatches().catch(() => { })
       void syncAutomationMonitors().catch(() => { })
+      for (const camId of mjpegStreams.keys()) {
+        evaluateRtspProfile(camId)
+      }
     }, 5000)
     // TTL dos streams MJPEG/RTSP: derruba streams de câmeras IP sem consumidor
     // ativo (item A2) — não deixa ffmpeg/fetch contínuo vazando para sempre.

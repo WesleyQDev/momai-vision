@@ -139,6 +139,8 @@
       "codecH264": "H.264 (Default — Stable)",
       "codecH265": "H.265 (HEVC — Lower Bandwidth)",
       "codecHelp": "H.264 offers maximum stability and lower CPU overhead. H.265 reduces network bandwidth, ideal if your camera broadcasts in HEVC.",
+      "economyModeLabel": "Economy Mode",
+      "economyModeHelp": "Reduces background CPU usage when the tab is closed (1 FPS in standby, 2 FPS during monitoring). When off, keeps the full live stream running continuously.",
       "addToSelection": "Add to selection",
       "addHint": "Will be added on confirm — you can add more.",
       "review": "Review",

@@ -7,6 +7,7 @@ import {
   PREVIEW_WIDTH_DEFAULT,
   PREVIEW_WIDTH_OPTIONS,
   RTSP_CODEC_DEFAULT,
+  resolveEconomyMode,
   resolvePreviewWidth,
   resolveRtspCodec,
   type RtspCodec
@@ -24,6 +25,7 @@ export interface EditingCameraTarget {
   transport: 'tcp' | 'udp'
   previewWidth: number
   codec?: RtspCodec
+  economyMode?: boolean
 }
 
 interface EditCameraModalProps {
@@ -39,6 +41,7 @@ interface EditCameraModalProps {
       transport: 'tcp' | 'udp'
       previewWidth: number
       codec: RtspCodec
+      economyMode: boolean
     }
   ) => Promise<void>
   /** Called after "Limpar Cache e Conexões" succeeds so the parent can leave the modal and watch the reconnect. */
@@ -68,6 +71,8 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
   const [transport, setTransport] = useState<'tcp' | 'udp'>('udp')
   const [previewWidth, setPreviewWidth] = useState<number>(PREVIEW_WIDTH_DEFAULT)
   const [codec, setCodec] = useState<RtspCodec>(RTSP_CODEC_DEFAULT)
+  const [economyMode, setEconomyMode] = useState<boolean>(true)
+  const [showEconomyHelp, setShowEconomyHelp] = useState<boolean>(false)
   const [modalError, setModalError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [clearingCache, setClearingCache] = useState(false)
@@ -131,6 +136,8 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
     setTransport(target.transport === 'tcp' ? 'tcp' : 'udp')
     setPreviewWidth(resolvePreviewWidth(target.previewWidth))
     setCodec(resolveRtspCodec(target.codec))
+    setEconomyMode(resolveEconomyMode(target.economyMode))
+    setShowEconomyHelp(false)
     setModalError(null)
     setSubmitting(false)
     setSelectedDiscoveredUrl('')
@@ -165,6 +172,7 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
         transport !== target.transport ||
         previewWidth !== resolvePreviewWidth(target.previewWidth) ||
         codec !== resolveRtspCodec(target.codec) ||
+        economyMode !== resolveEconomyMode(target.economyMode) ||
         trimmedName !== target.name) &&
       isValidCameraUrl(trimmedUrl) &&
       !submitting
@@ -181,7 +189,8 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
         ...(password ? { username, password } : {}),
         transport: isIp ? transport : 'tcp',
         previewWidth,
-        codec
+        codec,
+        economyMode
       })
       onClose()
     } catch (err) {
@@ -429,9 +438,50 @@ export default function EditCameraModal({ target, onClose, onSave, onCacheCleare
 
           {isIp ? (
             <div>
-              <span id="vision-edit-transport-label" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                {t('cameras.addModal.transportLabel')}
-              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-center mb-1.5">
+                <span id="vision-edit-transport-label" className="block text-[11px] font-medium text-text-muted">
+                  {t('cameras.addModal.transportLabel')}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    id="vision-edit-economy"
+                    type="button"
+                    role="switch"
+                    aria-checked={economyMode}
+                    onClick={() => setEconomyMode((v) => !v)}
+                    style={{
+                      backgroundColor: economyMode ? 'var(--color-text)' : 'var(--color-border)'
+                    }}
+                    className="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  >
+                    <span
+                      style={{
+                        backgroundColor: 'var(--color-bg-main)',
+                        transform: economyMode ? 'translateX(18px)' : 'translateX(2px)',
+                        transition: 'transform 150ms ease'
+                      }}
+                      className="inline-block h-3.5 w-3.5 rounded-full shadow-sm"
+                    />
+                  </button>
+                  <label htmlFor="vision-edit-economy" className="text-xs font-medium text-text cursor-pointer select-none">
+                    {t('cameras.addModal.economyModeLabel')}
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setShowEconomyHelp((v) => !v)}
+                    aria-label={t('cameras.addModal.economyModeLabel')}
+                    aria-expanded={showEconomyHelp}
+                    className="w-5 h-5 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text text-[11px] leading-none flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 cursor-pointer"
+                  >
+                    ?
+                  </button>
+                </div>
+              </div>
+              {showEconomyHelp ? (
+                <p role="status" className="mb-2 text-[11px] leading-relaxed text-text-muted bg-card border border-border/40 rounded-lg px-3 py-2">
+                  {t('cameras.addModal.economyModeHelp')}
+                </p>
+              ) : null}
               <div role="radiogroup" aria-labelledby="vision-edit-transport-label" className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {(['udp', 'tcp'] as const).map((mode) => {
                   const selected = transport === mode

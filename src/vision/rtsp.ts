@@ -154,12 +154,84 @@ export function resolveRtspCodec(value: unknown): RtspCodec {
   return value === 'h265' ? 'h265' : RTSP_CODEC_DEFAULT
 }
 
+/** Supported RTSP camera stream profiles based on active demand. */
+export type RtspStreamProfile = 'live' | 'monitor' | 'standby'
+
+/** FPS cap when only background monitoring is active (tickCamera runs at 1 FPS). */
+export const RTSP_MONITOR_FPS = 2
+
+/** FPS cap when no UI subscriber and no active monitor are running (keeps cache <=1s fresh). */
+export const RTSP_STANDBY_FPS = 1
+
+/** Grace period before downgrading from live to monitor/standby after subscribers drop to 0 (3 min). */
+export const RTSP_PROFILE_DOWNGRADE_GRACE_MS = 180000
+
+/** Brief pause between killing old FFmpeg and spawning new FFmpeg during a profile switch. */
+export const RTSP_PROFILE_SWITCH_DELAY_MS = 400
+
+/** Default Economy Mode state for IP cameras (enabled by default to save background CPU). */
+export const RTSP_ECONOMY_MODE_DEFAULT = true
+
+/**
+ * Resolve persisted economy mode flag. Enabled by default unless explicitly set to `false`.
+ */
+export function resolveEconomyMode(value: unknown): boolean {
+  return value === false ? false : RTSP_ECONOMY_MODE_DEFAULT
+}
+
+/**
+ * Resolve desired RTSP stream profile from subscriber count, monitoring state,
+ * and camera economy mode:
+ * - When `economyMode` is false: always `'live'` (full background stream).
+ * - `live`: a UI/widget subscriber is watching (or count is not yet known).
+ * - `monitor`: no UI subscriber, but at least one active monitor needs frames.
+ * - `standby`: no UI subscriber and no active monitor; keeps cache warm for instant tab open.
+ */
+export function resolveRtspStreamProfile(opts: {
+  subscribers: number | null
+  hasActiveMonitor: boolean
+  economyMode?: boolean
+}): RtspStreamProfile {
+  const economy = opts.economyMode === undefined ? RTSP_ECONOMY_MODE_DEFAULT : opts.economyMode
+  if (!economy) return 'live'
+  if (opts.subscribers === null || opts.subscribers > 0) return 'live'
+  if (opts.hasActiveMonitor) return 'monitor'
+  return 'standby'
+}
+
+/**
+ * Decide whether to switch the running FFmpeg profile now or hold during downgrade grace.
+ * Promotions to `live` are always immediate; downgrades from `live` wait `graceMs`
+ * after `lastLiveAt` (when `lastLiveAt > 0`) so quick tab switches avoid FFmpeg restarts.
+ */
+export function decideRtspProfileTransition(opts: {
+  currentProfile: RtspStreamProfile
+  desiredProfile: RtspStreamProfile
+  lastLiveAt: number
+  now: number
+  graceMs?: number
+}): { nextProfile: RtspStreamProfile; switchNow: boolean } {
+  const { currentProfile, desiredProfile, lastLiveAt, now } = opts
+  const graceMs = opts.graceMs ?? RTSP_PROFILE_DOWNGRADE_GRACE_MS
+  if (desiredProfile === currentProfile) {
+    return { nextProfile: currentProfile, switchNow: false }
+  }
+  if (desiredProfile === 'live') {
+    return { nextProfile: 'live', switchNow: true }
+  }
+  if (currentProfile === 'live' && lastLiveAt > 0 && now - lastLiveAt < graceMs) {
+    return { nextProfile: 'live', switchNow: false }
+  }
+  return { nextProfile: desiredProfile, switchNow: true }
+}
+
 /** FFmpeg arguments for low-latency RTSP transcoding. */
 export function buildRtspFfmpegArgs(
   url: string,
   transport: RtspTransport,
   previewWidth: number = PREVIEW_WIDTH_DEFAULT,
-  codec: RtspCodec = RTSP_CODEC_DEFAULT
+  codec: RtspCodec = RTSP_CODEC_DEFAULT,
+  profile: RtspStreamProfile = 'live'
 ): string[] {
   const isUdp = transport === 'udp'
   const bufferSize = isUdp ? '8388608' : '2097152'
@@ -175,8 +247,6 @@ export function buildRtspFfmpegArgs(
     bufferSize,
     '-max_delay',
     maxDelay,
-    '-err_detect',
-    'ignore_err',
     '-allowed_media_types',
     'video',
     '-timeout',
@@ -191,24 +261,34 @@ export function buildRtspFfmpegArgs(
     'low_delay'
   ]
 
-  // For H.265 (HEVC) or UDP transport, drop reorder queue size to zero to prevent mid-stream stalls on RTP packets.
-  if (codec === 'h265' || isUdp) {
+  // Over UDP, keep a modest RTP reorder window so out-of-order packets from
+  // Wi-Fi/router jitter are reordered instead of dropped as lost slices.
+  // Over TCP (already ordered), H.265 keeps 0 to prevent mid-stream stalls.
+  if (isUdp) {
+    args.push('-reorder_queue_size', '256')
+  } else if (codec === 'h265') {
     args.push('-reorder_queue_size', '0')
   }
+
+  const scaleFilter = `scale=w='min(${previewWidth},iw)':h=-2`
+  const vfFilter =
+    profile === 'monitor'
+      ? `fps=${RTSP_MONITOR_FPS},${scaleFilter}`
+      : profile === 'standby'
+        ? `fps=${RTSP_STANDBY_FPS},${scaleFilter}`
+        : scaleFilter
 
   args.push(
     '-i',
     url,
-    // Preview cadence follows the camera (passthrough). Forcing `fps=25`
-    // duplicated frames when the source is slower (typical 10-15fps substream),
-    // paying JPEG encode + HTTP push for images that add nothing.
-    // min(width, iw) caps without upscaling: a 640-wide substream stays at
-    // 640 even when the user picks a larger preview, so no bandwidth is spent
-    // on interpolated pixels.
+    // Preview cadence follows the camera in 'live' mode via vfr (drops
+    // duplicate PTS that crash FFmpeg 8+ mjpeg encoder with Invalid argument).
+    // In 'monitor' (2fps) and 'standby' (1fps) modes, the fps filter drops
+    // frames before scaling and MJPEG encoding so background CPU stays minimal.
     '-vf',
-    `scale=w='min(${previewWidth},iw)':h=-2`,
+    vfFilter,
     '-fps_mode',
-    'passthrough',
+    profile === 'live' ? 'vfr' : 'cfr',
     '-f',
     'image2pipe',
     '-vcodec',

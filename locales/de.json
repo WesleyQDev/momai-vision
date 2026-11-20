@@ -138,6 +138,8 @@
       "codecLabel": "Videoprotokoll",
       "codecH264": "H.264 (Standard — Stabil)",
       "codecH265": "H.265 (HEVC — Geringere Bandbreite)",
+      "economyModeLabel": "Sparmodus",
+      "economyModeHelp": "Reduziert die CPU-Auslastung im Hintergrund bei geschlossenem Tab (1 FPS im Standby, 2 FPS bei Überwachung). Deaktiviert bleibt der Live-Stream durchgehend aktiv.",
       "codecHelp": "H.264 bietet maximale Stabilität und geringe CPU-Auslastung. H.265 reduziert die Bandbreite, ideal wenn Ihre Kamera in HEVC sendet.",
       "addToSelection": "Zur Auswahl hinzufügen",
       "addHint": "Wird beim Bestätigen hinzugefügt — Sie können weitere hinzufügen.",

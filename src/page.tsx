@@ -42,6 +42,7 @@ import {
   isRtspMidStreamStalled,
   resolvePreviewWidth,
   resolveRtspCodec,
+  resolveEconomyMode,
   PREVIEW_WIDTH_DEFAULT,
   PREVIEW_WIDTH_OPTIONS,
   RTSP_CODEC_DEFAULT,
@@ -80,7 +81,7 @@ export function isSameCameraId(a: string, b: string): boolean {
     const keyA = credentialKey(cleanA)
     const keyB = credentialKey(cleanB)
     if (keyA && keyB && keyA === keyB) return true
-  } catch {}
+  } catch { }
   return false
 }
 
@@ -279,6 +280,8 @@ interface CameraInfo {
   connecting?: boolean
   lastError?: string
   url?: string
+  fmp4Url?: string
+  fmp4Mime?: string
 }
 
 interface AutomationWorkflowSnapshot {
@@ -620,7 +623,7 @@ async function convertImageSourceToPngBlob(imgSrc: string): Promise<Blob> {
         ? blobFromCanvas
         : new Blob([blobFromCanvas], { type: 'image/png' })
     }
-  } catch {}
+  } catch { }
 
   // 3. Fallback via fetch + createImageBitmap
   try {
@@ -643,7 +646,7 @@ async function convertImageSourceToPngBlob(imgSrc: string): Promise<Blob> {
           : new Blob([converted], { type: 'image/png' })
       }
     }
-  } catch {}
+  } catch { }
 
   throw new Error('Falha ao converter imagem para PNG')
 }
@@ -737,12 +740,12 @@ async function sharePrint(snap: Snapshot, t: TranslateFn, locale?: string): Prom
         url: resolveFullImageUrl(imgSrc),
         files: dataUrl
           ? [
-              {
-                name: `print-${snap.id}.jpg`,
-                dataUrl,
-                mimeType: 'image/jpeg'
-              }
-            ]
+            {
+              name: `print-${snap.id}.jpg`,
+              dataUrl,
+              mimeType: 'image/jpeg'
+            }
+          ]
           : []
       })
       return res?.ok ?? true
@@ -787,12 +790,12 @@ async function shareAlert(alert: Alert, t: TranslateFn, locale?: string): Promis
         url: imgSrc ? resolveFullImageUrl(imgSrc) : undefined,
         files: dataUrl
           ? [
-              {
-                name: `alerta-${alert.snapshotId || alert.ts}.jpg`,
-                dataUrl,
-                mimeType: 'image/jpeg'
-              }
-            ]
+            {
+              name: `alerta-${alert.snapshotId || alert.ts}.jpg`,
+              dataUrl,
+              mimeType: 'image/jpeg'
+            }
+          ]
           : []
       })
       return res?.ok ?? true
@@ -1020,7 +1023,7 @@ function createMjpegReader(
         const timeoutMs = hasFirstFrame ? 5000 : 12000
         if (Date.now() - lastFrameTs > timeoutMs) {
           clearInterval(watchdogTimer)
-          try { sessionAc?.abort() } catch {}
+          try { sessionAc?.abort() } catch { }
         }
       }, 1500)
 
@@ -1045,7 +1048,7 @@ function createMjpegReader(
           return out
         }
         let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
-        
+
         const parse = (buf: Uint8Array): Uint8Array => {
           let idx = indexOfSeq(buf, BOUNDARY)
           while (idx !== -1) {
@@ -1299,11 +1302,10 @@ function CustomSelect<T extends string = string>({
         <span className="flex items-center gap-1.5 shrink-0">
           {selectedOption?.badge && (
             <span
-              className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                selectedOption.badgeVariant === 'success'
-                  ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
-                  : 'bg-input border border-border/30 text-text-muted'
-              }`}
+              className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${selectedOption.badgeVariant === 'success'
+                ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+                : 'bg-input border border-border/30 text-text-muted'
+                }`}
             >
               {selectedOption.badge}
             </span>
@@ -1356,11 +1358,10 @@ function CustomSelect<T extends string = string>({
                 <span className="flex items-center gap-1.5 shrink-0">
                   {opt.badge && (
                     <span
-                      className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
-                        opt.badgeVariant === 'success'
-                          ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
-                          : 'bg-input border border-border/30 text-text-muted'
-                      }`}
+                      className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${opt.badgeVariant === 'success'
+                        ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400'
+                        : 'bg-input border border-border/30 text-text-muted'
+                        }`}
                     >
                       {opt.badge}
                     </span>
@@ -1523,18 +1524,16 @@ function ZoneEditorBar({
   return (
     <div
       data-testid={testId}
-      className={`flex flex-row items-center justify-center flex-nowrap shrink-0 select-none ${
-        compact ? 'gap-1' : 'gap-1.5 sm:gap-2'
-      }`}
+      className={`flex flex-row items-center justify-center flex-nowrap shrink-0 select-none ${compact ? 'gap-1' : 'gap-1.5 sm:gap-2'
+        }`}
     >
       {/* Seletor de ferramenta de desenho */}
       <div ref={dropdownRef} className="relative shrink-0">
         <button
           type="button"
           onClick={() => setIsDropdownOpen((v) => !v)}
-          className={`${
-            compact ? 'h-7 px-1.5 text-[11px] rounded-lg' : 'h-8 sm:h-9 px-2.5 sm:px-3 text-xs rounded-xl'
-          } bg-input/60 hover:bg-input text-text font-semibold border border-border/40 transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer`}
+          className={`${compact ? 'h-7 px-1.5 text-[11px] rounded-lg' : 'h-8 sm:h-9 px-2.5 sm:px-3 text-xs rounded-xl'
+            } bg-input/60 hover:bg-input text-text font-semibold border border-border/40 transition-colors flex items-center gap-1 whitespace-nowrap cursor-pointer`}
           title={t('monitoring.zoneEditor.selectTool')}
           aria-label={t('monitoring.zoneEditor.selectTool')}
         >
@@ -1619,9 +1618,8 @@ function ZoneEditorBar({
           type="button"
           disabled={draftPoints.length === 0}
           onClick={onUndo}
-          className={`${
-            compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
-          } bg-transparent hover:bg-input text-text font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer`}
+          className={`${compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
+            } bg-transparent hover:bg-input text-text font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer`}
           title={t('monitoring.zoneEditor.undoShort')}
           aria-label={t('monitoring.zoneEditor.undoShort')}
         >
@@ -1637,9 +1635,8 @@ function ZoneEditorBar({
         <button
           type="button"
           onClick={onClear}
-          className={`${
-            compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
-          } bg-transparent hover:bg-error/20 text-error hover:text-error font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer`}
+          className={`${compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
+            } bg-transparent hover:bg-error/20 text-error hover:text-error font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer`}
           title={t('monitoring.zoneEditor.clearShort')}
           aria-label={t('monitoring.zoneEditor.clearShort')}
         >
@@ -1654,9 +1651,8 @@ function ZoneEditorBar({
         <button
           type="button"
           onClick={onCancel}
-          className={`${
-            compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
-          } bg-transparent hover:bg-input text-text font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer`}
+          className={`${compact ? 'h-7 px-2 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl text-xs'
+            } bg-transparent hover:bg-input text-text font-semibold border border-border/40 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer`}
           title={t('common.cancel')}
           aria-label={t('common.cancel')}
         >
@@ -1673,13 +1669,11 @@ function ZoneEditorBar({
           type="button"
           disabled={draftPoints.length < 3}
           onClick={() => onSave(draftPoints)}
-          className={`${
-            compact ? 'h-7 px-2.5 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-3 sm:px-4 rounded-xl text-xs'
-          } font-semibold transition-all shadow-md flex items-center gap-1.5 whitespace-nowrap shrink-0 border ${
-            draftPoints.length >= 3
+          className={`${compact ? 'h-7 px-2.5 rounded-lg text-[11px]' : 'h-8 sm:h-9 px-3 sm:px-4 rounded-xl text-xs'
+            } font-semibold transition-all shadow-md flex items-center gap-1.5 whitespace-nowrap shrink-0 border ${draftPoints.length >= 3
               ? 'bg-accent hover:bg-accent/80 text-text border-accent cursor-pointer'
               : 'bg-transparent text-text-muted/40 border-border/30 cursor-not-allowed'
-          }`}
+            }`}
           title={draftPoints.length >= 3 ? t('monitoring.zoneEditor.saveReady') : t('monitoring.zoneEditor.saveNeedPoints')}
           aria-label={t('common.save')}
         >
@@ -1934,9 +1928,8 @@ function ZoneOverlay({
     <>
       {/* SVG polygon layer com suporte a lápis livre (freehand), retângulo e pontos */}
       <svg
-        className={`absolute inset-0 w-full h-full z-20 ${
-          isEditing ? 'cursor-crosshair pointer-events-auto select-none' : 'pointer-events-none'
-        }`}
+        className={`absolute inset-0 w-full h-full z-20 ${isEditing ? 'cursor-crosshair pointer-events-auto select-none' : 'pointer-events-none'
+          }`}
         style={style}
         viewBox={`0 0 ${vbW} ${vbH}`}
         preserveAspectRatio={usesFrame ? (fit === 'slice' ? 'xMidYMid slice' : 'xMidYMid meet') : 'none'}
@@ -2136,11 +2129,10 @@ function ToolbarDropdown({
         aria-haspopup="menu"
         aria-expanded={isOpen}
         style={{ borderRadius: 10 }}
-        className={`h-9 px-3 flex items-center gap-1.5 border cursor-pointer select-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40 ${
-          isOpen
-            ? 'bg-input text-text border-border'
-            : 'bg-input/50 hover:bg-input text-text-muted hover:text-text border-border/40'
-        }`}
+        className={`h-9 px-3 flex items-center gap-1.5 border cursor-pointer select-none transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/40 ${isOpen
+          ? 'bg-input text-text border-border'
+          : 'bg-input/50 hover:bg-input text-text-muted hover:text-text border-border/40'
+          }`}
       >
         <span className="flex items-center justify-center w-4 h-4 shrink-0">{icon}</span>
         <span style={{ fontSize: 11 }} className="hidden md:inline whitespace-nowrap font-semibold leading-none">{label}</span>
@@ -2160,9 +2152,8 @@ function ToolbarDropdown({
         <div
           role="menu"
           style={{ minWidth: 220, marginTop: 6, borderRadius: 12 }}
-          className={`absolute top-full z-50 py-1 border border-border/50 bg-card/95 backdrop-blur-md shadow-2xl animate-fadeIn overflow-hidden ${
-            align === 'right' ? 'right-0' : 'left-0'
-          }`}
+          className={`absolute top-full z-50 py-1 border border-border/50 bg-card/95 backdrop-blur-md shadow-2xl animate-fadeIn overflow-hidden ${align === 'right' ? 'right-0' : 'left-0'
+            }`}
         >
           {children}
         </div>
@@ -2198,9 +2189,8 @@ function ToolbarMenuItem({
         e.stopPropagation()
         onClick()
       }}
-      className={`w-full text-left px-3 py-2 flex items-center gap-2.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-        danger ? 'text-red-500 hover:bg-red-500/10' : 'text-text hover:bg-input'
-      }`}
+      className={`w-full text-left px-3 py-2 flex items-center gap-2.5 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${danger ? 'text-red-500 hover:bg-red-500/10' : 'text-text hover:bg-input'
+        }`}
     >
       <span className="w-4 h-4 flex items-center justify-center shrink-0">{icon}</span>
       <span className="flex-1 min-w-0 truncate">{label}</span>
@@ -2354,7 +2344,7 @@ export const CameraCard = memo(function CameraCard({
   // Fase de conexão lenta/indisponível: se demorar demais sem frame, mostra feedback amigável
   const [isSlow, setIsSlow] = useState(false)
   const [isUnavailable, setIsUnavailable] = useState(false)
-    const framesRef = useRef(0)
+  const framesRef = useRef(0)
   const fpsTsRef = useRef(0)
   const frameDimsRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 })
 
@@ -2376,6 +2366,9 @@ export const CameraCard = memo(function CameraCard({
   // este frame local em vez de baixar outro do node-core (ver pump abaixo).
   const lastFrameRef = useRef<Uint8Array | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  const mseVideoRef = useRef<HTMLVideoElement | null>(null)
+  const [msePlaying, setMsePlaying] = useState(false)
+  const [mseFailed, setMseFailed] = useState(false)
   const isWebcam = camera.source === 'webcam' || camera.id.startsWith('webcam:')
 
   // Parser de preview em Web Worker (thread separada) — parse fora do main
@@ -2502,7 +2495,7 @@ export const CameraCard = memo(function CameraCard({
                       cachedFrameShownRef.current = true
                       setCachedFrameShown(true)
                     }
-                  } catch {}
+                  } catch { }
                 }
                 img.src = dataUrl
               }
@@ -2537,6 +2530,155 @@ export const CameraCard = memo(function CameraCard({
     const token = (window as any).api?.getSessionToken?.() || ''
     return `${base}/media/camera/stream/${encodeURIComponent(deviceId)}?ext=${EXT_ID}&token=${encodeURIComponent(token)}&r=${refreshKey}`
   }, [camera.id, refreshKey])
+
+  // Low-CPU fMP4 MSE playback for RTSP cameras; falls back to MJPEG canvas on error.
+  useEffect(() => {
+    if (isWebcam || isPaused || isActive === false || mseFailed) {
+      setMsePlaying(false)
+      return
+    }
+    const fmp4Url = camera.fmp4Url
+    const fmp4Mime = camera.fmp4Mime
+    if (!fmp4Url || !fmp4Mime || typeof MediaSource === 'undefined' || !MediaSource.isTypeSupported(fmp4Mime)) {
+      setMsePlaying(false)
+      return
+    }
+    const video = mseVideoRef.current
+    if (!video) return
+
+    let cancelled = false
+    const ac = new AbortController()
+    const ms = new MediaSource()
+    const objectUrl = URL.createObjectURL(ms)
+    video.src = objectUrl
+
+    const onSourceOpen = async () => {
+      if (cancelled || ms.readyState !== 'open') return
+      let sb: SourceBuffer
+      try {
+        sb = ms.addSourceBuffer(fmp4Mime)
+        sb.mode = 'segments'
+      } catch {
+        if (!cancelled) setMseFailed(true)
+        return
+      }
+
+      const queue: Uint8Array[] = []
+      let appending = false
+
+      const flush = () => {
+        if (cancelled || appending || sb.updating || ms.readyState !== 'open') return
+        if (sb.buffered.length > 0) {
+          const end = sb.buffered.end(sb.buffered.length - 1)
+          const lag = end - video.currentTime
+          if (video.currentTime > 0 && lag > 3.0) {
+            try {
+              video.currentTime = end - 0.8
+              video.playbackRate = 1.0
+            } catch { }
+          } else if (lag > 1.0) {
+            if (video.playbackRate !== 1.08) video.playbackRate = 1.08
+          } else if (video.playbackRate !== 1.0) {
+            video.playbackRate = 1.0
+          }
+          const start = sb.buffered.start(0)
+          if (video.currentTime - start > 10) {
+            try {
+              appending = true
+              sb.remove(start, video.currentTime - 4)
+              return
+            } catch {
+              appending = false
+            }
+          }
+        }
+        const next = queue.shift()
+        if (!next) return
+        try {
+          appending = true
+          sb.appendBuffer(new Uint8Array(next))
+        } catch {
+          appending = false
+          if (!cancelled) setMseFailed(true)
+        }
+      }
+
+      sb.addEventListener('updateend', () => {
+        appending = false
+        if (!cancelled) {
+          if (video.paused && sb.buffered.length > 0) {
+            void video.play().catch(() => { })
+          }
+          flush()
+        }
+      })
+
+      try {
+        const res = await fetch(fmp4Url, { signal: ac.signal })
+        if (!res.ok || !res.body) {
+          if (!cancelled) setMseFailed(true)
+          return
+        }
+        const reader = res.body.getReader()
+        while (!cancelled) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value && value.length > 0) {
+            // Cap queued chunks if tab stalls to prevent memory growth
+            if (queue.length > 32) queue.splice(0, queue.length - 8)
+            queue.push(value)
+            flush()
+          }
+        }
+      } catch {
+        if (!cancelled && !ac.signal.aborted) {
+          setMseFailed(true)
+        }
+      }
+    }
+
+    const onPlaying = () => {
+      if (!cancelled) {
+        setMsePlaying(true)
+        hasFrameRef.current = true
+        lastPreviewFrameAtRef.current = Date.now()
+        setHasFrame(true)
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          frameDimsRef.current = { w: video.videoWidth, h: video.videoHeight }
+        }
+      }
+    }
+    const onTimeUpdate = () => {
+      if (!cancelled && !video.paused && !video.ended) {
+        lastPreviewFrameAtRef.current = Date.now()
+      }
+    }
+    const onError = () => {
+      if (!cancelled) setMseFailed(true)
+    }
+
+    ms.addEventListener('sourceopen', () => void onSourceOpen(), { once: true })
+    video.addEventListener('playing', onPlaying)
+    video.addEventListener('timeupdate', onTimeUpdate)
+    video.addEventListener('error', onError)
+
+    return () => {
+      cancelled = true
+      ac.abort()
+      video.removeEventListener('playing', onPlaying)
+      video.removeEventListener('timeupdate', onTimeUpdate)
+      video.removeEventListener('error', onError)
+      try {
+        if (ms.readyState === 'open') ms.endOfStream()
+      } catch { }
+      video.removeAttribute('src')
+      try {
+        video.load()
+      } catch { }
+      URL.revokeObjectURL(objectUrl)
+      setMsePlaying(false)
+    }
+  }, [camera.fmp4Url, camera.fmp4Mime, isWebcam, isPaused, isActive, mseFailed, refreshKey])
 
   const handleFrameLoad = () => {
     setReady(true)
@@ -2619,7 +2761,7 @@ export const CameraCard = memo(function CameraCard({
               const len = bytes.byteLength
               for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i])
               snap = `data:image/jpeg;base64,${btoa(binary)}`
-            } catch {}
+            } catch { }
           }
           if (snap && snap.length > 100) {
             setFrozenFrame(snap)
@@ -2852,7 +2994,7 @@ export const CameraCard = memo(function CameraCard({
         // this into another module breaks worker loading in dev.
         workerUrl: new URL('./mjpeg-worker.js', import.meta.url),
         onBitmap: (bitmap, origW, origH) => {
-          if ( parserCallbacksRef.current.onBitmap ) {
+          if (parserCallbacksRef.current.onBitmap) {
             parserCallbacksRef.current.onBitmap(bitmap, origW, origH)
           } else {
             bitmap.close()
@@ -2862,7 +3004,7 @@ export const CameraCard = memo(function CameraCard({
         onError: () => {
           // Silent reconnect in background without intrusive overlay
         },
-        onFps: () => {},
+        onFps: () => { },
         onKbs: (measuredKbs) => parserCallbacksRef.current.onKbs?.(measuredKbs)
       })
       parserWorkerRef.current = parser
@@ -3057,7 +3199,7 @@ export const CameraCard = memo(function CameraCard({
             useWorkerFrame ? { cameraId: camera.id } : { cameraId: camera.id, jpegBase64 }
           )
           pumpingRef.current = true
-          void request.catch(() => {}).finally(() => {
+          void request.catch(() => { }).finally(() => {
             pumpingRef.current = false
           })
           const res = await Promise.race([
@@ -3143,7 +3285,7 @@ export const CameraCard = memo(function CameraCard({
         // Reset imediato da conexão do stream MJPEG para descongelar o canvas na hora
         try {
           parserWorkerRef.current?.reset?.()
-        } catch {}
+        } catch { }
       }
     }
     document.addEventListener('visibilitychange', onVisibility)
@@ -3226,7 +3368,7 @@ export const CameraCard = memo(function CameraCard({
             const len = bytes.byteLength
             for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i])
             snap = `data:image/jpeg;base64,${btoa(binary)}`
-          } catch {}
+          } catch { }
         }
         if (snap && snap.length > 100) {
           setFrozenFrame(snap)
@@ -3302,7 +3444,7 @@ export const CameraCard = memo(function CameraCard({
             : 'border-border/30 hover:border-border/60'
           }`}
       >
-                <div
+        <div
           className="relative w-full aspect-video bg-input/40 rounded-t-lg overflow-hidden shrink-0 cursor-pointer select-none"
           style={{ aspectRatio: '16 / 9' }}
           onDoubleClick={(e) => {
@@ -3317,6 +3459,13 @@ export const CameraCard = memo(function CameraCard({
             ref={frameCanvasRef}
             data-camera-id={camera.id}
             className={`absolute inset-0 w-full h-full object-cover ${hasFrame || cachedFrameShown || isPaused ? 'block' : 'opacity-0'}`}
+          />
+          <video
+            ref={mseVideoRef}
+            autoPlay
+            muted
+            playsInline
+            className={`absolute inset-0 w-full h-full object-cover pointer-events-none ${msePlaying && !isPaused ? 'block' : 'hidden'}`}
           />
           {/* Imagem estática persistente do último frame enquanto pausada */}
           {isPaused && (frozenFrame || readCachedFrame(camera.id)) ? (
@@ -3409,11 +3558,10 @@ export const CameraCard = memo(function CameraCard({
             draggable={false}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
-            className={`absolute top-0 right-0 z-30 flex items-center gap-0.5 bg-card/90 backdrop-blur-md p-1 rounded-bl-xl border-b border-l border-border/40 shadow-sm transition-all duration-200 ${
-              isEditingZone || confirmingRemove
-                ? 'opacity-100 scale-100'
-                : 'opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 focus-within:opacity-100 focus-within:scale-100 max-sm:opacity-100 max-sm:scale-100'
-            }`}
+            className={`absolute top-0 right-0 z-30 flex items-center gap-0.5 bg-card/90 backdrop-blur-md p-1 rounded-bl-xl border-b border-l border-border/40 shadow-sm transition-all duration-200 ${isEditingZone || confirmingRemove
+              ? 'opacity-100 scale-100'
+              : 'opacity-0 scale-95 group-hover:opacity-100 group-hover:scale-100 focus-within:opacity-100 focus-within:scale-100 max-sm:opacity-100 max-sm:scale-100'
+              }`}
           >
             {onToggleEditZone ? (
               <CardHeaderActionButton
@@ -3569,121 +3717,120 @@ export const CameraCard = memo(function CameraCard({
           ) : null}
         </div>
 
-      {isEditingZone ? (
-        <div
-          data-testid="card-zone-dock"
-          className="flex items-center justify-center px-2 py-2 bg-card/95 shrink-0 border-t border-border/30 overflow-x-auto animate-fadeIn select-none"
-        >
-          <ZoneEditorBar
-            compact
-            drawMode={drawMode}
-            onChangeDrawMode={setDrawMode}
-            draftPoints={draftPoints}
-            onUndo={handleUndoDraftPoint}
-            onClear={handleClearDraftZone}
-            onCancel={handleCancelDraftZone}
-            onSave={handleSaveDraftZone}
-          />
-        </div>
-      ) : (
-        <div className="flex items-center justify-between px-3 py-2 bg-card/95 shrink-0 border-t border-border/30">
-          <span className="text-[11px] text-text-muted font-medium px-1 flex items-center gap-1.5">
-            <span className={`w-1.5 h-1.5 rounded-full ${isPaused ? 'bg-amber-500' : camera.online ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-            {isPaused ? t('cameras.pausedBadge') : camera.source === 'webcam' ? t('cameras.optWebcam') : t('cameras.mjpegTag')}
-          </span>
+        {isEditingZone ? (
+          <div
+            data-testid="card-zone-dock"
+            className="flex items-center justify-center px-2 py-2 bg-card/95 shrink-0 border-t border-border/30 overflow-x-auto animate-fadeIn select-none"
+          >
+            <ZoneEditorBar
+              compact
+              drawMode={drawMode}
+              onChangeDrawMode={setDrawMode}
+              draftPoints={draftPoints}
+              onUndo={handleUndoDraftPoint}
+              onClear={handleClearDraftZone}
+              onCancel={handleCancelDraftZone}
+              onSave={handleSaveDraftZone}
+            />
+          </div>
+        ) : (
+          <div className="flex items-center justify-between px-3 py-2 bg-card/95 shrink-0 border-t border-border/30">
+            <span className="text-[11px] text-text-muted font-medium px-1 flex items-center gap-1.5">
+              <span className={`w-1.5 h-1.5 rounded-full ${isPaused ? 'bg-amber-500' : camera.online ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+              {isPaused ? t('cameras.pausedBadge') : camera.source === 'webcam' ? t('cameras.optWebcam') : t('cameras.mjpegTag')}
+            </span>
 
-          <div className="flex items-center gap-1.5 shrink-0">
-            {/* PTZ: controle de giro e posição para câmeras IP */}
-            {camera.source !== 'webcam' && onTogglePtz && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  onTogglePtz(camera)
-                }}
-                className={`w-7 h-7 rounded-lg border transition-all flex items-center justify-center shadow-md active:scale-95 cursor-pointer ${
-                  isPtzOpen
+            <div className="flex items-center gap-1.5 shrink-0">
+              {/* PTZ: controle de giro e posição para câmeras IP */}
+              {camera.source !== 'webcam' && onTogglePtz && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onTogglePtz(camera)
+                  }}
+                  className={`w-7 h-7 rounded-lg border transition-all flex items-center justify-center shadow-md active:scale-95 cursor-pointer ${isPtzOpen
                     ? 'bg-card text-text border-border shadow-sm'
                     : 'bg-input hover:bg-card border-border/40 text-text-muted hover:text-text'
-                }`}
-                title={t('cameras.ptzControl')}
-                aria-label={t('cameras.ptzControl')}
+                    }`}
+                  title={t('cameras.ptzControl')}
+                  aria-label={t('cameras.ptzControl')}
+                >
+                  <svg
+                    className="w-3.5 h-3.5"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                  >
+                    <circle cx="12" cy="12" r="9.5" strokeWidth="1.6" />
+                    <circle cx="12" cy="12" r="3.2" strokeWidth="1.2" opacity="0.6" />
+                    <circle cx="12" cy="6.2" r="1.4" fill="currentColor" stroke="none" />
+                    <circle cx="12" cy="17.8" r="1.4" fill="currentColor" stroke="none" />
+                    <circle cx="6.2" cy="12" r="1.4" fill="currentColor" stroke="none" />
+                    <circle cx="17.8" cy="12" r="1.4" fill="currentColor" stroke="none" />
+                  </svg>
+                </button>
+              )}
+              {/* Reload: rebuild the camera source when the feed is stuck */}
+              <button
+                disabled={reloading}
+                onClick={() => void handleReloadCamera()}
+                className="w-7 h-7 rounded-lg bg-input hover:bg-card border border-border/40 text-text transition-all flex items-center justify-center shadow-md active:scale-95 disabled:opacity-70"
+                title={t('cameras.reload')}
+                aria-label={t('cameras.reload')}
               >
                 <svg
-                  className="w-3.5 h-3.5"
+                  className={`w-3.5 h-3.5 ${reloading || reconnecting || cachedFrameShown ? 'animate-spin' : ''}`}
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                 >
-                  <circle cx="12" cy="12" r="9.5" strokeWidth="1.6" />
-                  <circle cx="12" cy="12" r="3.2" strokeWidth="1.2" opacity="0.6" />
-                  <circle cx="12" cy="6.2" r="1.4" fill="currentColor" stroke="none" />
-                  <circle cx="12" cy="17.8" r="1.4" fill="currentColor" stroke="none" />
-                  <circle cx="6.2" cy="12" r="1.4" fill="currentColor" stroke="none" />
-                  <circle cx="17.8" cy="12" r="1.4" fill="currentColor" stroke="none" />
+                  <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
                 </svg>
               </button>
-            )}
-            {/* Reload: rebuild the camera source when the feed is stuck */}
-            <button
-              disabled={reloading}
-              onClick={() => void handleReloadCamera()}
-              className="w-7 h-7 rounded-lg bg-input hover:bg-card border border-border/40 text-text transition-all flex items-center justify-center shadow-md active:scale-95 disabled:opacity-70"
-              title={t('cameras.reload')}
-              aria-label={t('cameras.reload')}
-            >
-              <svg
-                className={`w-3.5 h-3.5 ${reloading || reconnecting || cachedFrameShown ? 'animate-spin' : ''}`}
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-              </svg>
-            </button>
 
-            {/* Interactive Print Button with Depth & State Feedback */}
-            <button
-              disabled={printStatus === 'capturing'}
-              onClick={handleTakeSnapshot}
-              className={`text-[11px] font-medium rounded-lg px-3 py-1.5 transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-border/40 ${printStatus === 'success'
-                ? 'bg-emerald-600 text-white border-transparent'
-                : printStatus === 'capturing'
-                  ? 'bg-input text-text opacity-80'
-                  : 'bg-input hover:bg-card text-text'
-                }`}
-            >
-              {printStatus === 'success' ? (
-                <>
-                  <svg className={`w-3.5 h-3.5 ${isEditingZone ? "text-sky-400" : "text-white"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-                    <path d="M20 6L9 17l-5-5" />
-                  </svg>
-                  {t('cameras.printSaved')}
-                </>
-              ) : printStatus === 'capturing' ? (
-                <>
-                  <svg className="w-3.5 h-3.5 animate-spin text-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
-                    <path d="M12 2a10 10 0 0 1 10 10" />
-                  </svg>
-                  {t('cameras.capturing')}
-                </>
-              ) : (
-                <>
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                    <circle cx="12" cy="13" r="4" />
-                  </svg>
-                  {t('cameras.takeSnapshot')}
-                </>
-              )}
-            </button>
+              {/* Interactive Print Button with Depth & State Feedback */}
+              <button
+                disabled={printStatus === 'capturing'}
+                onClick={handleTakeSnapshot}
+                className={`text-[11px] font-medium rounded-lg px-3 py-1.5 transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-border/40 ${printStatus === 'success'
+                  ? 'bg-emerald-600 text-white border-transparent'
+                  : printStatus === 'capturing'
+                    ? 'bg-input text-text opacity-80'
+                    : 'bg-input hover:bg-card text-text'
+                  }`}
+              >
+                {printStatus === 'success' ? (
+                  <>
+                    <svg className={`w-3.5 h-3.5 ${isEditingZone ? "text-sky-400" : "text-white"}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                    {t('cameras.printSaved')}
+                  </>
+                ) : printStatus === 'capturing' ? (
+                  <>
+                    <svg className="w-3.5 h-3.5 animate-spin text-text" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                      <path d="M12 2a10 10 0 0 1 10 10" />
+                    </svg>
+                    {t('cameras.capturing')}
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                      <circle cx="12" cy="13" r="4" />
+                    </svg>
+                    {t('cameras.takeSnapshot')}
+                  </>
+                )}
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        )}
       </div>
     </div>
   )
@@ -3739,6 +3886,7 @@ interface IpCameraDraft {
   transport: 'tcp' | 'udp'
   previewWidth: number
   codec?: RtspCodec
+  economyMode?: boolean
 }
 
 interface StoredCameraCredential {
@@ -3765,7 +3913,7 @@ function saveStoredCameraCredential(url: string, cred: StoredCameraCredential): 
     if (clean) map[clean] = cred
     if (host) map[host] = cred
     localStorage.setItem(`${EXT_ID}:camera-credentials-map`, JSON.stringify(map))
-  } catch {}
+  } catch { }
 }
 
 function findStoredCameraCredential(url: string): StoredCameraCredential | null {
@@ -3826,6 +3974,8 @@ function AddCameraModal({
   const [ipTransport, setIpTransport] = useState<'tcp' | 'udp'>('udp')
   const [ipPreviewWidth, setIpPreviewWidth] = useState<number>(PREVIEW_WIDTH_DEFAULT)
   const [ipCodec, setIpCodec] = useState<RtspCodec>(RTSP_CODEC_DEFAULT)
+  const [ipEconomyMode, setIpEconomyMode] = useState<boolean>(true)
+  const [ipEconomyHelp, setIpEconomyHelp] = useState<boolean>(false)
   const [transportHelp, setTransportHelp] = useState<'tcp' | 'udp' | null>(null)
   const [rememberCredentials, setRememberCredentials] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
@@ -3905,7 +4055,7 @@ function AddCameraModal({
           existingName = aliases[cleanId] || aliases[cleanUrl] || aliases[url] || ''
         }
       }
-    } catch {}
+    } catch { }
     if (!existingName) {
       const matchCam = allCameras.find((c) => isSameCameraId(c.id, cleanId) || isSameCameraId(c.id, cleanUrl) || isSameCameraId(c.id, url))
       if (matchCam && matchCam.name && matchCam.name !== t('cameras.defaultIpName') && matchCam.name !== t('cameras.fallbackName')) {
@@ -3953,7 +4103,7 @@ function AddCameraModal({
           setIpPassword(res.password || '')
           return
         }
-      } catch {}
+      } catch { }
     }
 
     // 3. This camera does not have its own remembered credentials: clear password
@@ -3970,6 +4120,7 @@ function AddCameraModal({
     setPendingWebcamIds([])
     setPendingIpDrafts([])
     setTransportHelp(null)
+    setIpEconomyHelp(false)
     setModalError(null)
     setSubmitting(false)
     setConfirmUnsaved(false)
@@ -3982,7 +4133,7 @@ function AddCameraModal({
     try {
       localStorage.removeItem(`${EXT_ID}:ip-draft`)
       const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:camera-defaults`) : null
-      const saved = raw ? (JSON.parse(raw) as { username?: unknown; password?: unknown; url?: unknown; transport?: unknown; previewWidth?: unknown; codec?: unknown; remember?: unknown }) : null
+      const saved = raw ? (JSON.parse(raw) as { username?: unknown; password?: unknown; url?: unknown; transport?: unknown; previewWidth?: unknown; codec?: unknown; economyMode?: unknown; remember?: unknown }) : null
       if (saved && saved.remember) {
         setIpUsername(typeof saved.username === 'string' && saved.username.trim() ? saved.username.trim() : 'admin')
         if (typeof saved.password === 'string') {
@@ -3993,6 +4144,7 @@ function AddCameraModal({
         setIpTransport(saved.transport === 'tcp' ? 'tcp' : 'udp')
         setIpPreviewWidth(resolvePreviewWidth(saved.previewWidth))
         setIpCodec(resolveRtspCodec(saved.codec))
+        setIpEconomyMode(resolveEconomyMode(saved.economyMode))
         setRememberCredentials(true)
         if (typeof saved.url === 'string' && saved.url) {
           void command<{ ok?: boolean; username?: string; password?: string }>('get_camera_credentials', {
@@ -4004,17 +4156,18 @@ function AddCameraModal({
                 if (res.password) setIpPassword(res.password)
               }
             })
-            .catch(() => {})
+            .catch(() => { })
         }
         return
       }
-    } catch {}
+    } catch { }
 
     setIpUsername('admin')
     setIpPassword('')
     setIpTransport('udp')
     setIpPreviewWidth(PREVIEW_WIDTH_DEFAULT)
     setIpCodec(RTSP_CODEC_DEFAULT)
+    setIpEconomyMode(true)
     setRememberCredentials(false)
   }, [isOpen, isActive])
 
@@ -4045,10 +4198,10 @@ function AddCameraModal({
     // Pré-aquece a câmera (getUserMedia no host) JÁ NA SELEÇÃO, em background:
     // assim, ao confirmar, o watch já está subindo e o card conecta mais rápido
     // (menos tempo "sem sinal"), parecido com o navegador inicializando a webcam.
-    void command('warm_webcam', { cameraId: val }).catch(() => {})
+    void command('warm_webcam', { cameraId: val }).catch(() => { })
   }
 
-  const persistCameraDefaults = (defaults: { username?: string; password?: string; url?: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec; remember?: boolean } | null) => {
+  const persistCameraDefaults = (defaults: { username?: string; password?: string; url?: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec; economyMode?: boolean; remember?: boolean } | null) => {
     try {
       if (typeof localStorage === 'undefined') return
       if (defaults && defaults.remember) {
@@ -4057,7 +4210,7 @@ function AddCameraModal({
         localStorage.removeItem(`${EXT_ID}:camera-defaults`)
       }
       localStorage.removeItem(`${EXT_ID}:ip-draft`)
-    } catch {}
+    } catch { }
   }
 
   const handleToggleRememberCredentials = (checked: boolean) => {
@@ -4084,7 +4237,7 @@ function AddCameraModal({
         if (typeof localStorage !== 'undefined') {
           localStorage.removeItem(`${EXT_ID}:camera-credentials-map`)
         }
-      } catch {}
+      } catch { }
     }
   }
 
@@ -4167,7 +4320,8 @@ function AddCameraModal({
       ...(password ? { username, password } : {}),
       transport: ipTransport,
       previewWidth: ipPreviewWidth,
-      ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
+      ...(ipCodec !== 'h264' ? { codec: ipCodec } : {}),
+      ...(ipEconomyMode === false ? { economyMode: false } : {})
     }
     if (rememberCredentials) {
       saveStoredCameraCredential(cleanUrl, {
@@ -4181,6 +4335,7 @@ function AddCameraModal({
         transport: ipTransport,
         previewWidth: ipPreviewWidth,
         codec: ipCodec,
+        ...(ipEconomyMode === false ? { economyMode: false } : {}),
         remember: true
       })
     }
@@ -4285,7 +4440,8 @@ function AddCameraModal({
         ...(password ? { username, password } : {}),
         transport: ipTransport,
         previewWidth: ipPreviewWidth,
-        ...(ipCodec !== 'h264' ? { codec: ipCodec } : {})
+        ...(ipCodec !== 'h264' ? { codec: ipCodec } : {}),
+        ...(ipEconomyMode === false ? { economyMode: false } : {})
       }
       const nextIps = [...pendingIpDrafts, draftItem]
       if (rememberCredentials) {
@@ -4300,6 +4456,7 @@ function AddCameraModal({
           transport: ipTransport,
           previewWidth: ipPreviewWidth,
           codec: ipCodec,
+          economyMode: ipEconomyMode,
           remember: true
         })
       }
@@ -4336,514 +4493,522 @@ function AddCameraModal({
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
-      className={`absolute inset-0 z-[100] animate-fadeIn overflow-y-auto pointer-events-auto ${
-        isMaximized ? 'grid place-items-center p-6 bg-black/60 backdrop-blur-sm' : 'flex flex-col bg-bg'
-      }`}
+      className={`absolute inset-0 z-[100] animate-fadeIn overflow-y-auto pointer-events-auto ${isMaximized ? 'grid place-items-center p-6 bg-black/60 backdrop-blur-sm' : 'flex flex-col bg-bg'
+        }`}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="vision-camera-dialog-title"
-        className={`flex flex-col bg-card shadow-2xl overflow-hidden ${
-          isMaximized
-            ? 'w-full max-w-[720px] max-h-[min(88dvh,680px)] my-6 rounded-2xl border border-border/40'
-            : 'w-full h-full max-w-none max-h-none rounded-none border-0 flex-1 min-h-0'
-        }`}
+        className={`flex flex-col bg-card shadow-2xl overflow-hidden ${isMaximized
+          ? 'w-full max-w-[720px] max-h-[min(88dvh,680px)] my-6 rounded-2xl border border-border/40'
+          : 'w-full h-full max-w-none max-h-none rounded-none border-0 flex-1 min-h-0'
+          }`}
       >
-          {/* Modal Header */}
-          <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-border/30 shrink-0">
-            <button
-              onClick={onClose}
-              aria-label={t('common.back')}
-              className="w-8 h-8 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M19 12H5M12 19l-7-7 7-7" />
-              </svg>
-            </button>
-            <div className="flex-1 flex items-center justify-center gap-2.5 min-w-0">
-              <span className="w-7 h-7 rounded-lg bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center shrink-0">
-                <VisionIcon className="w-3.5 h-3.5 text-emerald-400" />
-              </span>
-              <h2 id="vision-camera-dialog-title" className="text-[14px] font-semibold text-text tracking-tight">
-                {t('cameras.addModal.title')}
-              </h2>
-            </div>
-            <span className="w-8 h-8 shrink-0" aria-hidden="true" />
+        {/* Modal Header */}
+        <div className="flex items-center gap-3 px-4 sm:px-6 py-4 border-b border-border/30 shrink-0">
+          <button
+            onClick={onClose}
+            aria-label={t('common.back')}
+            className="w-8 h-8 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 12H5M12 19l-7-7 7-7" />
+            </svg>
+          </button>
+          <div className="flex-1 flex items-center justify-center gap-2.5 min-w-0">
+            <span className="w-7 h-7 rounded-lg bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center shrink-0">
+              <VisionIcon className="w-3.5 h-3.5 text-emerald-400" />
+            </span>
+            <h2 id="vision-camera-dialog-title" className="text-[14px] font-semibold text-text tracking-tight">
+              {t('cameras.addModal.title')}
+            </h2>
           </div>
+          <span className="w-8 h-8 shrink-0" aria-hidden="true" />
+        </div>
 
-          {/* Segmented Control / Tab Switcher */}
-          <div role="tablist" className="mx-4 sm:mx-6 p-1 rounded-full bg-input border border-border/40 flex gap-1">
-            <button
-              type="button"
-              role="tab"
-              onClick={() => setActiveTab('webcam')}
-              aria-selected={activeTab === 'webcam'}
-              className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 ${activeTab === 'webcam'
-                ? 'bg-card text-text shadow-sm font-semibold border border-border/30'
-                : 'text-text-muted hover:text-text hover:bg-card/40'
-                }`}
-            >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                <circle cx="12" cy="13" r="3.5" />
-              </svg>
-              {t('cameras.addModal.webcamTab')}
-              <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'webcam' ? 'bg-input text-text' : 'bg-input/60 text-text-muted'}`}>{webcamCameras.length}</span>
-            </button>
-            <button
-              type="button"
-              role="tab"
-              onClick={() => setActiveTab('ip')}
-              aria-selected={activeTab === 'ip'}
-              className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 ${activeTab === 'ip'
-                ? 'bg-card text-text shadow-sm font-semibold border border-border/30'
-                : 'text-text-muted hover:text-text hover:bg-card/40'
-                }`}
-            >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="8.5" />
-                <path d="M12 3.5a15 15 0 0 1 3.8 8.5A15 15 0 0 1 12 20.5A15 15 0 0 1 8.2 12 15 15 0 0 1 12 3.5z" />
-                <path d="M3.5 12h17" />
-              </svg>
-              {t('cameras.addModal.ipTab')}
-              <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'ip' ? 'bg-input text-text' : 'bg-input/60 text-text-muted'}`}>{ipCameras.length}</span>
-            </button>
-          </div>
+        {/* Segmented Control / Tab Switcher */}
+        <div role="tablist" className="mx-4 sm:mx-6 p-1 rounded-full bg-input border border-border/40 flex gap-1">
+          <button
+            type="button"
+            role="tab"
+            onClick={() => setActiveTab('webcam')}
+            aria-selected={activeTab === 'webcam'}
+            className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 ${activeTab === 'webcam'
+              ? 'bg-card text-text shadow-sm font-semibold border border-border/30'
+              : 'text-text-muted hover:text-text hover:bg-card/40'
+              }`}
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+              <circle cx="12" cy="13" r="3.5" />
+            </svg>
+            {t('cameras.addModal.webcamTab')}
+            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'webcam' ? 'bg-input text-text' : 'bg-input/60 text-text-muted'}`}>{webcamCameras.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            onClick={() => setActiveTab('ip')}
+            aria-selected={activeTab === 'ip'}
+            className={`flex-1 py-2.5 px-4 rounded-full text-[13px] font-medium flex items-center justify-center gap-2 transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 ${activeTab === 'ip'
+              ? 'bg-card text-text shadow-sm font-semibold border border-border/30'
+              : 'text-text-muted hover:text-text hover:bg-card/40'
+              }`}
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="8.5" />
+              <path d="M12 3.5a15 15 0 0 1 3.8 8.5A15 15 0 0 1 12 20.5A15 15 0 0 1 8.2 12 15 15 0 0 1 12 3.5z" />
+              <path d="M3.5 12h17" />
+            </svg>
+            {t('cameras.addModal.ipTab')}
+            <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium ${activeTab === 'ip' ? 'bg-input text-text' : 'bg-input/60 text-text-muted'}`}>{ipCameras.length}</span>
+          </button>
+        </div>
 
-          <div className={`flex-1 overflow-y-auto custom-scrollbar min-h-0 ${isMaximized ? 'px-6 pt-5 pb-3 grid grid-cols-1 sm:grid-cols-[1.15fr_300px] gap-6' : 'px-6 pt-6 pb-4 space-y-6 max-w-[640px] mx-auto w-full'}`}>
-                {/* Tab 1: Webcams USB */}
-                {activeTab === 'webcam' && (
-                  <div className="animate-fadeIn overflow-visible">
-                    <label className="text-[11px] font-medium text-text-muted block mb-2">
-                      {t('cameras.addModal.webcamAvailable')}
-                    </label>
+        <div className={`flex-1 overflow-y-auto custom-scrollbar min-h-0 ${isMaximized ? 'px-6 pt-5 pb-3 grid grid-cols-1 sm:grid-cols-[1.15fr_300px] gap-6' : 'px-6 pt-6 pb-4 space-y-6 max-w-[640px] mx-auto w-full'}`}>
+          {/* Tab 1: Webcams USB */}
+          {activeTab === 'webcam' && (
+            <div className="animate-fadeIn overflow-visible">
+              <label className="text-[11px] font-medium text-text-muted block mb-2">
+                {t('cameras.addModal.webcamAvailable')}
+              </label>
 
-                    {webcamCameras.length === 0 ? (
-                      <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-6 text-center bg-input/20">
-                        {t('cameras.addModal.noWebcam')}
-                      </div>
-                    ) : webcamOptions.length === 0 ? (
-                      <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-6 text-center bg-input/20">
-                        {t('cameras.addModal.allSelected')}
-                      </div>
-                    ) : (
-                      <div className="relative overflow-visible z-30 max-w-[360px]">
-                        <CustomSelect
-                          value={selectedWebcamId}
-                          onChange={handleSelectWebcam}
-                          options={webcamOptions}
-                          placeholder={t('cameras.addModal.selectWebcam')}
-                          size="sm"
-                          direction="down"
-                          className="w-full"
-                        />
-                        <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.selectToAdd')}</p>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Tab 2: Câmeras IP */}
-                {activeTab === 'ip' && (
-                  <div className="animate-fadeIn space-y-3">
-                    {/* Câmeras encontradas na rede local */}
-                    <div className="rounded-xl border border-border/40 bg-input/20 p-3 sm:p-4 space-y-2.5">
-                      <div className="flex items-center justify-between">
-                        <label className="text-[11px] font-medium text-text-muted">
-                          {t('cameras.addModal.networkCamerasAvailable')}
-                        </label>
-                        <button
-                          type="button"
-                          disabled={isDiscovering}
-                          onClick={() => void fetchDiscoveredCameras()}
-                          className="inline-flex items-center gap-1 text-[10px] text-text-muted hover:text-emerald-400 transition-colors cursor-pointer disabled:opacity-50"
-                          title={t('cameras.addModal.refreshDiscovery')}
-                        >
-                          <svg className={`w-3 h-3 ${isDiscovering ? 'animate-spin text-emerald-400' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                            <path d="M3 3v5h5" />
-                            <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-                            <path d="M21 21v-5h-5" />
-                          </svg>
-                          <span>{isDiscovering ? t('cameras.addModal.searchingNetwork') : t('cameras.addModal.refreshDiscovery')}</span>
-                        </button>
-                      </div>
-
-                      {isDiscovering && discoveredOptions.length === 0 ? (
-                        <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-4 text-center bg-input/20 flex items-center justify-center gap-2">
-                          <svg className="w-3.5 h-3.5 animate-spin text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                          </svg>
-                          <span>{t('cameras.addModal.searchingNetwork')}</span>
-                        </div>
-                      ) : discoveredOptions.length > 0 ? (
-                        <div className="relative overflow-visible z-30">
-                          <CustomSelect
-                            value={selectedDiscoveredUrl}
-                            onChange={handleSelectDiscoveredCamera}
-                            options={discoveredOptions}
-                            placeholder={t('cameras.addModal.selectDiscoveredCamera')}
-                            size="sm"
-                            direction="down"
-                            className="w-full"
-                          />
-                        </div>
-                      ) : (
-                        <div className="text-[11px] text-text-muted border border-dashed border-border/30 rounded-xl p-3 bg-input/10 space-y-2">
-                          <div className="flex items-center gap-1.5 font-medium text-text text-[11px]">
-                            <svg className="w-3.5 h-3.5 text-amber-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                              <circle cx="12" cy="12" r="10" />
-                              <line x1="12" y1="8" x2="12" y2="12" />
-                              <line x1="12" y1="16" x2="12.01" y2="16" />
-                            </svg>
-                            <span>{t('cameras.addModal.noNetworkCamerasTitle')}</span>
-                          </div>
-                          <ul className="space-y-1 text-[10.5px] leading-relaxed text-text-muted list-disc list-inside pl-0.5">
-                            <li>{t('cameras.addModal.noNetworkCamerasHintNvr')}</li>
-                            <li>{t('cameras.addModal.noNetworkCamerasHintWifi')}</li>
-                            <li>{t('cameras.addModal.noNetworkCamerasHintManual')}</li>
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="rounded-xl border border-border/40 bg-input/20 p-3 sm:p-4 space-y-3">
-                      <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.7fr] gap-3">
-                        <div>
-                          <label htmlFor="vision-ip-name" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                            {t('cameras.addModal.nameLabel')} <span className="text-text-muted/60 font-normal">{t('cameras.addModal.nameOptional')}</span>
-                          </label>
-                          <input
-                            id="vision-ip-name"
-                            value={ipName}
-                            onChange={(e) => setIpName(e.target.value)}
-                            placeholder={t('cameras.addModal.namePlaceholder')}
-                            className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
-                          />
-                        </div>
-                        <div>
-                          <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                            {t('cameras.addModal.urlLabel')}
-                          </label>
-                          <input
-                            id="vision-ip-url"
-                            value={ipUrl}
-                            onChange={(e) => {
-                              const val = e.target.value
-                              if (val.includes('@')) {
-                                const parsed = parseCameraAuth(val)
-                                setIpUrl(parsed.cleanUrl)
-                                if (parsed.username) setIpUsername(parsed.username)
-                                if (parsed.password) setIpPassword(parsed.password)
-                              } else {
-                                setIpUrl(val)
-                              }
-                              if (selectedDiscoveredUrl && val !== selectedDiscoveredUrl) {
-                                setSelectedDiscoveredUrl('')
-                              }
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && ipUrl.trim()) {
-                                e.preventDefault()
-                                handleStageIp()
-                              }
-                            }}
-                            onBlur={() => {
-                              if (ipUrl.trim()) {
-                                const cleanUrl = parseCameraAuth(ipUrl.trim()).cleanUrl
-                                if (rememberCredentials) {
-                                  const localCred = findStoredCameraCredential(cleanUrl)
-                                  if (localCred && (localCred.password || localCred.username)) {
-                                    if (localCred.username) setIpUsername(localCred.username)
-                                    if (localCred.password) setIpPassword(localCred.password)
-                                  }
-                                }
-                                if (!ipName.trim()) {
-                                  const cleanId = `ip:${cleanUrl}`
-                                  let existingName = ''
-                                  try {
-                                    if (typeof localStorage !== 'undefined') {
-                                      const raw = localStorage.getItem(`${EXT_ID}:camera-names`)
-                                      if (raw) {
-                                        const aliases = JSON.parse(raw) as Record<string, string>
-                                        existingName = aliases[cleanId] || aliases[cleanUrl] || ''
-                                      }
-                                    }
-                                  } catch {}
-                                  if (!existingName) {
-                                    const matchCam = allCameras.find((c) => isSameCameraId(c.id, cleanId) || isSameCameraId(c.id, cleanUrl))
-                                    if (matchCam && matchCam.name && matchCam.name !== t('cameras.defaultIpName') && matchCam.name !== t('cameras.fallbackName')) {
-                                      existingName = matchCam.name
-                                    }
-                                  }
-                                  if (existingName) setIpName(existingName)
-                                }
-                              }
-                            }}
-                            placeholder={t('cameras.addModal.urlPlaceholder')}
-                            className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
-                          />
-                        </div>
-                      </div>
-
-                      {/* Usuário e Senha RTSP */}
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div>
-                          <label htmlFor="vision-ip-username" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                            {t('cameras.addModal.usernameLabel')}
-                          </label>
-                          <input
-                            id="vision-ip-username"
-                            value={ipUsername}
-                            onChange={(e) => handleUsernameChange(e.target.value)}
-                            placeholder={t('cameras.addModal.usernamePlaceholder')}
-                            className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
-                          />
-                        </div>
-                        <div>
-                          <label htmlFor="vision-ip-password" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                            {t('cameras.addModal.passwordLabel')}
-                          </label>
-                          <div className="relative">
-                            <input
-                              id="vision-ip-password"
-                              type={showPassword ? 'text' : 'password'}
-                              value={ipPassword}
-                              onChange={(e) => handlePasswordChange(e.target.value)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter' && ipUrl.trim()) {
-                                  e.preventDefault()
-                                  handleStageIp()
-                                }
-                              }}
-                              placeholder={t('cameras.addModal.passwordPlaceholder')}
-                              className="w-full bg-input border border-border/40 rounded-lg pl-3 pr-8 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setShowPassword((prev) => !prev)}
-                              aria-label={t(showPassword ? 'cameras.addModal.hidePassword' : 'cameras.addModal.showPassword')}
-                              className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text p-1 text-xs"
-                            >
-                              {showPassword ? (
-                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                                  <line x1="1" y1="1" x2="23" y2="23" />
-                                </svg>
-                              ) : (
-                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                                  <circle cx="12" cy="12" r="3" />
-                                </svg>
-                              )}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Transport Selection */}
-                      <div>
-                        <span id="vision-ip-transport-label" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                          {t('cameras.addModal.transportLabel')}
-                        </span>
-                        <div role="radiogroup" aria-labelledby="vision-ip-transport-label" className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          {(['udp', 'tcp'] as const).map((mode) => {
-                            const selected = ipTransport === mode
-                            return (
-                              <div
-                                key={mode}
-                                className={`flex items-center gap-2 rounded-lg border px-3 py-2 transition-colors ${selected
-                                  ? 'bg-emerald-500/10 border-emerald-500/50'
-                                  : 'bg-input border-border/40'
-                                  }`}
-                              >
-                                <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
-                                  <input
-                                    type="radio"
-                                    name="vision-ip-transport"
-                                    value={mode}
-                                    checked={selected}
-                                    onChange={() => setIpTransport(mode)}
-                                    className="w-3.5 h-3.5 shrink-0"
-                                  />
-                                  <span className="text-xs font-medium text-text">
-                                    {t(mode === 'tcp' ? 'cameras.addModal.transportTcp' : 'cameras.addModal.transportUdp')}
-                                  </span>
-                                </label>
-                                <button
-                                  type="button"
-                                  onClick={() => setTransportHelp((prev) => (prev === mode ? null : mode))}
-                                  aria-label={t('cameras.addModal.transportHelpAbout', { mode: mode.toUpperCase() })}
-                                  aria-expanded={transportHelp === mode}
-                                  className="w-5 h-5 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text text-[11px] leading-none flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
-                                >
-                                  ?
-                                </button>
-                              </div>
-                            )
-                          })}
-                        </div>
-                        {transportHelp ? (
-                          <p role="status" className="mt-2 text-[11px] leading-relaxed text-text-muted bg-card border border-border/40 rounded-lg px-3 py-2">
-                            {t(transportHelp === 'tcp' ? 'cameras.addModal.transportTcpHelp' : 'cameras.addModal.transportUdpHelp')}
-                          </p>
-                        ) : null}
-                      </div>
-
-                      {/* Preview width caps the MJPEG scale; the stream never
-                          upscales, so a smaller source keeps its size. */}
-                      <div>
-                        <label htmlFor="vision-ip-preview-width" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                          {t('cameras.addModal.previewWidthLabel')}
-                        </label>
-                        <select
-                          id="vision-ip-preview-width"
-                          value={ipPreviewWidth}
-                          onChange={(e) => setIpPreviewWidth(resolvePreviewWidth(Number(e.target.value)))}
-                          className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
-                        >
-                          {PREVIEW_WIDTH_OPTIONS.map((width) => (
-                            <option key={width} value={width}>
-                              {t(`cameras.addModal.previewWidth${width}`)}
-                            </option>
-                          ))}
-                        </select>
-                        <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.previewWidthHelp')}</p>
-                      </div>
-
-                      {/* Video Protocol / Codec: H.264 (default) or H.265 (HEVC) */}
-                      <div>
-                        <label htmlFor="vision-ip-codec" className="block text-[11px] font-medium text-text-muted mb-1.5">
-                          {t('cameras.addModal.codecLabel')}
-                        </label>
-                        <select
-                          id="vision-ip-codec"
-                          value={ipCodec}
-                          onChange={(e) => setIpCodec(resolveRtspCodec(e.target.value))}
-                          className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
-                        >
-                          <option value="h264">{t('cameras.addModal.codecH264')}</option>
-                          <option value="h265">{t('cameras.addModal.codecH265')}</option>
-                        </select>
-                        <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.codecHelp')}</p>
-                      </div>
-
-                      {/* Lembrar credenciais e preferências */}
-                      <div className="pt-1">
-                        <label className="flex items-center gap-2 cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            checked={rememberCredentials}
-                            onChange={(e) => handleToggleRememberCredentials(e.target.checked)}
-                            className="w-3.5 h-3.5 shrink-0"
-                          />
-                          <span className="text-[11px] text-text-muted">
-                            {t('cameras.addModal.rememberIp')}
-                          </span>
-                        </label>
-                      </div>
-
-                      <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/20">
-                        <button
-                          type="button"
-                          disabled={clearingCache}
-                          onClick={handleClearCache}
-                          title={t('cameras.addModal.clearCacheHelp')}
-                          className="inline-flex items-center gap-1.5 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text text-[11px] font-medium px-3 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 disabled:opacity-50 cursor-pointer"
-                        >
-                          <svg className={`w-3.5 h-3.5 ${clearingCache ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-                            <path d="M21 3v5h-5" />
-                            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
-                            <path d="M3 21v-5h5" />
-                          </svg>
-                          <span>{clearingCache ? t('cameras.addModal.clearCacheLoading') : t('cameras.addModal.clearCacheBtn')}</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!ipUrl.trim()}
-                          onClick={handleStageIp}
-                          className="inline-flex items-center gap-1.5 rounded-full bg-input hover:bg-card disabled:opacity-40 disabled:cursor-not-allowed border border-border/40 text-text text-[11px] font-medium px-3.5 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 cursor-pointer"
-                        >
-                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M12 5v14M5 12h14" />
-                          </svg>
-                          {t('cameras.addModal.addToSelection')}
-                        </button>
-                      </div>
-                      {clearCacheSuccess ? (
-                        <p role="status" className="text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-1.5 flex items-center gap-2">
-                          <span>✓</span>
-                          <span>{t('cameras.addModal.clearCacheSuccess')}</span>
-                        </p>
-                      ) : null}
-                      {hasUnsavedValidIp ? (
-                        <p className="text-[11px] text-text-muted text-center">{t('cameras.addModal.addHint')}</p>
-                      ) : null}
-                    </div>
-                  </div>
-                )}
-
-            {pendingCount > 0 && (
-              <div className="rounded-xl border border-border/40 bg-input/30 overflow-hidden">
-                <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-border/30">
-                  <span className="text-[11px] font-semibold text-text">{t('cameras.addModal.review')}</span>
-                  <span className="text-[10px] text-text-muted">{pendingCount} {pendingCount === 1 ? t('cameras.addModal.cameraOne') : t('cameras.addModal.cameraOther')} · {t('cameras.addModal.confirmOnce')}</span>
+              {webcamCameras.length === 0 ? (
+                <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-6 text-center bg-input/20">
+                  {t('cameras.addModal.noWebcam')}
                 </div>
-                <div className="max-h-[160px] overflow-y-auto custom-scrollbar">
-                  <ul className="divide-y divide-border/20">
-                    {pendingWebcamIds.map((id) => {
-                      const cam = webcamCameras.find((c) => c.id === id)
+              ) : webcamOptions.length === 0 ? (
+                <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-6 text-center bg-input/20">
+                  {t('cameras.addModal.allSelected')}
+                </div>
+              ) : (
+                <div className="relative overflow-visible z-30 max-w-[360px]">
+                  <CustomSelect
+                    value={selectedWebcamId}
+                    onChange={handleSelectWebcam}
+                    options={webcamOptions}
+                    placeholder={t('cameras.addModal.selectWebcam')}
+                    size="sm"
+                    direction="down"
+                    className="w-full"
+                  />
+                  <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.selectToAdd')}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Tab 2: Câmeras IP */}
+          {activeTab === 'ip' && (
+            <div className="animate-fadeIn space-y-3">
+              {/* Câmeras encontradas na rede local */}
+              <div className="rounded-xl border border-border/40 bg-input/20 p-3 sm:p-4 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-medium text-text-muted">
+                    {t('cameras.addModal.networkCamerasAvailable')}
+                  </label>
+                  <button
+                    type="button"
+                    disabled={isDiscovering}
+                    onClick={() => void fetchDiscoveredCameras()}
+                    className="inline-flex items-center gap-1 text-[10px] text-text-muted hover:text-emerald-400 transition-colors cursor-pointer disabled:opacity-50"
+                    title={t('cameras.addModal.refreshDiscovery')}
+                  >
+                    <svg className={`w-3 h-3 ${isDiscovering ? 'animate-spin text-emerald-400' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                      <path d="M3 3v5h5" />
+                      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                      <path d="M21 21v-5h-5" />
+                    </svg>
+                    <span>{isDiscovering ? t('cameras.addModal.searchingNetwork') : t('cameras.addModal.refreshDiscovery')}</span>
+                  </button>
+                </div>
+
+                {isDiscovering && discoveredOptions.length === 0 ? (
+                  <div className="text-xs text-text-muted border border-dashed border-border/40 rounded-xl px-4 py-4 text-center bg-input/20 flex items-center justify-center gap-2">
+                    <svg className="w-3.5 h-3.5 animate-spin text-emerald-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                    </svg>
+                    <span>{t('cameras.addModal.searchingNetwork')}</span>
+                  </div>
+                ) : discoveredOptions.length > 0 ? (
+                  <div className="relative overflow-visible z-30">
+                    <CustomSelect
+                      value={selectedDiscoveredUrl}
+                      onChange={handleSelectDiscoveredCamera}
+                      options={discoveredOptions}
+                      placeholder={t('cameras.addModal.selectDiscoveredCamera')}
+                      size="sm"
+                      direction="down"
+                      className="w-full"
+                    />
+                  </div>
+                ) : (
+                  <div className="text-[11px] text-text-muted border border-dashed border-border/30 rounded-xl p-3 bg-input/10 space-y-2">
+                    <div className="flex items-center gap-1.5 font-medium text-text text-[11px]">
+                      <svg className="w-3.5 h-3.5 text-amber-400 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="12" y1="8" x2="12" y2="12" />
+                        <line x1="12" y1="16" x2="12.01" y2="16" />
+                      </svg>
+                      <span>{t('cameras.addModal.noNetworkCamerasTitle')}</span>
+                    </div>
+                    <ul className="space-y-1 text-[10.5px] leading-relaxed text-text-muted list-disc list-inside pl-0.5">
+                      <li>{t('cameras.addModal.noNetworkCamerasHintNvr')}</li>
+                      <li>{t('cameras.addModal.noNetworkCamerasHintWifi')}</li>
+                      <li>{t('cameras.addModal.noNetworkCamerasHintManual')}</li>
+                    </ul>
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-border/40 bg-input/20 p-3 sm:p-4 space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-[1fr_1.7fr] gap-3">
+                  <div>
+                    <label htmlFor="vision-ip-name" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                      {t('cameras.addModal.nameLabel')} <span className="text-text-muted/60 font-normal">{t('cameras.addModal.nameOptional')}</span>
+                    </label>
+                    <input
+                      id="vision-ip-name"
+                      value={ipName}
+                      onChange={(e) => setIpName(e.target.value)}
+                      placeholder={t('cameras.addModal.namePlaceholder')}
+                      className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="vision-ip-url" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                      {t('cameras.addModal.urlLabel')}
+                    </label>
+                    <input
+                      id="vision-ip-url"
+                      value={ipUrl}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        if (val.includes('@')) {
+                          const parsed = parseCameraAuth(val)
+                          setIpUrl(parsed.cleanUrl)
+                          if (parsed.username) setIpUsername(parsed.username)
+                          if (parsed.password) setIpPassword(parsed.password)
+                        } else {
+                          setIpUrl(val)
+                        }
+                        if (selectedDiscoveredUrl && val !== selectedDiscoveredUrl) {
+                          setSelectedDiscoveredUrl('')
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && ipUrl.trim()) {
+                          e.preventDefault()
+                          handleStageIp()
+                        }
+                      }}
+                      onBlur={() => {
+                        if (ipUrl.trim()) {
+                          const cleanUrl = parseCameraAuth(ipUrl.trim()).cleanUrl
+                          if (rememberCredentials) {
+                            const localCred = findStoredCameraCredential(cleanUrl)
+                            if (localCred && (localCred.password || localCred.username)) {
+                              if (localCred.username) setIpUsername(localCred.username)
+                              if (localCred.password) setIpPassword(localCred.password)
+                            }
+                          }
+                          if (!ipName.trim()) {
+                            const cleanId = `ip:${cleanUrl}`
+                            let existingName = ''
+                            try {
+                              if (typeof localStorage !== 'undefined') {
+                                const raw = localStorage.getItem(`${EXT_ID}:camera-names`)
+                                if (raw) {
+                                  const aliases = JSON.parse(raw) as Record<string, string>
+                                  existingName = aliases[cleanId] || aliases[cleanUrl] || ''
+                                }
+                              }
+                            } catch { }
+                            if (!existingName) {
+                              const matchCam = allCameras.find((c) => isSameCameraId(c.id, cleanId) || isSameCameraId(c.id, cleanUrl))
+                              if (matchCam && matchCam.name && matchCam.name !== t('cameras.defaultIpName') && matchCam.name !== t('cameras.fallbackName')) {
+                                existingName = matchCam.name
+                              }
+                            }
+                            if (existingName) setIpName(existingName)
+                          }
+                        }
+                      }}
+                      placeholder={t('cameras.addModal.urlPlaceholder')}
+                      className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                    />
+                  </div>
+                </div>
+
+                {/* Usuário e Senha RTSP */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="vision-ip-username" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                      {t('cameras.addModal.usernameLabel')}
+                    </label>
+                    <input
+                      id="vision-ip-username"
+                      value={ipUsername}
+                      onChange={(e) => handleUsernameChange(e.target.value)}
+                      placeholder={t('cameras.addModal.usernamePlaceholder')}
+                      className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="vision-ip-password" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                      {t('cameras.addModal.passwordLabel')}
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="vision-ip-password"
+                        type={showPassword ? 'text' : 'password'}
+                        value={ipPassword}
+                        onChange={(e) => handlePasswordChange(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && ipUrl.trim()) {
+                            e.preventDefault()
+                            handleStageIp()
+                          }
+                        }}
+                        placeholder={t('cameras.addModal.passwordPlaceholder')}
+                        className="w-full bg-input border border-border/40 rounded-lg pl-3 pr-8 py-2 text-xs text-text placeholder-text-muted/60 focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((prev) => !prev)}
+                        aria-label={t(showPassword ? 'cameras.addModal.hidePassword' : 'cameras.addModal.showPassword')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-text-muted hover:text-text p-1 text-xs"
+                      >
+                        {showPassword ? (
+                          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                            <line x1="1" y1="1" x2="23" y2="23" />
+                          </svg>
+                        ) : (
+                          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                            <circle cx="12" cy="12" r="3" />
+                          </svg>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Transport Selection + Economy Mode */}
+                <div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-center mb-1.5">
+                    <span id="vision-ip-transport-label" className="block text-[11px] font-medium text-text-muted">
+                      {t('cameras.addModal.transportLabel')}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        id="vision-ip-economy"
+                        type="button"
+                        role="switch"
+                        aria-checked={ipEconomyMode}
+                        onClick={() => setIpEconomyMode((v) => !v)}
+                        style={{
+                          backgroundColor: ipEconomyMode ? 'var(--color-text)' : 'var(--color-border)'
+                        }}
+                        className="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                      >
+                        <span
+                          style={{
+                            backgroundColor: 'var(--color-bg-main)',
+                            transform: ipEconomyMode ? 'translateX(18px)' : 'translateX(2px)',
+                            transition: 'transform 150ms ease'
+                          }}
+                          className="inline-block h-3.5 w-3.5 rounded-full shadow-sm"
+                        />
+                      </button>
+                      <label htmlFor="vision-ip-economy" className="text-xs font-medium text-text cursor-pointer select-none">
+                        {t('cameras.addModal.economyModeLabel')}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setIpEconomyHelp((v) => !v)}
+                        aria-label={t('cameras.addModal.economyModeLabel')}
+                        aria-expanded={ipEconomyHelp}
+                        className="w-5 h-5 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text text-[11px] leading-none flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 cursor-pointer"
+                      >
+                        ?
+                      </button>
+                    </div>
+                  </div>
+                  {ipEconomyHelp ? (
+                    <p role="status" className="mb-2 text-[11px] leading-relaxed text-text-muted bg-card border border-border/40 rounded-lg px-3 py-2">
+                      {t('cameras.addModal.economyModeHelp')}
+                    </p>
+                  ) : null}
+                  <div role="radiogroup" aria-labelledby="vision-ip-transport-label" className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {(['udp', 'tcp'] as const).map((mode) => {
+                      const selected = ipTransport === mode
                       return (
-                        <li
-                          key={id}
-                          className="flex items-center justify-between gap-2 px-2.5 py-1.5"
+                        <div
+                          key={mode}
+                          className={`flex items-center gap-2 rounded-lg border px-3 py-2 transition-colors ${selected
+                            ? 'bg-emerald-500/10 border-emerald-500/50'
+                            : 'bg-input border-border/40'
+                            }`}
                         >
-                          <span className="text-[11px] text-text truncate flex items-center gap-2 min-w-0">
-                            <span className="w-6 h-6 rounded-full bg-input border border-border/30 flex items-center justify-center shrink-0">
-                              <svg className="w-3 h-3 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                                <circle cx="12" cy="13" r="3" />
-                              </svg>
+                          <label className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer">
+                            <input
+                              type="radio"
+                              name="vision-ip-transport"
+                              value={mode}
+                              checked={selected}
+                              onChange={() => setIpTransport(mode)}
+                              className="w-3.5 h-3.5 shrink-0"
+                            />
+                            <span className="text-xs font-medium text-text">
+                              {t(mode === 'tcp' ? 'cameras.addModal.transportTcp' : 'cameras.addModal.transportUdp')}
                             </span>
-                            <span className="truncate">{cam?.name || id}</span>
-                          </span>
+                          </label>
                           <button
                             type="button"
-                            onClick={() => removePendingWebcam(id)}
-                            aria-label={t('cameras.addModal.removeFromSelection', { name: cam?.name || id })}
-                            className="w-6 h-6 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-red-400 flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
+                            onClick={() => setTransportHelp((prev) => (prev === mode ? null : mode))}
+                            aria-label={t('cameras.addModal.transportHelpAbout', { mode: mode.toUpperCase() })}
+                            aria-expanded={transportHelp === mode}
+                            className="w-5 h-5 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text text-[11px] leading-none flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
                           >
-                            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                              <path d="M18 6L6 18M6 6l12 12" />
-                            </svg>
+                            ?
                           </button>
-                        </li>
+                        </div>
                       )
                     })}
-                    {pendingIpDrafts.map((draft, i) => (
+                  </div>
+                  {transportHelp ? (
+                    <p role="status" className="mt-2 text-[11px] leading-relaxed text-text-muted bg-card border border-border/40 rounded-lg px-3 py-2">
+                      {t(transportHelp === 'tcp' ? 'cameras.addModal.transportTcpHelp' : 'cameras.addModal.transportUdpHelp')}
+                    </p>
+                  ) : null}
+                </div>
+
+                {/* Preview width caps the MJPEG scale; the stream never
+                          upscales, so a smaller source keeps its size. */}
+                <div>
+                  <label htmlFor="vision-ip-preview-width" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                    {t('cameras.addModal.previewWidthLabel')}
+                  </label>
+                  <select
+                    id="vision-ip-preview-width"
+                    value={ipPreviewWidth}
+                    onChange={(e) => setIpPreviewWidth(resolvePreviewWidth(Number(e.target.value)))}
+                    className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                  >
+                    {PREVIEW_WIDTH_OPTIONS.map((width) => (
+                      <option key={width} value={width}>
+                        {t(`cameras.addModal.previewWidth${width}`)}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.previewWidthHelp')}</p>
+                </div>
+
+                {/* Video Protocol / Codec: H.264 (default) or H.265 (HEVC) */}
+                <div>
+                  <label htmlFor="vision-ip-codec" className="block text-[11px] font-medium text-text-muted mb-1.5">
+                    {t('cameras.addModal.codecLabel')}
+                  </label>
+                  <select
+                    id="vision-ip-codec"
+                    value={ipCodec}
+                    onChange={(e) => setIpCodec(resolveRtspCodec(e.target.value))}
+                    className="w-full bg-input border border-border/40 rounded-lg px-3 py-2 text-xs text-text focus:outline-none focus:border-border focus:ring-1 focus:ring-accent/20 transition-colors"
+                  >
+                    <option value="h264">{t('cameras.addModal.codecH264')}</option>
+                    <option value="h265">{t('cameras.addModal.codecH265')}</option>
+                  </select>
+                  <p className="text-[11px] text-text-muted mt-2">{t('cameras.addModal.codecHelp')}</p>
+                </div>
+
+                {/* Lembrar credenciais e preferências */}
+                <div className="pt-1">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={rememberCredentials}
+                      onChange={(e) => handleToggleRememberCredentials(e.target.checked)}
+                      className="w-3.5 h-3.5 shrink-0"
+                    />
+                    <span className="text-[11px] text-text-muted">
+                      {t('cameras.addModal.rememberIp')}
+                    </span>
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/20">
+                  <button
+                    type="button"
+                    disabled={clearingCache}
+                    onClick={handleClearCache}
+                    title={t('cameras.addModal.clearCacheHelp')}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text text-[11px] font-medium px-3 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 disabled:opacity-50 cursor-pointer"
+                  >
+                    <svg className={`w-3.5 h-3.5 ${clearingCache ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+                      <path d="M21 3v5h-5" />
+                      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+                      <path d="M3 21v-5h5" />
+                    </svg>
+                    <span>{clearingCache ? t('cameras.addModal.clearCacheLoading') : t('cameras.addModal.clearCacheBtn')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!ipUrl.trim()}
+                    onClick={handleStageIp}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-input hover:bg-card disabled:opacity-40 disabled:cursor-not-allowed border border-border/40 text-text text-[11px] font-medium px-3.5 py-1.5 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 cursor-pointer"
+                  >
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                    {t('cameras.addModal.addToSelection')}
+                  </button>
+                </div>
+                {clearCacheSuccess ? (
+                  <p role="status" className="text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-1.5 flex items-center gap-2">
+                    <span>✓</span>
+                    <span>{t('cameras.addModal.clearCacheSuccess')}</span>
+                  </p>
+                ) : null}
+                {hasUnsavedValidIp ? (
+                  <p className="text-[11px] text-text-muted text-center">{t('cameras.addModal.addHint')}</p>
+                ) : null}
+              </div>
+            </div>
+          )}
+
+          {pendingCount > 0 && (
+            <div className="rounded-xl border border-border/40 bg-input/30 overflow-hidden">
+              <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-border/30">
+                <span className="text-[11px] font-semibold text-text">{t('cameras.addModal.review')}</span>
+                <span className="text-[10px] text-text-muted">{pendingCount} {pendingCount === 1 ? t('cameras.addModal.cameraOne') : t('cameras.addModal.cameraOther')} · {t('cameras.addModal.confirmOnce')}</span>
+              </div>
+              <div className="max-h-[160px] overflow-y-auto custom-scrollbar">
+                <ul className="divide-y divide-border/20">
+                  {pendingWebcamIds.map((id) => {
+                    const cam = webcamCameras.find((c) => c.id === id)
+                    return (
                       <li
-                        key={`ip-${draft.url}-${i}`}
-                        className="flex items-center justify-between gap-2 px-3 py-2"
+                        key={id}
+                        className="flex items-center justify-between gap-2 px-2.5 py-1.5"
                       >
                         <span className="text-[11px] text-text truncate flex items-center gap-2 min-w-0">
                           <span className="w-6 h-6 rounded-full bg-input border border-border/30 flex items-center justify-center shrink-0">
                             <svg className="w-3 h-3 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                              <circle cx="12" cy="12" r="7.5" />
-                              <path d="M12 4a15 15 0 0 1 3.2 8A15 15 0 0 1 12 20A15 15 0 0 1 8.8 12 15 15 0 0 1 12 4z" />
-                              <path d="M4.5 12h15" />
+                              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                              <circle cx="12" cy="13" r="3" />
                             </svg>
                           </span>
-                          <span className="truncate">{draft.name || draft.url}</span>
-                          <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium bg-input text-text-muted shrink-0">
-                            {draft.transport.toUpperCase()}
-                          </span>
+                          <span className="truncate">{cam?.name || id}</span>
                         </span>
                         <button
                           type="button"
-                          onClick={() => removePendingIp(i)}
-                          aria-label={t('cameras.addModal.removeFromSelection', { name: draft.name || draft.url })}
+                          onClick={() => removePendingWebcam(id)}
+                          aria-label={t('cameras.addModal.removeFromSelection', { name: cam?.name || id })}
                           className="w-6 h-6 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-red-400 flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
                         >
                           <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -4851,46 +5016,77 @@ function AddCameraModal({
                           </svg>
                         </button>
                       </li>
-                    ))}
-                  </ul>
-                  </div>
-                </div>
-            )}
-          </div>
-
-          {/* Modal Footer */}
-          <div className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 border-t border-border/30 bg-card flex flex-col gap-2 sm:gap-3">
-            {modalError ? (
-              <p className="w-full text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2.5 text-left leading-relaxed">
-                {modalError}
-              </p>
-            ) : null}
-            <div className="flex gap-2 justify-end">
-              <button
-                type="button"
-                onClick={onClose}
-                className="rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-4 py-2 text-[11px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
-              >
-                {t('common.cancel')}
-              </button>
-              <button
-                type="button"
-                disabled={submitting || effectivePendingCount === 0}
-                onClick={() => void handleConfirm()}
-                className={`rounded-full px-4 py-2 text-[11px] font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 border ${effectivePendingCount === 0
-                  ? 'bg-input/40 border-border/20 text-text-muted/40 cursor-not-allowed'
-                  : 'bg-emerald-600 hover:bg-emerald-500 border-transparent text-white shadow-md'
-                  }`}
-              >
-                {submitting
-                  ? t('cameras.addModal.adding')
-                  : effectivePendingCount === 0
-                    ? t('cameras.addModal.noneSelected')
-                    : (effectivePendingCount === 1 ? t('cameras.addModal.confirmOne') : t('cameras.addModal.confirmMany', { count: effectivePendingCount }))}
-              </button>
+                    )
+                  })}
+                  {pendingIpDrafts.map((draft, i) => (
+                    <li
+                      key={`ip-${draft.url}-${i}`}
+                      className="flex items-center justify-between gap-2 px-3 py-2"
+                    >
+                      <span className="text-[11px] text-text truncate flex items-center gap-2 min-w-0">
+                        <span className="w-6 h-6 rounded-full bg-input border border-border/30 flex items-center justify-center shrink-0">
+                          <svg className="w-3 h-3 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                            <circle cx="12" cy="12" r="7.5" />
+                            <path d="M12 4a15 15 0 0 1 3.2 8A15 15 0 0 1 12 20A15 15 0 0 1 8.8 12 15 15 0 0 1 12 4z" />
+                            <path d="M4.5 12h15" />
+                          </svg>
+                        </span>
+                        <span className="truncate">{draft.name || draft.url}</span>
+                        <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] leading-none font-medium bg-input text-text-muted shrink-0">
+                          {draft.transport.toUpperCase()}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removePendingIp(i)}
+                        aria-label={t('cameras.addModal.removeFromSelection', { name: draft.name || draft.url })}
+                        className="w-6 h-6 rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-red-400 flex items-center justify-center shrink-0 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
+                      >
+                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             </div>
+          )}
+        </div>
+
+        {/* Modal Footer */}
+        <div className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 border-t border-border/30 bg-card flex flex-col gap-2 sm:gap-3">
+          {modalError ? (
+            <p className="w-full text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded-xl px-3 py-2.5 text-left leading-relaxed">
+              {modalError}
+            </p>
+          ) : null}
+          <div className="flex gap-2 justify-end">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-full bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-4 py-2 text-[11px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40"
+            >
+              {t('common.cancel')}
+            </button>
+            <button
+              type="button"
+              disabled={submitting || effectivePendingCount === 0}
+              onClick={() => void handleConfirm()}
+              className={`rounded-full px-4 py-2 text-[11px] font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-border/40 border ${effectivePendingCount === 0
+                ? 'bg-input/40 border-border/20 text-text-muted/40 cursor-not-allowed'
+                : 'bg-emerald-600 hover:bg-emerald-500 border-transparent text-white shadow-md'
+                }`}
+            >
+              {submitting
+                ? t('cameras.addModal.adding')
+                : effectivePendingCount === 0
+                  ? t('cameras.addModal.noneSelected')
+                  : (effectivePendingCount === 1 ? t('cameras.addModal.confirmOne') : t('cameras.addModal.confirmMany', { count: effectivePendingCount }))}
+            </button>
           </div>
         </div>
+      </div>
     </div>
   )
 
@@ -5288,7 +5484,7 @@ function ExpandedCameraModal({
         const request = useWorkerFrame
           ? command<{ detections?: Detection[]; stale?: boolean }>('frame_pump', { cameraId: camera.id })
           : command<{ detections?: Detection[]; stale?: boolean }>('frame_pump', { cameraId: camera.id, jpegBase64 })
-        void request.catch(() => {}).finally(() => { pumpingRef.current = false })
+        void request.catch(() => { }).finally(() => { pumpingRef.current = false })
         const res = await Promise.race([
           request,
           new Promise<null>((resolve) => setTimeout(() => resolve(null), PUMP_COMMAND_TIMEOUT_MS))
@@ -5339,7 +5535,7 @@ function ExpandedCameraModal({
               const len = bytes.byteLength
               for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i])
               snap = `data:image/jpeg;base64,${btoa(binary)}`
-            } catch {}
+            } catch { }
           }
           if (snap && snap.length > 100) {
             setFrozenFrame(snap)
@@ -5368,9 +5564,9 @@ function ExpandedCameraModal({
     const ro =
       typeof ResizeObserver !== 'undefined'
         ? new ResizeObserver(() => {
-            canvasW = frameCanvas.clientWidth || frameCanvas.width
-            canvasH = frameCanvas.clientHeight || frameCanvas.height
-          })
+          canvasW = frameCanvas.clientWidth || frameCanvas.width
+          canvasH = frameCanvas.clientHeight || frameCanvas.height
+        })
         : null
     ro?.observe(frameCanvas)
 
@@ -5489,7 +5685,7 @@ function ExpandedCameraModal({
       onError: () => {
         // Silent reconnect in background without intrusive overlay
       },
-      onFps: () => {},
+      onFps: () => { },
       onKbs: (measuredKbs) => {
         if (!cancelled) setKbs(measuredKbs)
       }
@@ -5613,11 +5809,10 @@ function ExpandedCameraModal({
             <button
               type="button"
               onClick={onTogglePtz}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all shadow-sm active:scale-95 cursor-pointer ${
-                isPtzOpen
-                  ? 'bg-card text-text border-border shadow-sm'
-                  : 'bg-input/80 hover:bg-card border-border/40 text-text-muted hover:text-text'
-              }`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all shadow-sm active:scale-95 cursor-pointer ${isPtzOpen
+                ? 'bg-card text-text border-border shadow-sm'
+                : 'bg-input/80 hover:bg-card border-border/40 text-text-muted hover:text-text'
+                }`}
               title={t('cameras.ptzControl')}
               aria-label={t('cameras.ptzControl')}
             >
@@ -6886,20 +7081,20 @@ function AddEditMonitorModal({
         const rawActions = Array.isArray(actions) && actions.length > 0
           ? actions
           : (existingWorkflow?.steps || existingWorkflow?.actions || [
-              {
-                id: 'show_overlay',
-                name: t('monitoring.overlayDefault'),
-                type: 'action' as const,
-                provider: 'momai-vision',
-                action: 'momai-vision.show_overlay',
-                action_id: 'momai-vision.show_overlay',
-                params: {
-                  cameraId: '{{trigger.payload.cameraId}}',
-                  description: '{{trigger.payload.description}}',
-                  imageDataUri: '{{trigger.payload.imageDataUri}}'
-                }
+            {
+              id: 'show_overlay',
+              name: t('monitoring.overlayDefault'),
+              type: 'action' as const,
+              provider: 'momai-vision',
+              action: 'momai-vision.show_overlay',
+              action_id: 'momai-vision.show_overlay',
+              params: {
+                cameraId: '{{trigger.payload.cameraId}}',
+                description: '{{trigger.payload.description}}',
+                imageDataUri: '{{trigger.payload.imageDataUri}}'
               }
-            ])
+            }
+          ])
         const normalizedSteps = rawActions.map((act: any, idx: number) => {
           const actionId = act.action || act.action_id || (act.target && act.tool ? `${act.target}.${act.tool}` : act.id || 'system.notify')
           const provider = act.provider || (actionId.includes('.') ? actionId.split('.')[0] : 'system')
@@ -7337,11 +7532,10 @@ function AddEditMonitorModal({
                         key={preset.seconds}
                         type="button"
                         onClick={() => setCooldownSec(preset.seconds)}
-                        className={`px-3 py-2 rounded-xl text-xs transition-all cursor-pointer shrink-0 ${
-                          isSelected
-                            ? 'bg-accent text-white font-bold shadow-sm'
-                            : 'bg-input/60 hover:bg-input border border-border/40 text-text-muted hover:text-text font-medium'
-                        }`}
+                        className={`px-3 py-2 rounded-xl text-xs transition-all cursor-pointer shrink-0 ${isSelected
+                          ? 'bg-accent text-white font-bold shadow-sm'
+                          : 'bg-input/60 hover:bg-input border border-border/40 text-text-muted hover:text-text font-medium'
+                          }`}
                       >
                         {preset.label}
                       </button>
@@ -7476,9 +7670,9 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
     x: number
     y: number
     target:
-      | { type: 'snapshot'; snap: Snapshot; imgSrc: string }
-      | { type: 'alert'; alert: Alert; imgSrc: string }
-      | { type: 'camera'; camera: CameraInfo }
+    | { type: 'snapshot'; snap: Snapshot; imgSrc: string }
+    | { type: 'alert'; alert: Alert; imgSrc: string }
+    | { type: 'camera'; camera: CameraInfo }
   } | null>(null)
   const [copyToast, setCopyToast] = useState<string | null>(null)
   const [confirmClearPrints, setConfirmClearPrints] = useState(false)
@@ -7528,7 +7722,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       const isExp = Boolean(expandedCamera && expandedCamera.id === cam.id)
       const pos = getPtzDefaultPosition(cam.id, isExp)
       setPtzInitialPos(pos)
-      void command('control_ptz', { cameraId: cam.id, action: 'warmup' }).catch(() => {})
+      void command('control_ptz', { cameraId: cam.id, action: 'warmup' }).catch(() => { })
       return cam
     })
   }, [expandedCamera])
@@ -7651,7 +7845,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
     setContextMenu(null)
     if (camera.source === 'ip' || camera.id.startsWith('ip:')) {
       try {
-        const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec }> } }>(
+        const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec; economyMode?: boolean }> } }>(
           'configure',
           {}
         )
@@ -7664,7 +7858,8 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           url,
           transport: entry?.transport === 'tcp' ? 'tcp' : 'udp',
           previewWidth: resolvePreviewWidth(entry?.previewWidth),
-          codec: resolveRtspCodec(entry?.codec)
+          codec: resolveRtspCodec(entry?.codec),
+          economyMode: resolveEconomyMode(entry?.economyMode)
         })
       } catch {
         setEditingTarget({
@@ -7779,7 +7974,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             if (typeof localStorage !== 'undefined') {
               localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
             }
-          } catch {}
+          } catch { }
           return next
         })
       }
@@ -7793,7 +7988,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             if (typeof localStorage !== 'undefined') {
               localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
             }
-          } catch {}
+          } catch { }
           return next
         })
       }
@@ -7807,7 +8002,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             if (typeof localStorage !== 'undefined') {
               localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
             }
-          } catch {}
+          } catch { }
           return next
         })
       }
@@ -7821,7 +8016,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             if (typeof localStorage !== 'undefined') {
               localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
             }
-          } catch {}
+          } catch { }
           return next
         })
       }
@@ -7845,13 +8040,13 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           const rawCam = trigParams.camera || trigParams.cameraName || trig.trigger_config?.camera || trig.camera || camCond?.value || ''
           const cam = rawCam
             ? fetchedCams.find(
-                (c) =>
-                  c.id === rawCam ||
-                  c.name === rawCam ||
-                  (rawCam.length >= 3 &&
-                    (c.id.toLowerCase().includes(rawCam.toLowerCase()) ||
-                      c.name.toLowerCase().includes(rawCam.toLowerCase())))
-              )
+              (c) =>
+                c.id === rawCam ||
+                c.name === rawCam ||
+                (rawCam.length >= 3 &&
+                  (c.id.toLowerCase().includes(rawCam.toLowerCase()) ||
+                    c.name.toLowerCase().includes(rawCam.toLowerCase())))
+            )
             : null
           const camId = cam ? cam.id : (rawCam || fetchedCams[0]?.id || 'webcam:0')
           const camName = cam ? cam.name : (rawCam || camId)
@@ -8210,7 +8405,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           if (typeof localStorage !== 'undefined') {
             localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
           }
-        } catch {}
+        } catch { }
         return next
       })
       setEditingZoneCameraId(null)
@@ -8234,7 +8429,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           if (typeof localStorage !== 'undefined') {
             localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
           }
-        } catch {}
+        } catch { }
         return next
       })
       setEditingZoneCameraId(null)
@@ -8307,7 +8502,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             if (typeof localStorage !== 'undefined') {
               localStorage.setItem(`${EXT_ID}:cameras`, JSON.stringify(next))
             }
-          } catch {}
+          } catch { }
           return next
         })
         delete knownCamerasRef.current[cameraId]
@@ -8334,7 +8529,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           )
         )
         for (const m of monitorsToPause) {
-          void command('pause_monitoring', { monitorId: m.id }).catch(() => {})
+          void command('pause_monitoring', { monitorId: m.id }).catch(() => { })
         }
       }
 
@@ -8399,7 +8594,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         try {
           const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(`${EXT_ID}:cameras`) : null
           if (raw) list = JSON.parse(raw)
-        } catch {}
+        } catch { }
       }
 
       if (!list || list.length === 0) return false
@@ -8457,7 +8652,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
               localStorage.removeItem(`${EXT_ID}:auto-expand`)
             }
           }
-        } catch {}
+        } catch { }
       }
 
       const checkAutoAddCamera = () => {
@@ -8472,7 +8667,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             setAddCameraInitialTab(tab)
             setIsModalOpen(true)
           }
-        } catch {}
+        } catch { }
       }
 
       checkAndExpand()
@@ -8503,13 +8698,13 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(`${EXT_ID}:auto-expand`, id)
         }
-      } catch {}
+      } catch { }
       if (isActive) {
         const found = tryExpandCamera(id)
         if (found) {
           try {
             localStorage.removeItem(`${EXT_ID}:auto-expand`)
-          } catch {}
+          } catch { }
         }
       }
     }
@@ -8556,7 +8751,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(updated))
         }
-      } catch {}
+      } catch { }
       return updated
     })
     try {
@@ -8581,7 +8776,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(updated))
         }
-      } catch {}
+      } catch { }
       return updated
     })
     try {
@@ -8608,7 +8803,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         if (snap && snap.length > 100) {
           storeCachedFrame(cameraId, snap)
         }
-      } catch {}
+      } catch { }
     }
 
     setConfig((prev) => {
@@ -8617,7 +8812,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(updated))
         }
-      } catch {}
+      } catch { }
       return updated
     })
 
@@ -8653,7 +8848,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
 
   const handleSaveEdit = useCallback(async (
     oldId: string,
-    payload: { name: string; url: string; username?: string; password?: string; transport: 'tcp' | 'udp'; previewWidth: number; codec?: RtspCodec }
+    payload: { name: string; url: string; username?: string; password?: string; transport: 'tcp' | 'udp'; previewWidth: number; codec?: RtspCodec; economyMode?: boolean }
   ) => {
     const target = cameras.find((c) => c.id === oldId)
     if (!target) throw new Error('Camera not found')
@@ -8695,7 +8890,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
     // A changed URL is a different stream: the old cached frame must not show
     // under the new camera id.
     if (nextId !== oldId) clearCachedFrame(oldId)
-    const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec }>; selectedCameras?: string[] } }>(
+    const configRes = await command<{ config: { ipCameras?: Array<{ id: string; name: string; url: string; transport?: 'tcp' | 'udp'; previewWidth?: number; codec?: RtspCodec; economyMode?: boolean }>; selectedCameras?: string[] } }>(
       'configure',
       {}
     )
@@ -8712,7 +8907,8 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       ...(payload.password ? { password: payload.password } : {}),
       transport: payload.transport,
       previewWidth: resolvePreviewWidth(payload.previewWidth),
-      ...(payload.codec && payload.codec !== 'h264' ? { codec: payload.codec } : {})
+      ...(payload.codec && payload.codec !== 'h264' ? { codec: payload.codec } : {}),
+      ...(payload.economyMode === false ? { economyMode: false } : {})
     }
     const updatedIp = ipList.some((c) => c.id === oldId)
       ? ipList.map((c) => (c.id === oldId ? nextEntry : c))
@@ -8743,7 +8939,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         parsed[nextId] = nextEntry.name
         localStorage.setItem(`${EXT_ID}:camera-names`, JSON.stringify(parsed))
       }
-    } catch {}
+    } catch { }
     if (typeof window !== 'undefined') {
       window.dispatchEvent(
         new CustomEvent('momai-vision:cameras-updated', {
@@ -8757,7 +8953,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(`${EXT_ID}:config`, JSON.stringify(next))
         }
-      } catch {}
+      } catch { }
       return next
     })
     if (nextId !== oldId) {
@@ -8767,7 +8963,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           prev.map((m) => (affected.some((item) => item.id === m.id) ? { ...m, paused: true } : m))
         )
         for (const m of affected) {
-          void command('pause_monitoring', { monitorId: m.id }).catch(() => {})
+          void command('pause_monitoring', { monitorId: m.id }).catch(() => { })
         }
       }
     }
@@ -8814,7 +9010,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
           }
           localStorage.setItem(`${EXT_ID}:camera-names`, JSON.stringify(parsed))
         }
-      } catch {}
+      } catch { }
 
       // Atualiza knownCamerasRef imediatamente para evitar fallback de nome na grade
       for (const draft of ipDrafts) {
@@ -8920,7 +9116,8 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
               ...(draft.password ? { password: draft.password } : {}),
               transport: draft.transport,
               previewWidth: resolvePreviewWidth(draft.previewWidth),
-              ...(draft.codec && draft.codec !== 'h264' ? { codec: draft.codec } : {})
+              ...(draft.codec && draft.codec !== 'h264' ? { codec: draft.codec } : {}),
+              ...(draft.economyMode === false ? { economyMode: false } : {})
             }
             const existingIndex = updatedIp.findIndex((c) => c.id === id || c.url === cleanUrl || c.url === draft.url)
             if (existingIndex >= 0) {
@@ -8939,13 +9136,13 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
               // Refresh (atualiza a grade) em paralelo com a espera pelo status:
               // a webcam recém-adicionada vira "Conectado" assim que o watch
               // subir, sem esperar o poll de 5s (que sob carga demora).
-              const refreshP = refresh().catch(() => {})
+              const refreshP = refresh().catch(() => { })
               if (webcamIds.length > 0) {
                 await waitForWebcamOnline(webcamIds, (cams) => {
                   setCameras((prev) =>
                     prev.map((c) => (c.id in cams ? { ...c, online: !!cams[c.id]?.online } : c))
                   )
-                }).catch(() => {})
+                }).catch(() => { })
               }
               await refreshP
               if (typeof window !== 'undefined') {
@@ -8955,7 +9152,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                   })
                 )
               }
-            } catch {}
+            } catch { }
           })()
         } catch (err) {
           setError(err instanceof Error ? err.message : String(err))
@@ -9094,7 +9291,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
       }
-    } catch {}
+    } catch { }
     try {
       await command(paused ? 'pause_monitoring' : 'resume_monitoring', { monitorId: m.id })
       void refresh()
@@ -9104,7 +9301,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
         }
-      } catch {}
+      } catch { }
       setError(err instanceof Error ? err.message : String(err))
     }
   }
@@ -9117,7 +9314,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(updated))
       }
-    } catch {}
+    } catch { }
     try {
       await command('stop_monitoring', { monitorId: m.id })
       void refresh()
@@ -9127,7 +9324,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
         if (typeof localStorage !== 'undefined') {
           localStorage.setItem(`${EXT_ID}:monitors`, JSON.stringify(prevMonitors))
         }
-      } catch {}
+      } catch { }
       setError(err instanceof Error ? err.message : String(err))
     }
   }
@@ -9141,14 +9338,12 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
     return (
       <div
         key={m.id}
-        className={`flex items-center gap-3 rounded-lg border border-border/40 px-4 py-3 transition-colors hover:border-border/60 ${
-          isPaused ? 'bg-card/60' : 'bg-card'
-        }`}
+        className={`flex items-center gap-3 rounded-lg border border-border/40 px-4 py-3 transition-colors hover:border-border/60 ${isPaused ? 'bg-card/60' : 'bg-card'
+          }`}
       >
         <span
-          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-            isPaused ? 'bg-text-muted/50' : 'bg-emerald-400'
-          }`}
+          className={`w-1.5 h-1.5 rounded-full shrink-0 ${isPaused ? 'bg-text-muted/50' : 'bg-emerald-400'
+            }`}
         />
         <div className="min-w-0 flex-1">
           <p className={`text-sm truncate ${isPaused ? 'font-medium text-text-muted' : 'font-medium text-text'}`}>
@@ -9204,332 +9399,179 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
       {/* Content owns the vertical rhythm; overlays stay siblings of this
           wrapper so space-y margins never offset their absolute inset-0. */}
       <div className="space-y-5">
-      <header className="flex items-center justify-between mb-5">
-        <div>
-          <h1 className="text-xl font-bold flex items-center gap-2 text-text">
-            <span className="text-text-muted">
-              <VisionIcon />
-            </span>{' '}
-            MomAI Vision
-          </h1>
-        </div>
-        <div className="flex items-center gap-2 ml-auto">
-          <button
-            disabled={isRefreshing}
-            onClick={() => void refresh()}
-            className="text-xs rounded-md bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-3 py-1.5 transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-60"
-            title={t('page.refreshCameras')}
-          >
-            <svg
-              className={`w-3.5 h-3.5 transition-transform ${isRefreshing ? 'animate-spin' : ''}`}
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21.5 2v6h-6M2.5 22v-6h6" />
-              <path d="M2 11.5a10 10 0 0 1 18.8-4.3L21.5 8M2.5 16l1.2 0.8A10 10 0 0 0 22 12.5" />
-            </svg>
-            <span>{isRefreshing ? t('page.refreshing') : t('common.refresh')}</span>
-          </button>
-        </div>
-      </header>
-
-      <nav className="flex gap-2 mb-5">
-        <button className={tabClass('cameras')} onClick={() => setActiveTab('cameras')}>
-          {t('nav.cameras')}
-        </button>
-        <button className={tabClass('alerts')} onClick={() => setActiveTab('alerts')}>
-          {t('nav.alerts')} {alerts.length > 0 ? `(${alerts.length})` : ''}
-        </button>
-        <button className={tabClass('gallery')} onClick={() => setActiveTab('gallery')}>
-          {t('page.printsTab')}
-        </button>
-        <button className={tabClass('settings')} onClick={() => setActiveTab('settings')}>
-          {t('nav.settings')}
-        </button>
-      </nav>
-
-      {/* Avisos de erro são redirecionados silenciosamente para o console (logs do dev) */}
-
-      {/* Tab: Cameras Grid */}
-      {activeTab === 'cameras' ? (
-        <section>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5 md:gap-6 items-stretch">
-            {displayedCameras.map((camera, idx) => (
-              <CameraCard
-                key={camera.id}
-                camera={camera}
-                boxes={detections[camera.id] || EMPTY_DETECTIONS}
-                zone={config.detectionZones?.[camera.id]}
-                showBoxes={config.showBoxes?.[camera.id] !== false}
-                onToggleShowBoxes={() => void handleToggleShowBoxes(camera.id)}
-                showZone={config.showZones?.[camera.id] !== false}
-                onToggleShowZone={() => void handleToggleShowZones(camera.id)}
-                isEditingZone={editingZoneCameraId === camera.id}
-                onToggleEditZone={() => handleToggleEditZone(camera.id)}
-                onSaveZone={(points) => void handleSaveCameraZone(camera.id, points)}
-                onClearZone={() => void handleClearCameraZone(camera.id)}
-                onDetections={handleDetections}
-                onSnapshot={takeSnapshot}
-                onRemove={handleRemoveCamera}
-                onExpand={handleExpandCamera}
-                onReload={handleReloadCamera}
-                onTogglePtz={handleTogglePtz}
-                isPtzOpen={ptzCamera?.id === camera.id}
-                onContextMenu={handleCameraContextMenu}
-                reconnecting={reconnectingCameraIds.has(camera.id)}
-                refreshKey={refreshKey}
-                isActive={isActive && !expandedCamera}
-                index={idx}
-                isDragging={draggedIndex === idx}
-                isDragOver={dragOverIndex === idx}
-                onDragStart={handleDragStart}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                onDragEnd={handleDragEnd}
-                hasMonitor={monitors.some((m) => m.cameraId === camera.id && !m.paused)}
-                suppressPump={expandedCamera?.id === camera.id}
-                isPaused={isCameraPaused(camera.id, config.pausedCameras)}
-                onTogglePause={() => void handleTogglePauseCamera(camera.id)}
-              />
-            ))}
-            <AddCameraCard onClick={() => setIsModalOpen(true)} />
+        <header className="flex items-center justify-between mb-5">
+          <div>
+            <h1 className="text-xl font-bold flex items-center gap-2 text-text">
+              <span className="text-text-muted">
+                <VisionIcon />
+              </span>{' '}
+              MomAI Vision
+            </h1>
           </div>
+          <div className="flex items-center gap-2 ml-auto">
+            <button
+              disabled={isRefreshing}
+              onClick={() => void refresh()}
+              className="text-xs rounded-md bg-input hover:bg-card border border-border/40 text-text-muted hover:text-text px-3 py-1.5 transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-60"
+              title={t('page.refreshCameras')}
+            >
+              <svg
+                className={`w-3.5 h-3.5 transition-transform ${isRefreshing ? 'animate-spin' : ''}`}
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M21.5 2v6h-6M2.5 22v-6h6" />
+                <path d="M2 11.5a10 10 0 0 1 18.8-4.3L21.5 8M2.5 16l1.2 0.8A10 10 0 0 0 22 12.5" />
+              </svg>
+              <span>{isRefreshing ? t('page.refreshing') : t('common.refresh')}</span>
+            </button>
+          </div>
+        </header>
 
-{!expandedCamera && (
-          <div className="mt-6">
-            <div className="flex items-center justify-between gap-3 mb-3">
-              <h3 className="text-sm font-semibold text-text">
-                {activeMonitors.length > 0 ? t('monitoring.sectionActive') : t('monitoring.sectionIdle')}
-              </h3>
-              {monitors.length > 0 && (
-                <button
-                  type="button"
-                  onClick={openAutomationModal}
-                  className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-md bg-input hover:bg-card border border-border/30 transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer"
-                >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                    <path d="M12 5v14M5 12h14" />
-                  </svg>
-                  {t('monitoring.addMonitor')}
-                </button>
-              )}
+        <nav className="flex gap-2 mb-5">
+          <button className={tabClass('cameras')} onClick={() => setActiveTab('cameras')}>
+            {t('nav.cameras')}
+          </button>
+          <button className={tabClass('alerts')} onClick={() => setActiveTab('alerts')}>
+            {t('nav.alerts')} {alerts.length > 0 ? `(${alerts.length})` : ''}
+          </button>
+          <button className={tabClass('gallery')} onClick={() => setActiveTab('gallery')}>
+            {t('page.printsTab')}
+          </button>
+          <button className={tabClass('settings')} onClick={() => setActiveTab('settings')}>
+            {t('nav.settings')}
+          </button>
+        </nav>
+
+        {/* Avisos de erro são redirecionados silenciosamente para o console (logs do dev) */}
+
+        {/* Tab: Cameras Grid */}
+        {activeTab === 'cameras' ? (
+          <section>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5 md:gap-6 items-stretch">
+              {displayedCameras.map((camera, idx) => (
+                <CameraCard
+                  key={camera.id}
+                  camera={camera}
+                  boxes={detections[camera.id] || EMPTY_DETECTIONS}
+                  zone={config.detectionZones?.[camera.id]}
+                  showBoxes={config.showBoxes?.[camera.id] !== false}
+                  onToggleShowBoxes={() => void handleToggleShowBoxes(camera.id)}
+                  showZone={config.showZones?.[camera.id] !== false}
+                  onToggleShowZone={() => void handleToggleShowZones(camera.id)}
+                  isEditingZone={editingZoneCameraId === camera.id}
+                  onToggleEditZone={() => handleToggleEditZone(camera.id)}
+                  onSaveZone={(points) => void handleSaveCameraZone(camera.id, points)}
+                  onClearZone={() => void handleClearCameraZone(camera.id)}
+                  onDetections={handleDetections}
+                  onSnapshot={takeSnapshot}
+                  onRemove={handleRemoveCamera}
+                  onExpand={handleExpandCamera}
+                  onReload={handleReloadCamera}
+                  onTogglePtz={handleTogglePtz}
+                  isPtzOpen={ptzCamera?.id === camera.id}
+                  onContextMenu={handleCameraContextMenu}
+                  reconnecting={reconnectingCameraIds.has(camera.id)}
+                  refreshKey={refreshKey}
+                  isActive={isActive && !expandedCamera}
+                  index={idx}
+                  isDragging={draggedIndex === idx}
+                  isDragOver={dragOverIndex === idx}
+                  onDragStart={handleDragStart}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  onDragEnd={handleDragEnd}
+                  hasMonitor={monitors.some((m) => m.cameraId === camera.id && !m.paused)}
+                  suppressPump={expandedCamera?.id === camera.id}
+                  isPaused={isCameraPaused(camera.id, config.pausedCameras)}
+                  onTogglePause={() => void handleTogglePauseCamera(camera.id)}
+                />
+              ))}
+              <AddCameraCard onClick={() => setIsModalOpen(true)} />
             </div>
 
-            {monitors.length === 0 ? (
-              <div className="rounded-lg border border-border/40 bg-card/40 px-6 py-8 text-center">
-                <p className="text-sm font-medium text-text">{t('monitoring.emptyConfig')}</p>
-                <p className="text-xs text-text-muted mt-1 max-w-md mx-auto">
-                  {t('monitoring.emptyConfigHint')}
-                </p>
-                <button
-                  type="button"
-                  onClick={openAutomationModal}
-                  className="mt-4 text-xs font-medium text-text-muted hover:text-text px-3 py-1.5 rounded-md bg-input hover:bg-card border border-border/30 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
-                >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                    <path d="M12 5v14M5 12h14" />
-                  </svg>
-                  <span>{t('monitoring.addMonitor')}</span>
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  {activeMonitors.map((m) => renderMonitorCard(m, false))}
+            {!expandedCamera && (
+              <div className="mt-6">
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <h3 className="text-sm font-semibold text-text">
+                    {activeMonitors.length > 0 ? t('monitoring.sectionActive') : t('monitoring.sectionIdle')}
+                  </h3>
+                  {monitors.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={openAutomationModal}
+                      className="text-xs font-medium text-text-muted hover:text-text px-2.5 py-1.5 rounded-md bg-input hover:bg-card border border-border/30 transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer"
+                    >
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <path d="M12 5v14M5 12h14" />
+                      </svg>
+                      {t('monitoring.addMonitor')}
+                    </button>
+                  )}
                 </div>
 
-                {pausedMonitors.length > 0 && (
-                  <div>
-                    <h4 className="text-xs font-medium text-text-muted mb-2">
-                      {t('monitoring.pausedHeader', { count: pausedMonitors.length })}
-                    </h4>
+                {monitors.length === 0 ? (
+                  <div className="rounded-lg border border-border/40 bg-card/40 px-6 py-8 text-center">
+                    <p className="text-sm font-medium text-text">{t('monitoring.emptyConfig')}</p>
+                    <p className="text-xs text-text-muted mt-1 max-w-md mx-auto">
+                      {t('monitoring.emptyConfigHint')}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={openAutomationModal}
+                      className="mt-4 text-xs font-medium text-text-muted hover:text-text px-3 py-1.5 rounded-md bg-input hover:bg-card border border-border/30 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <path d="M12 5v14M5 12h14" />
+                      </svg>
+                      <span>{t('monitoring.addMonitor')}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
                     <div className="space-y-2">
-                      {pausedMonitors.map((m) => renderMonitorCard(m, true))}
+                      {activeMonitors.map((m) => renderMonitorCard(m, false))}
                     </div>
+
+                    {pausedMonitors.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-medium text-text-muted mb-2">
+                          {t('monitoring.pausedHeader', { count: pausedMonitors.length })}
+                        </h4>
+                        <div className="space-y-2">
+                          {pausedMonitors.map((m) => renderMonitorCard(m, true))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             )}
-          </div>
-          )}
-        </section>
-      ) : null}
+          </section>
+        ) : null}
 
-      {/* Tab: Alerts Feed */}
-      {activeTab === 'alerts' ? (
-        <section className="space-y-2.5">
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <h3 className="text-sm font-semibold text-text">{t('alerts.title')}</h3>
-            {alerts.length > 0 ? (
-              confirmClearAlerts ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-text-muted">{t('alerts.clearPrompt')}</span>
-                  <button
-                    onClick={() => void handleClearAlerts()}
-                    className="text-xs px-2.5 py-1 rounded-md bg-error hover:bg-error/80 text-text font-medium transition-colors cursor-pointer"
-                  >
-                    {t('alerts.confirmYes')}
-                  </button>
-                  <button
-                    onClick={() => setConfirmClearAlerts(false)}
-                    className="text-xs px-2.5 py-1 rounded-md bg-input text-text-muted hover:text-text border border-border/40 transition-colors font-medium cursor-pointer"
-                  >
-                    {t('common.cancel')}
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => setConfirmClearAlerts(true)}
-                  className="text-xs text-text-muted hover:text-text transition-colors flex items-center gap-1 font-medium cursor-pointer"
-                >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                  </svg>
-                  {t('alerts.clearLink')}
-                </button>
-              )
-            ) : null}
-          </div>
-          {alerts.length === 0 ? (
-            <div className="rounded-lg border border-border/40 bg-card/40 px-6 py-8 text-center text-xs text-text-muted">
-              {t('alerts.emptyFeed')}
-            </div>
-          ) : (
-            <>
-              {alerts
-                .slice((alertsPage - 1) * ITEMS_PER_PAGE, alertsPage * ITEMS_PER_PAGE)
-                .map((alert: Alert) => {
-                  const imgSrc =
-                    alert.imageDataUri ||
-                    (alert.snapshotId
-                      ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
-                      : '')
-                  const cameraLabel = formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')
-                  const classLabel = alert.className ? localizedClassLabel(alert.className, t) : ''
-                  const confidence = alert.confidence ? `${Math.round(alert.confidence * 100)}%` : ''
-                  // Descrição e trigger repetem a mesma informação ("Detectei pessoa" /
-                  // "Pessoa"); mostra só uma delas.
-                  const secondary = alert.description || (alert.triggeredBy ? localizedTriggerLabel(alert, t) : '')
-                  return (
-                    <div
-                      key={alertKey(alert)}
-                      onContextMenu={(e) => handleAlertContextMenu(e, alert)}
-                      className="flex items-center gap-3 rounded-lg border border-border/40 bg-card p-2.5 hover:border-border/70 transition-colors select-none"
-                    >
-                      {imgSrc ? (
-                        <div
-                          className="group relative w-24 h-16 rounded-md bg-black shrink-0 overflow-hidden cursor-pointer border border-border/40"
-                          onClick={() => setExpandedAlert(alert)}
-                          onContextMenu={(e) => handleAlertContextMenu(e, alert)}
-                          title={t('alerts.expandHint')}
-                        >
-                          <AlertCanvasOverlay
-                            imageDataUri={imgSrc}
-                            boxes={alert.boxes}
-                            objectFit="object-cover"
-                          />
-                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-20">
-                            <span className="p-1.5 rounded-md bg-card/90 text-text border border-border/40">
-                              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-                              </svg>
-                            </span>
-                          </div>
-                        </div>
-                      ) : null}
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-baseline gap-2">
-                          <p className="text-sm font-medium text-text truncate">
-                            {cameraLabel}
-                            {classLabel ? <span className="capitalize"> · {classLabel}</span> : null}
-                          </p>
-                          {confidence ? (
-                            <span className="text-xs text-text-muted shrink-0 tabular-nums">{confidence}</span>
-                          ) : null}
-                        </div>
-                        {secondary ? (
-                          <p className="text-xs text-text-muted truncate mt-0.5">{secondary}</p>
-                        ) : null}
-                      </div>
-                      {alert.ts ? (
-                        <span className="text-xs text-text-muted shrink-0 tabular-nums">
-                          {formatTime(alert.ts, locale)}
-                        </span>
-                      ) : null}
-                      <div className="flex items-center gap-0.5 shrink-0">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            void handleShareAlert(alert)
-                          }}
-                          title={t('common.share')}
-                          aria-label={t('common.share')}
-                          className="p-1.5 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
-                        >
-                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <circle cx="18" cy="5" r="3" />
-                            <circle cx="6" cy="12" r="3" />
-                            <circle cx="18" cy="19" r="3" />
-                            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-                            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-                          </svg>
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            void handleDeleteAlert(alert)
-                          }}
-                          title={t('alerts.deleteOne')}
-                          className="p-1.5 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
-                        >
-                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                          </svg>
-                        </button>
-                      </div>
-                    </div>
-                  )
-                })}
-              <Pagination
-                page={alertsPage}
-                pageSize={ITEMS_PER_PAGE}
-                totalItems={alerts.length}
-                onPageChange={setAlertsPage}
-              />
-            </>
-          )}
-        </section>
-      ) : null}
-
-      {/* Tab: Prints Gallery */}
-      {activeTab === 'gallery' ? (
-        <section className="space-y-2.5">
-          <div className="flex items-center justify-between gap-3 mb-3">
-            <h3 className="text-sm font-semibold text-text">{t('gallery.cameraPrints')}</h3>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => void refreshGallery()}
-                className="text-xs text-text-muted hover:text-text transition-colors cursor-pointer"
-              >
-                {t('gallery.refreshLink')}
-              </button>
-              {snapshots.length > 0 ? (
-                confirmClearPrints ? (
+        {/* Tab: Alerts Feed */}
+        {activeTab === 'alerts' ? (
+          <section className="space-y-2.5">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-sm font-semibold text-text">{t('alerts.title')}</h3>
+              {alerts.length > 0 ? (
+                confirmClearAlerts ? (
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-text-muted">{t('gallery.deleteAllPrompt')}</span>
+                    <span className="text-xs text-text-muted">{t('alerts.clearPrompt')}</span>
                     <button
-                      onClick={() => void handleClearAllPrints()}
+                      onClick={() => void handleClearAlerts()}
                       className="text-xs px-2.5 py-1 rounded-md bg-error hover:bg-error/80 text-text font-medium transition-colors cursor-pointer"
                     >
-                      {t('gallery.confirmDeleteYes')}
+                      {t('alerts.confirmYes')}
                     </button>
                     <button
-                      onClick={() => setConfirmClearPrints(false)}
+                      onClick={() => setConfirmClearAlerts(false)}
                       className="text-xs px-2.5 py-1 rounded-md bg-input text-text-muted hover:text-text border border-border/40 transition-colors font-medium cursor-pointer"
                     >
                       {t('common.cancel')}
@@ -9537,70 +9579,94 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                   </div>
                 ) : (
                   <button
-                    onClick={() => setConfirmClearPrints(true)}
+                    onClick={() => setConfirmClearAlerts(true)}
                     className="text-xs text-text-muted hover:text-text transition-colors flex items-center gap-1 font-medium cursor-pointer"
                   >
                     <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                     </svg>
-                    {t('gallery.deleteAllLink')}
+                    {t('alerts.clearLink')}
                   </button>
                 )
               ) : null}
             </div>
-          </div>
-          {snapshots.length === 0 ? (
-            <div className="rounded-lg border border-border/40 bg-card/40 px-6 py-8 text-center text-xs text-text-muted">
-              {t('gallery.emptyHint')}
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 auto-rows-fr">
-                {snapshots
-                  .slice((galleryPage - 1) * ITEMS_PER_PAGE, galleryPage * ITEMS_PER_PAGE)
-                  .map((snap: Snapshot) => (
-                    <figure
-                      key={snap.id}
-                      onClick={() => setExpandedPrint(snap)}
-                      onContextMenu={(e) => handleSnapshotContextMenu(e, snap)}
-                      className="group rounded-lg overflow-hidden border border-border/40 bg-card cursor-pointer hover:border-border/70 transition-colors flex flex-col h-full select-none"
-                    >
-                      <div className="relative w-full bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
-                        <img
-                          src={
-                            snap.imageDataUri ||
-                            `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${snap.id}.jpg`)}`
-                          }
-                          alt={snap.description || t('gallery.printAlt')}
-                          loading="lazy"
-                          className="absolute inset-0 w-full h-full object-cover"
-                        />
-                        <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                          <span className="text-xs font-medium text-text bg-card/90 border border-border/40 px-2 py-1 rounded-md backdrop-blur-sm">
-                            {t('gallery.enlargePrint')}
-                          </span>
-                        </div>
-                      </div>
-                      <figcaption className="px-3 py-2 flex items-center justify-between gap-2">
+            {alerts.length === 0 ? (
+              <div className="rounded-lg border border-border/40 bg-card/40 px-6 py-8 text-center text-xs text-text-muted">
+                {t('alerts.emptyFeed')}
+              </div>
+            ) : (
+              <>
+                {alerts
+                  .slice((alertsPage - 1) * ITEMS_PER_PAGE, alertsPage * ITEMS_PER_PAGE)
+                  .map((alert: Alert) => {
+                    const imgSrc =
+                      alert.imageDataUri ||
+                      (alert.snapshotId
+                        ? `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${alert.snapshotId}.jpg`)}`
+                        : '')
+                    const cameraLabel = formatCameraName(alert.cameraName, 'webcam', t) || t('cameras.fallbackName')
+                    const classLabel = alert.className ? localizedClassLabel(alert.className, t) : ''
+                    const confidence = alert.confidence ? `${Math.round(alert.confidence * 100)}%` : ''
+                    // Descrição e trigger repetem a mesma informação ("Detectei pessoa" /
+                    // "Pessoa"); mostra só uma delas.
+                    const secondary = alert.description || (alert.triggeredBy ? localizedTriggerLabel(alert, t) : '')
+                    return (
+                      <div
+                        key={alertKey(alert)}
+                        onContextMenu={(e) => handleAlertContextMenu(e, alert)}
+                        className="flex items-center gap-3 rounded-lg border border-border/40 bg-card p-2.5 hover:border-border/70 transition-colors select-none"
+                      >
+                        {imgSrc ? (
+                          <div
+                            className="group relative w-24 h-16 rounded-md bg-black shrink-0 overflow-hidden cursor-pointer border border-border/40"
+                            onClick={() => setExpandedAlert(alert)}
+                            onContextMenu={(e) => handleAlertContextMenu(e, alert)}
+                            title={t('alerts.expandHint')}
+                          >
+                            <AlertCanvasOverlay
+                              imageDataUri={imgSrc}
+                              boxes={alert.boxes}
+                              objectFit="object-cover"
+                            />
+                            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center z-20">
+                              <span className="p-1.5 rounded-md bg-card/90 text-text border border-border/40">
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                                </svg>
+                              </span>
+                            </div>
+                          </div>
+                        ) : null}
                         <div className="min-w-0 flex-1">
-                          {snap.description ? (
-                            <p className="text-[11px] text-text truncate">{snap.description}</p>
+                          <div className="flex items-baseline gap-2">
+                            <p className="text-sm font-medium text-text truncate">
+                              {cameraLabel}
+                              {classLabel ? <span className="capitalize"> · {classLabel}</span> : null}
+                            </p>
+                            {confidence ? (
+                              <span className="text-xs text-text-muted shrink-0 tabular-nums">{confidence}</span>
+                            ) : null}
+                          </div>
+                          {secondary ? (
+                            <p className="text-xs text-text-muted truncate mt-0.5">{secondary}</p>
                           ) : null}
-                          <p className="text-[10px] text-text-muted truncate tabular-nums">
-                            {formatTime(snap.ts, locale)}
-                          </p>
                         </div>
+                        {alert.ts ? (
+                          <span className="text-xs text-text-muted shrink-0 tabular-nums">
+                            {formatTime(alert.ts, locale)}
+                          </span>
+                        ) : null}
                         <div className="flex items-center gap-0.5 shrink-0">
                           <button
                             onClick={(e) => {
                               e.stopPropagation()
-                              void handleSharePrint(snap)
+                              void handleShareAlert(alert)
                             }}
                             title={t('common.share')}
                             aria-label={t('common.share')}
-                            className="p-1 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
+                            className="p-1.5 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
                           >
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <circle cx="18" cy="5" r="3" />
                               <circle cx="6" cy="12" r="3" />
                               <circle cx="18" cy="19" r="3" />
@@ -9611,84 +9677,213 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                           <button
                             onClick={(e) => {
                               e.stopPropagation()
-                              void handleDeletePrint(snap.id)
+                              void handleDeleteAlert(alert)
                             }}
-                            title={t('gallery.deletePrint')}
-                            className="p-1 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
+                            title={t('alerts.deleteOne')}
+                            className="p-1.5 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
                           >
-                            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                               <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                             </svg>
                           </button>
                         </div>
-                      </figcaption>
-                    </figure>
-                  ))}
+                      </div>
+                    )
+                  })}
+                <Pagination
+                  page={alertsPage}
+                  pageSize={ITEMS_PER_PAGE}
+                  totalItems={alerts.length}
+                  onPageChange={setAlertsPage}
+                />
+              </>
+            )}
+          </section>
+        ) : null}
+
+        {/* Tab: Prints Gallery */}
+        {activeTab === 'gallery' ? (
+          <section className="space-y-2.5">
+            <div className="flex items-center justify-between gap-3 mb-3">
+              <h3 className="text-sm font-semibold text-text">{t('gallery.cameraPrints')}</h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => void refreshGallery()}
+                  className="text-xs text-text-muted hover:text-text transition-colors cursor-pointer"
+                >
+                  {t('gallery.refreshLink')}
+                </button>
+                {snapshots.length > 0 ? (
+                  confirmClearPrints ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-text-muted">{t('gallery.deleteAllPrompt')}</span>
+                      <button
+                        onClick={() => void handleClearAllPrints()}
+                        className="text-xs px-2.5 py-1 rounded-md bg-error hover:bg-error/80 text-text font-medium transition-colors cursor-pointer"
+                      >
+                        {t('gallery.confirmDeleteYes')}
+                      </button>
+                      <button
+                        onClick={() => setConfirmClearPrints(false)}
+                        className="text-xs px-2.5 py-1 rounded-md bg-input text-text-muted hover:text-text border border-border/40 transition-colors font-medium cursor-pointer"
+                      >
+                        {t('common.cancel')}
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmClearPrints(true)}
+                      className="text-xs text-text-muted hover:text-text transition-colors flex items-center gap-1 font-medium cursor-pointer"
+                    >
+                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      </svg>
+                      {t('gallery.deleteAllLink')}
+                    </button>
+                  )
+                ) : null}
               </div>
-              <Pagination
-                page={galleryPage}
-                pageSize={ITEMS_PER_PAGE}
-                totalItems={snapshots.length}
-                onPageChange={setGalleryPage}
-              />
-            </>
-          )}
-        </section>
-      ) : null}
+            </div>
+            {snapshots.length === 0 ? (
+              <div className="rounded-lg border border-border/40 bg-card/40 px-6 py-8 text-center text-xs text-text-muted">
+                {t('gallery.emptyHint')}
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 auto-rows-fr">
+                  {snapshots
+                    .slice((galleryPage - 1) * ITEMS_PER_PAGE, galleryPage * ITEMS_PER_PAGE)
+                    .map((snap: Snapshot) => (
+                      <figure
+                        key={snap.id}
+                        onClick={() => setExpandedPrint(snap)}
+                        onContextMenu={(e) => handleSnapshotContextMenu(e, snap)}
+                        className="group rounded-lg overflow-hidden border border-border/40 bg-card cursor-pointer hover:border-border/70 transition-colors flex flex-col h-full select-none"
+                      >
+                        <div className="relative w-full bg-black overflow-hidden shrink-0" style={{ aspectRatio: '16 / 9' }}>
+                          <img
+                            src={
+                              snap.imageDataUri ||
+                              `${window.api?.getApiBaseUrl?.() || ''}${sdk.media.url(EXT_ID, `snapshots/${snap.id}.jpg`)}`
+                            }
+                            alt={snap.description || t('gallery.printAlt')}
+                            loading="lazy"
+                            className="absolute inset-0 w-full h-full object-cover"
+                          />
+                          <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                            <span className="text-xs font-medium text-text bg-card/90 border border-border/40 px-2 py-1 rounded-md backdrop-blur-sm">
+                              {t('gallery.enlargePrint')}
+                            </span>
+                          </div>
+                        </div>
+                        <figcaption className="px-3 py-2 flex items-center justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            {snap.description ? (
+                              <p className="text-[11px] text-text truncate">{snap.description}</p>
+                            ) : null}
+                            <p className="text-[10px] text-text-muted truncate tabular-nums">
+                              {formatTime(snap.ts, locale)}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-0.5 shrink-0">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                void handleSharePrint(snap)
+                              }}
+                              title={t('common.share')}
+                              aria-label={t('common.share')}
+                              className="p-1 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
+                            >
+                              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <circle cx="18" cy="5" r="3" />
+                                <circle cx="6" cy="12" r="3" />
+                                <circle cx="18" cy="19" r="3" />
+                                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                              </svg>
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                void handleDeletePrint(snap.id)
+                              }}
+                              title={t('gallery.deletePrint')}
+                              className="p-1 text-text-muted hover:text-text hover:bg-input rounded-md transition-colors cursor-pointer"
+                            >
+                              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                              </svg>
+                            </button>
+                          </div>
+                        </figcaption>
+                      </figure>
+                    ))}
+                </div>
+                <Pagination
+                  page={galleryPage}
+                  pageSize={ITEMS_PER_PAGE}
+                  totalItems={snapshots.length}
+                  onPageChange={setGalleryPage}
+                />
+              </>
+            )}
+          </section>
+        ) : null}
 
-      {/* Tab: Settings */}
-      {activeTab === 'settings' ? (
-        <section className="w-full pb-12 animate-fadeIn">
-          <div className="mb-4">
-            <h2 className="text-sm font-semibold text-text">
-              {t('settings.title')}
-            </h2>
-            <p className="text-xs text-text-muted mt-0.5">
-              {t('settings.subtitle')}
-            </p>
-          </div>
-
-          <div className="w-full rounded-lg border border-border/40 bg-card px-6 py-5">
-            <div>
-              <h3 className="text-sm font-semibold text-text">
-                {t('settings.retention')}
-              </h3>
+        {/* Tab: Settings */}
+        {activeTab === 'settings' ? (
+          <section className="w-full pb-12 animate-fadeIn">
+            <div className="mb-4">
+              <h2 className="text-sm font-semibold text-text">
+                {t('settings.title')}
+              </h2>
               <p className="text-xs text-text-muted mt-0.5">
-                {t('settings.retentionDesc')}
+                {t('settings.subtitle')}
               </p>
             </div>
 
-            <div className="mt-5 space-y-4">
-              <div className="flex items-center justify-between gap-6">
-                <span className="text-xs text-text">{t('settings.daysLabel')}</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={90}
-                  value={config.retentionDays ?? 7}
-                  onChange={(e) => void saveSettings({ retentionDays: Number(e.target.value) || 7 })}
-                  className="w-24 bg-input border border-border/50 rounded-md px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-text-muted/60"
-                />
+            <div className="w-full rounded-lg border border-border/40 bg-card px-6 py-5">
+              <div>
+                <h3 className="text-sm font-semibold text-text">
+                  {t('settings.retention')}
+                </h3>
+                <p className="text-xs text-text-muted mt-0.5">
+                  {t('settings.retentionDesc')}
+                </p>
               </div>
-              <div className="flex items-center justify-between gap-6">
-                <span className="text-xs text-text">{t('settings.maxFilesLabel')}</span>
-                <input
-                  type="number"
-                  min={20}
-                  max={1000}
-                  value={config.maxSnapshots ?? 200}
-                  onChange={(e) => void saveSettings({ maxSnapshots: Number(e.target.value) || 200 })}
-                  className="w-24 bg-input border border-border/50 rounded-md px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-text-muted/60"
-                />
-              </div>
-            </div>
 
-            <p className="mt-5 text-[11px] text-text-muted">
-              {t('settings.localNote')}
-            </p>
-          </div>
-        </section>
-      ) : null}
+              <div className="mt-5 space-y-4">
+                <div className="flex items-center justify-between gap-6">
+                  <span className="text-xs text-text">{t('settings.daysLabel')}</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={90}
+                    value={config.retentionDays ?? 7}
+                    onChange={(e) => void saveSettings({ retentionDays: Number(e.target.value) || 7 })}
+                    className="w-24 bg-input border border-border/50 rounded-md px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-text-muted/60"
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-6">
+                  <span className="text-xs text-text">{t('settings.maxFilesLabel')}</span>
+                  <input
+                    type="number"
+                    min={20}
+                    max={1000}
+                    value={config.maxSnapshots ?? 200}
+                    onChange={(e) => void saveSettings({ maxSnapshots: Number(e.target.value) || 200 })}
+                    className="w-24 bg-input border border-border/50 rounded-md px-2.5 py-1.5 text-sm text-right text-text focus:outline-none focus:border-text-muted/60"
+                  />
+                </div>
+              </div>
+
+              <p className="mt-5 text-[11px] text-text-muted">
+                {t('settings.localNote')}
+              </p>
+            </div>
+          </section>
+        ) : null}
       </div>
 
       {/* Modals */}
@@ -9863,7 +10058,7 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
                 id: 'zone',
                 label:
                   config.detectionZones?.[target.camera.id] &&
-                  config.detectionZones[target.camera.id].length >= 3
+                    config.detectionZones[target.camera.id].length >= 3
                     ? t('cameras.zoneEditActive')
                     : t('cameras.zoneDefine'),
                 onClick: () => handleToggleEditZone(target.camera.id)
@@ -9905,35 +10100,35 @@ export default function VisionPage({ isActive: propIsActive = true }: { isActive
             ]
           })()
           : [
-              {
-                id: 'share',
-                label: t('common.share'),
-                shortcut: '',
-                onClick: () => {
-                  setContextMenu(null)
-                  if (target.type === 'snapshot') {
-                    void handleSharePrint(target.snap)
-                  } else {
-                    void handleShareAlert(target.alert)
-                  }
-                }
-              },
-              {
-                id: 'copy',
-                label: t('common.copy'),
-                shortcut: 'Ctrl+C',
-                onClick: () => void handleCopyImage(target.imgSrc)
-              },
-              {
-                id: 'delete',
-                label: t('common.delete'),
-                shortcut: 'Del',
-                danger: true,
-                onClick: () => {
-                  void handleDeleteFromContextMenu(target)
+            {
+              id: 'share',
+              label: t('common.share'),
+              shortcut: '',
+              onClick: () => {
+                setContextMenu(null)
+                if (target.type === 'snapshot') {
+                  void handleSharePrint(target.snap)
+                } else {
+                  void handleShareAlert(target.alert)
                 }
               }
-            ]
+            },
+            {
+              id: 'copy',
+              label: t('common.copy'),
+              shortcut: 'Ctrl+C',
+              onClick: () => void handleCopyImage(target.imgSrc)
+            },
+            {
+              id: 'delete',
+              label: t('common.delete'),
+              shortcut: 'Del',
+              danger: true,
+              onClick: () => {
+                void handleDeleteFromContextMenu(target)
+              }
+            }
+          ]
         return (
           <ContextMenu
             x={contextMenu.x}

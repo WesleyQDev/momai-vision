@@ -138,6 +138,8 @@
       "codecLabel": "Protocolo de video",
       "codecH264": "H.264 (Predeterminado — Estable)",
       "codecH265": "H.265 (HEVC — Menor Ancho de Banda)",
+      "economyModeLabel": "Modo Económico",
+      "economyModeHelp": "Reduce el uso de CPU en segundo plano cuando la pestaña está cerrada (1 FPS en espera, 2 FPS en monitoreo). Desactivado, mantiene el video en vivo continuo.",
       "codecHelp": "H.264 ofrece máxima compatibilidad y menor uso de CPU. H.265 reduce el ancho de banda, ideal si su cámara transmite en HEVC.",
       "addToSelection": "Agregar a la selección",
       "addHint": "Se agregará al confirmar — puedes agregar más.",

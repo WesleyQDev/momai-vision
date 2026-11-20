@@ -139,6 +139,8 @@
       "codecH264": "H.264 (Padrão — Estável)",
       "codecH265": "H.265 (HEVC — Menor Uso de Banda)",
       "codecHelp": "O H.264 oferece máxima estabilidade e menor esforço da CPU. O H.265 reduz o consumo de banda, ideal se sua câmera transmitir em HEVC.",
+      "economyModeLabel": "Modo Econômico",
+      "economyModeHelp": "Reduz o uso de CPU em segundo plano quando ninguém está vendo a aba (1 FPS em standby, 2 FPS em monitoramento). Desativado, mantém o vídeo rodando em tempo integral.",
       "addToSelection": "Adicionar à seleção",
       "addHint": "Vai entrar ao confirmar — pode adicionar mais.",
       "review": "Revisão",

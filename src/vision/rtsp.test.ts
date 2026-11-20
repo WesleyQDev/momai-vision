@@ -14,8 +14,12 @@ import {
   RTSP_CODEC_DEFAULT,
   RTSP_CODEC_OPTIONS,
   RTSP_DECODER_LOG_WINDOW_MS,
+  RTSP_MONITOR_FPS,
+  RTSP_PROFILE_DOWNGRADE_GRACE_MS,
+  RTSP_STANDBY_FPS,
   buildRtspFfmpegArgs,
   createRtspDecoderLogThrottle,
+  decideRtspProfileTransition,
   decideRtspReconnect,
   describeRtspIssue,
   isBenignRtspStderr,
@@ -27,6 +31,8 @@ import {
   resolveInitialTransport,
   resolvePreviewWidth,
   resolveRtspCodec,
+  resolveEconomyMode,
+  resolveRtspStreamProfile,
   shouldLogRetry,
   splitStderrLines
 } from './rtsp'
@@ -70,7 +76,8 @@ describe('rtsp connection policy', () => {
     const args = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif2', 'udp')
     expect(args.join(' ')).not.toContain('fps=25')
     expect(args).toContain('-fps_mode')
-    expect(args[args.indexOf('-fps_mode') + 1]).toBe('passthrough')
+    expect(args[args.indexOf('-fps_mode') + 1]).toBe('vfr')
+    expect(args).not.toContain('ignore_err')
   })
 
   it('resolves the preview width to the allowed values with a 640 default', () => {
@@ -108,6 +115,82 @@ describe('rtsp connection policy', () => {
     const h265Args = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif1', 'tcp', 640, 'h265')
     expect(h265Args).toContain('-reorder_queue_size')
     expect(h265Args[h265Args.indexOf('-reorder_queue_size') + 1]).toBe('0')
+
+    const udpH265Args = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif1', 'udp', 640, 'h265')
+    expect(udpH265Args).toContain('-reorder_queue_size')
+    expect(udpH265Args[udpH265Args.indexOf('-reorder_queue_size') + 1]).toBe('256')
+  })
+
+  it('caps fps in monitor and standby profiles while keeping full cadence in live', () => {
+    const liveArgs = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif1', 'udp', 1280, 'h265', 'live')
+    expect(liveArgs[liveArgs.indexOf('-vf') + 1]).toBe("scale=w='min(1280,iw)':h=-2")
+
+    const monitorArgs = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif1', 'udp', 1280, 'h265', 'monitor')
+    expect(monitorArgs[monitorArgs.indexOf('-vf') + 1]).toBe(
+      `fps=${RTSP_MONITOR_FPS},scale=w='min(1280,iw)':h=-2`
+    )
+
+    const standbyArgs = buildRtspFfmpegArgs('rtsp://admin:pass@192.168.0.4:554/onvif1', 'udp', 1280, 'h265', 'standby')
+    expect(standbyArgs[standbyArgs.indexOf('-vf') + 1]).toBe(
+      `fps=${RTSP_STANDBY_FPS},scale=w='min(1280,iw)':h=-2`
+    )
+  })
+
+  it('resolves stream profile from economyMode, subscribers and active monitor state', () => {
+    expect(resolveEconomyMode(true)).toBe(true)
+    expect(resolveEconomyMode(false)).toBe(false)
+    expect(resolveEconomyMode(undefined)).toBe(true)
+
+    // Without economyMode, camera always stays in live profile.
+    expect(resolveRtspStreamProfile({ subscribers: 0, hasActiveMonitor: false, economyMode: false })).toBe('live')
+    expect(resolveRtspStreamProfile({ subscribers: 0, hasActiveMonitor: true, economyMode: false })).toBe('live')
+
+    // With economyMode enabled (or omitted -> default true), profile scales by demand.
+    expect(resolveRtspStreamProfile({ subscribers: null, hasActiveMonitor: false, economyMode: true })).toBe('live')
+    expect(resolveRtspStreamProfile({ subscribers: 1, hasActiveMonitor: false, economyMode: true })).toBe('live')
+    expect(resolveRtspStreamProfile({ subscribers: 0, hasActiveMonitor: true })).toBe('monitor')
+    expect(resolveRtspStreamProfile({ subscribers: 0, hasActiveMonitor: false })).toBe('standby')
+  })
+
+  it('promotes to live immediately and holds downgrade during grace period', () => {
+    expect(
+      decideRtspProfileTransition({
+        currentProfile: 'standby',
+        desiredProfile: 'live',
+        lastLiveAt: 0,
+        now: 10_000
+      })
+    ).toEqual({ nextProfile: 'live', switchNow: true })
+
+    // Boot case: never had a live subscriber (lastLiveAt === 0) -> downgrade immediately.
+    expect(
+      decideRtspProfileTransition({
+        currentProfile: 'live',
+        desiredProfile: 'standby',
+        lastLiveAt: 0,
+        now: 1_000
+      })
+    ).toEqual({ nextProfile: 'standby', switchNow: true })
+
+    // Within grace period after a viewer left -> stay live.
+    expect(
+      decideRtspProfileTransition({
+        currentProfile: 'live',
+        desiredProfile: 'monitor',
+        lastLiveAt: 10_000,
+        now: 10_000 + RTSP_PROFILE_DOWNGRADE_GRACE_MS - 1
+      })
+    ).toEqual({ nextProfile: 'live', switchNow: false })
+
+    // After grace period -> downgrade.
+    expect(
+      decideRtspProfileTransition({
+        currentProfile: 'live',
+        desiredProfile: 'monitor',
+        lastLiveAt: 10_000,
+        now: 10_000 + RTSP_PROFILE_DOWNGRADE_GRACE_MS
+      })
+    ).toEqual({ nextProfile: 'monitor', switchNow: true })
   })
 
   it('bounds the first-frame wait so a silent UDP stall cannot hang forever', () => {

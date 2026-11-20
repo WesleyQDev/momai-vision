@@ -55,4 +55,33 @@ describe('EditCameraModal — preview width and codec', () => {
     const dialog = screen.getByRole('dialog')
     expect(dialog.className).toContain('w-full h-full max-w-none max-h-none rounded-none border-0')
   })
+
+  it('defaults economy mode to active, moves knob on toggle, saves false, and toggles help balloon', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    render(<EditCameraModal target={IP_TARGET} onClose={() => {}} onSave={onSave} />)
+
+    const toggle = screen.getByRole('switch', { name: /Modo Econômico|Economy Mode/i })
+    expect(toggle.getAttribute('aria-checked')).toBe('true')
+    const knob = toggle.querySelector('span') as HTMLSpanElement
+    expect(knob.style.transform).toBe('translateX(18px)')
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    expect(knob.style.transform).toBe('translateX(2px)')
+
+    fireEvent.click(screen.getByRole('button', { name: /Salvar|Save/i }))
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith(
+        IP_TARGET.id,
+        expect.objectContaining({ economyMode: false })
+      )
+    )
+
+    const helpBtn = screen.getByRole('button', { name: /Modo Econômico|Economy Mode/i })
+    expect(screen.queryByRole('status')).toBeNull()
+    fireEvent.click(helpBtn)
+    expect(screen.getByRole('status')).toBeTruthy()
+    fireEvent.click(helpBtn)
+    expect(screen.queryByRole('status')).toBeNull()
+  })
 })
